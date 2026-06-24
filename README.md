@@ -8,7 +8,7 @@ The model is intentionally simple:
 
 - A main repo commits a `.sidecar` file.
 - The sidecar repo is cloned into `./sidecar` and gitignored by the main repo.
-- Local changes are committed and pushed to `sidecar-inbox/<user>/<host>`.
+- Local changes are committed and pushed to `sidecar-inbox/<user>/<random>`.
 - A merge command folds inbox branches into canonical `main`.
 - Conflicted files can be forked into explicit per-branch versions with
   `sidecar merge --fork-files`.
@@ -22,10 +22,10 @@ sidecar status
 sidecar watch
 ```
 
-In another shell, or in automation:
+When you want to consolidate inbox branches:
 
 ```sh
-sidecar merge --fork-files --delete-merged-inbox
+sidecar merge --fork-files
 ```
 
 ## `.sidecar`
@@ -37,10 +37,13 @@ version = 1
 remote = "git@github.com:org/my-repo-sidecar.git"
 path = "sidecar"
 branch = "main"
-inbox = "sidecar-inbox/{user}/{host}"
+inbox = "sidecar-inbox/{user}/{random}"
 ```
 
-`{user}` and `{host}` are expanded by the CLI and sanitized for Git branch names.
+`{user}`, `{host}`, and `{random}` are expanded by the CLI and sanitized for Git
+branch names. `{random}` is generated once per sidecar checkout and stored under
+the sidecar repo's Git metadata, so multiple clones on the same machine get
+separate inbox branches.
 
 ## Commands
 
@@ -51,11 +54,14 @@ sidecar status
 sidecar snapshot [--push]
 sidecar push
 sidecar watch [--debounce 30] [--interval 2] [--max-interval 300]
-sidecar merge [--fork-files] [--delete-merged-inbox] [--no-push]
+sidecar merge [--fork-files] [--no-push]
 ```
 
 `sidecar push` snapshots local sidecar changes and pushes them to the configured
-inbox branch.
+inbox branch. Before snapshotting, `sidecar` best-effort redacts common secrets
+and PII from text files, including API keys, bearer tokens, secret/password
+assignments, email addresses, phone numbers, SSNs, and credit-card-looking
+values. Binary and non-UTF-8 files are left untouched.
 
 `sidecar watch` polls for file changes. It waits for a quiet period before
 snapshotting and pushing, and it also flushes changes after the max interval if
@@ -67,11 +73,15 @@ as:
 
 ```text
 notes/plan.conflict.main.abc1234.md
-notes/plan.conflict.sidecar-inbox-zack-mbp.def5678.md
+notes/plan.conflict.sidecar-inbox-zack-79ffcdaf92aa.def5678.md
 ```
 
 The original conflicted path is removed from the merge commit, and a JSON
 manifest is written under `.sidecar-conflicts/`.
+
+Merged inbox branches are kept on the remote. Future merges skip branches whose
+current tip is already contained in canonical `main`, and merge them again only
+when new commits appear.
 
 ## LLM resolution
 
@@ -93,3 +103,11 @@ sidecar merge --fork-files
 ```
 
 and clean up the forked files manually or with a future interactive resolver.
+
+## Development
+
+```sh
+npm install
+npm test
+npm run build
+```

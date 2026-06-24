@@ -2,4 +2,4 @@ version = 1
 remote = "git@github.com:rt2zz/sidecar-sidecar.git"
 path = "sidecar"
 branch = "main"
-inbox = "sidecar-inbox/{user}/{host}"
+inbox = "sidecar-inbox/{user}/{random}"

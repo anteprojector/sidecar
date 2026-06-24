@@ -1,0 +1,28 @@
+{
+  "name": "git-sidecar",
+  "version": "0.1.0",
+  "description": "A Git-backed sidecar inbox for repo-local development metadata.",
+  "type": "module",
+  "bin": {
+    "sidecar": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "prepare": "npm run build",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.8"
+  }
+}
