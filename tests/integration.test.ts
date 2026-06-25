@@ -53,10 +53,31 @@ describe("sidecar CLI integration", () => {
     );
     expect(fs.readFileSync(path.join(main, ".gitignore"), "utf8")).toContain("/sidecar/");
     expect(fs.existsSync(path.join(main, "sidecar", ".git"))).toBe(true);
+    expect(fs.existsSync(path.join(main, "package.json"))).toBe(false);
     expect(gitRaw(["--git-dir", remote, "rev-parse", "--verify", "refs/heads/main"]).status).toBe(0);
 
     const inbox = git(path.join(main, "sidecar"), ["branch", "--show-current"]).stdout.trim();
     expect(inbox).toMatch(/^sidecar-inbox\/.+\/[a-f0-9]{12}$/);
+  });
+
+  test("init adds sidecar as a dev dependency when package.json exists", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    const stateDir = tempDir();
+    fs.writeFileSync(
+      path.join(main, "package.json"),
+      JSON.stringify({ name: "app", dependencies: { leftpad: "1.0.0" } }, null, 2),
+      "utf8",
+    );
+
+    const output = runSidecar(["init", remote, "--no-clone"], main, { SIDECAR_STATE_DIR: stateDir });
+
+    expect(output).toContain("added devDependency @anteprojector/sidecar");
+    const manifest = JSON.parse(fs.readFileSync(path.join(main, "package.json"), "utf8"));
+    expect(manifest.dependencies).toEqual({ leftpad: "1.0.0" });
+    expect(manifest.devDependencies["@anteprojector/sidecar"]).toBe("github:anteprojector/sidecar");
+    const instances = JSON.parse(fs.readFileSync(path.join(stateDir, "instances.json"), "utf8"));
+    expect(instances).toHaveLength(1);
   });
 
   test("init supports sidecar paths outside the main repo without adding a gitignore entry", () => {

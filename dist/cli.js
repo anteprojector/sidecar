@@ -1037,6 +1037,7 @@ var DEFAULT_PATH = "sidecar";
 var DEFAULT_BRANCH = "main";
 var DEFAULT_INBOX = "sidecar-inbox/{user}/{random}";
 var PACKAGE_NAME = "@anteprojector/sidecar";
+var PACKAGE_SPEC = "github:anteprojector/sidecar";
 var GLOBAL_EXEC_ENV = "SIDECAR_GLOBAL_EXEC";
 var STATE_DIR_ENV = "SIDECAR_STATE_DIR";
 var SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE";
@@ -1154,6 +1155,7 @@ function cmdInit(args) {
     cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   }
   registerCurrentInstance(root, config, { event: "init" });
+  addSidecarDevDependency(root);
   return 0;
 }
 function cmdClone(args) {
@@ -2262,6 +2264,47 @@ function projectDependsOnSidecar(projectRoot) {
   } catch {
     return false;
   }
+}
+function addSidecarDevDependency(root) {
+  const manifestPath = path.join(root, "package.json");
+  if (!fs.existsSync(manifestPath))
+    return;
+  let manifest;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new SidecarError(`${manifestPath} must contain a JSON object`);
+    }
+    manifest = parsed;
+  } catch (error) {
+    if (error instanceof SidecarError)
+      throw error;
+    throw new SidecarError(`could not read ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const spec = dependencySpec(manifest.devDependencies) ?? dependencySpec(manifest.dependencies) ?? dependencySpec(manifest.optionalDependencies) ?? dependencySpec(manifest.peerDependencies) ?? PACKAGE_SPEC;
+  manifest.devDependencies = {
+    ...objectValue(manifest.devDependencies),
+    [PACKAGE_NAME]: spec
+  };
+  removeDependency(manifest.dependencies);
+  removeDependency(manifest.optionalDependencies);
+  removeDependency(manifest.peerDependencies);
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}
+`, "utf8");
+  console.log(`added devDependency ${PACKAGE_NAME}`);
+}
+function dependencySpec(value) {
+  const dependencies = objectValue(value);
+  const spec = dependencies[PACKAGE_NAME];
+  return typeof spec === "string" && spec ? spec : undefined;
+}
+function removeDependency(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    delete value[PACKAGE_NAME];
+  }
+}
+function objectValue(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function loadProject() {
   const root = findConfigRoot(process.cwd());

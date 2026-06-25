@@ -14,6 +14,7 @@ export const DEFAULT_PATH = "sidecar";
 export const DEFAULT_BRANCH = "main";
 export const DEFAULT_INBOX = "sidecar-inbox/{user}/{random}";
 const PACKAGE_NAME = "@anteprojector/sidecar";
+const PACKAGE_SPEC = "github:anteprojector/sidecar";
 const GLOBAL_EXEC_ENV = "SIDECAR_GLOBAL_EXEC";
 const STATE_DIR_ENV = "SIDECAR_STATE_DIR";
 const SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE";
@@ -187,6 +188,7 @@ function cmdInit(args: string[]): number {
     cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   }
   registerCurrentInstance(root, config, { event: "init" });
+  addSidecarDevDependency(root);
   return 0;
 }
 
@@ -1457,6 +1459,57 @@ function projectDependsOnSidecar(projectRoot: string): boolean {
   } catch {
     return false;
   }
+}
+
+function addSidecarDevDependency(root: string): void {
+  const manifestPath = path.join(root, "package.json");
+  if (!fs.existsSync(manifestPath)) return;
+
+  let manifest: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new SidecarError(`${manifestPath} must contain a JSON object`);
+    }
+    manifest = parsed as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof SidecarError) throw error;
+    throw new SidecarError(`could not read ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const spec =
+    dependencySpec(manifest.devDependencies) ??
+    dependencySpec(manifest.dependencies) ??
+    dependencySpec(manifest.optionalDependencies) ??
+    dependencySpec(manifest.peerDependencies) ??
+    PACKAGE_SPEC;
+
+  manifest.devDependencies = {
+    ...objectValue(manifest.devDependencies),
+    [PACKAGE_NAME]: spec,
+  };
+  removeDependency(manifest.dependencies);
+  removeDependency(manifest.optionalDependencies);
+  removeDependency(manifest.peerDependencies);
+
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  console.log(`added devDependency ${PACKAGE_NAME}`);
+}
+
+function dependencySpec(value: unknown): string | undefined {
+  const dependencies = objectValue(value);
+  const spec = dependencies[PACKAGE_NAME];
+  return typeof spec === "string" && spec ? spec : undefined;
+}
+
+function removeDependency(value: unknown): void {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    delete (value as Record<string, unknown>)[PACKAGE_NAME];
+  }
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 export function loadProject(): [string, SidecarConfig] {
