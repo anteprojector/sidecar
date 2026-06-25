@@ -12,9 +12,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && bun build src/bin.ts --target=node --format=esm --outfile=dist/cli.js",
     "check": "tsc --noEmit -p tsconfig.json",
-    "prepare": "npm run build",
     "pretest": "npm run build",
     "test": "vitest run"
   },

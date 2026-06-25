@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+
+// src/cli.ts
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -6,46 +8,111 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { TextDecoder } from "node:util";
 
-import { redactText } from "./redaction.js";
+// src/redaction.ts
+var KEY_NAME_PATTERN = String.raw`[A-Za-z_][A-Za-z0-9_-]*`;
+var QUOTED_KEY_SECRET_REGEX = new RegExp(String.raw`(["'])(${KEY_NAME_PATTERN})\1(\s*:\s*)(["'])([^"'\r\n]+)(\4)`, "g");
+var ASSIGNMENT_SECRET_REGEX = new RegExp(String.raw`\b(${KEY_NAME_PATTERN})(\s*[:=]\s*)(["']?)([^\s"',;` + "`" + String.raw`]+)(\3)`, "g");
+var AUTHORIZATION_HEADER_REGEX = /\b(authorization\s*:\s*bearer\s+)([^\s"',;`]+)/gi;
+var BARE_BEARER_TOKEN_REGEX = /\b(Bearer\s+)(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9._~+/-]{20,})\b/g;
+var TOKEN_PATTERNS = [
+  [/\bAKIA[0-9A-Z]{16}\b/g, "<API_KEY>"],
+  [/\bsk-ant-[A-Za-z0-9_-]{16,}\b/g, "<API_KEY>"],
+  [/\bsk-[A-Za-z0-9_-]{16,}\b/g, "<API_KEY>"],
+  [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b/g, "<TOKEN>"],
+  [/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "<TOKEN>"],
+  [/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "<TOKEN>"],
+  [/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "<TOKEN>"]
+];
+var EMAIL_REGEX = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+var PHONE_REGEX = /\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b/g;
+var SSN_REGEX = /\b\d{3}-\d{2}-\d{4}\b/g;
+var CREDIT_CARD_CANDIDATE_REGEX = /\b(?:\d[ -]*?){13,19}\b/g;
+function redactText(input) {
+  let output = input.replace(AUTHORIZATION_HEADER_REGEX, (_match, prefix) => `${prefix}<TOKEN>`).replace(BARE_BEARER_TOKEN_REGEX, (_match, prefix) => `${prefix}<TOKEN>`).replace(QUOTED_KEY_SECRET_REGEX, (match, keyQuote, key, separator, valueQuote, _value) => isSensitiveKey(key) ? `${keyQuote}${key}${keyQuote}${separator}${valueQuote}${placeholderForKey(key)}${valueQuote}` : match).replace(ASSIGNMENT_SECRET_REGEX, (match, key, separator, quote) => isSensitiveKey(key) ? `${key}${separator}${quote}${placeholderForKey(key)}${quote}` : match);
+  for (const [pattern, replacement] of TOKEN_PATTERNS) {
+    output = output.replace(pattern, replacement);
+  }
+  return output.replace(EMAIL_REGEX, "<EMAIL>").replace(PHONE_REGEX, "<PHONENUMBER>").replace(SSN_REGEX, "<SSN>").replace(CREDIT_CARD_CANDIDATE_REGEX, (candidate) => isLikelyCreditCard(candidate) ? "<CREDITCARD>" : candidate);
+}
+function placeholderForKey(key) {
+  if (/api[_-]?key/i.test(key))
+    return "<API_KEY>";
+  if (/password|passwd|pwd|passphrase|secret|private/i.test(key))
+    return "<SECRET>";
+  return "<TOKEN>";
+}
+function isSensitiveKey(key) {
+  const normalized = key.replace(/-/g, "_");
+  const lower = normalized.toLowerCase();
+  const compact = lower.replace(/_/g, "");
+  const compactSensitive = new Set([
+    "apikey",
+    "accesstoken",
+    "refreshtoken",
+    "idtoken",
+    "authtoken",
+    "githubtoken",
+    "bearertoken",
+    "clientsecret",
+    "secretkey",
+    "privatekey",
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "token",
+    "secret"
+  ]);
+  if (compactSensitive.has(compact))
+    return true;
+  const parts = normalized.toUpperCase().split("_").filter(Boolean);
+  const last = parts.at(-1);
+  if (["PASSWORD", "PASSWD", "PWD", "PASSPHRASE", "TOKEN", "SECRET"].includes(last ?? "")) {
+    return true;
+  }
+  if (parts.includes("API") && parts.includes("KEY"))
+    return true;
+  if (parts.includes("ACCESS") && parts.includes("TOKEN"))
+    return true;
+  if (parts.includes("REFRESH") && parts.includes("TOKEN"))
+    return true;
+  if (parts.includes("SECRET") && (parts.includes("KEY") || parts.includes("ACCESS")))
+    return true;
+  if (parts.includes("PRIVATE") && parts.includes("KEY"))
+    return true;
+  return false;
+}
+function isLikelyCreditCard(value) {
+  const digits = value.replace(/\D/g, "");
+  if (digits.length < 13 || digits.length > 19)
+    return false;
+  let sum = 0;
+  let doubleDigit = false;
+  for (let index = digits.length - 1;index >= 0; index -= 1) {
+    let digit = Number(digits[index]);
+    if (doubleDigit) {
+      digit *= 2;
+      if (digit > 9)
+        digit -= 9;
+    }
+    sum += digit;
+    doubleDigit = !doubleDigit;
+  }
+  return sum % 10 === 0;
+}
 
-export const DEFAULT_PATH = "sidecar";
-export const DEFAULT_BRANCH = "main";
-export const DEFAULT_INBOX = "sidecar-inbox/{user}/{random}";
+// src/cli.ts
+var DEFAULT_PATH = "sidecar";
+var DEFAULT_BRANCH = "main";
+var DEFAULT_INBOX = "sidecar-inbox/{user}/{random}";
 
-export class SidecarError extends Error {
-  constructor(message: string) {
+class SidecarError extends Error {
+  constructor(message) {
     super(message);
     this.name = "SidecarError";
   }
 }
-
-export type SidecarConfig = {
-  remote: string;
-  version: number;
-  path: string;
-  branch: string;
-  inbox: string;
-};
-
-type GitResult = {
-  status: number;
-  stdout: string;
-  stderr: string;
-};
-
-type GitBytesResult = {
-  status: number;
-  stdout: Buffer;
-  stderr: Buffer;
-};
-
-type ParsedOptions = {
-  flags: Set<string>;
-  values: Map<string, string>;
-  positional: string[];
-};
-
-export function main(argv = process.argv.slice(2)): number {
+function main(argv = process.argv.slice(2)) {
   try {
     return run(argv);
   } catch (error) {
@@ -60,14 +127,12 @@ export function main(argv = process.argv.slice(2)): number {
     throw error;
   }
 }
-
-function run(argv: string[]): number {
+function run(argv) {
   const [command, ...rest] = argv;
   if (!command || command === "--help" || command === "-h") {
     printUsage();
     return command ? 0 : 1;
   }
-
   switch (command) {
     case "init":
       return cmdInit(rest);
@@ -87,8 +152,7 @@ function run(argv: string[]): number {
       throw new SidecarError(`unknown command ${JSON.stringify(command)}`);
   }
 }
-
-function printUsage(): void {
+function printUsage() {
   console.error(`usage: sidecar <command> [options]
 
 commands:
@@ -100,53 +164,48 @@ commands:
   watch [--debounce 30] [--interval 2] [--max-interval 300]
   merge [--fork-files] [--no-push]`);
 }
-
-function cmdInit(args: string[]): number {
+function cmdInit(args) {
   const parsed = parseOptions(args, {
     boolean: new Set(["--no-clone", "--no-bootstrap-main"]),
-    value: new Set(["--path", "--branch", "--inbox"]),
+    value: new Set(["--path", "--branch", "--inbox"])
   });
   const remote = parsed.positional[0];
   if (!remote || parsed.positional.length > 1) {
     throw new SidecarError("usage: sidecar init <remote> [--path sidecar] [--branch main] [--inbox template]");
   }
-
   const root = gitToplevel(process.cwd());
-  const config: SidecarConfig = {
+  const config = {
     remote,
     version: 1,
     path: getValue(parsed, "--path", DEFAULT_PATH),
     branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
-    inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
+    inbox: getValue(parsed, "--inbox", DEFAULT_INBOX)
   };
   validateBranch(config.branch);
   writeConfig(path.join(root, ".sidecar"), config);
   ensureGitignoreEntry(path.join(root, ".gitignore"), config.path);
   console.log(`wrote ${path.join(root, ".sidecar")}`);
   console.log(`ignored ${config.path.replace(/\/+$/, "")}/`);
-
   if (!parsed.flags.has("--no-clone")) {
     cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   }
   return 0;
 }
-
-function cmdClone(args: string[]): number {
+function cmdClone(args) {
   const parsed = parseOptions(args, {
     boolean: new Set(["--no-bootstrap-main"]),
-    value: new Set(),
+    value: new Set
   });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar clone [--no-bootstrap-main]");
-
+  if (parsed.positional.length)
+    throw new SidecarError("usage: sidecar clone [--no-bootstrap-main]");
   const [root, config] = loadProject();
   cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   return 0;
 }
-
-function cmdStatus(args: string[]): number {
-  const parsed = parseOptions(args, { boolean: new Set(), value: new Set() });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar status");
-
+function cmdStatus(args) {
+  const parsed = parseOptions(args, { boolean: new Set, value: new Set });
+  if (parsed.positional.length)
+    throw new SidecarError("usage: sidecar status");
   const [root, config] = loadProject();
   const sidecarPath = resolveSidecarPath(root, config);
   const checkoutPresent = hasGitMetadata(sidecarPath);
@@ -156,43 +215,34 @@ function cmdStatus(args: string[]): number {
   console.log(`remote:       ${config.remote}`);
   console.log(`main branch:  ${config.branch}`);
   console.log(`inbox branch: ${inbox}`);
-
   if (!checkoutPresent) {
     console.log("checkout:     missing");
     return 0;
   }
-
   const branch = git(sidecarPath, ["branch", "--show-current"]).stdout.trim();
   const dirty = Boolean(git(sidecarPath, ["status", "--porcelain"]).stdout.trim());
   console.log("checkout:     present");
   console.log(`branch:       ${branch || "(detached)"}`);
   console.log(`dirty:        ${dirty ? "yes" : "no"}`);
-
   fetch(sidecarPath, true, false);
-  const base = remoteRefExists(sidecarPath, config.branch)
-    ? `origin/${config.branch}`
-    : branchExists(sidecarPath, config.branch)
-      ? config.branch
-      : "HEAD";
-  const pending = pendingInboxBranches(sidecarPath, config).filter(
-    (remoteBranch) => !isAncestor(sidecarPath, remoteBranch, base),
-  );
+  const base = remoteRefExists(sidecarPath, config.branch) ? `origin/${config.branch}` : branchExists(sidecarPath, config.branch) ? config.branch : "HEAD";
+  const pending = pendingInboxBranches(sidecarPath, config).filter((remoteBranch) => !isAncestor(sidecarPath, remoteBranch, base));
   if (pending.length) {
     console.log("pending inbox:");
-    for (const branchName of pending) console.log(`  ${branchName}`);
+    for (const branchName of pending)
+      console.log(`  ${branchName}`);
   } else {
     console.log("pending inbox: none");
   }
   return 0;
 }
-
-function cmdSnapshot(args: string[]): number {
+function cmdSnapshot(args) {
   const parsed = parseOptions(args, {
     boolean: new Set(["--push"]),
-    value: new Set(["-m", "--message"]),
+    value: new Set(["-m", "--message"])
   });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar snapshot [--push] [-m message]");
-
+  if (parsed.positional.length)
+    throw new SidecarError("usage: sidecar snapshot [--push] [-m message]");
   const [root, config] = loadProject();
   const sidecarPath = requireSidecarCheckout(root, config);
   const inbox = expandInbox(config, sidecarPath);
@@ -205,14 +255,13 @@ function cmdSnapshot(args: string[]): number {
   }
   return 0;
 }
-
-function cmdPush(args: string[]): number {
+function cmdPush(args) {
   const parsed = parseOptions(args, {
     boolean: new Set(["--no-snapshot"]),
-    value: new Set(["-m", "--message"]),
+    value: new Set(["-m", "--message"])
   });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar push [--no-snapshot] [-m message]");
-
+  if (parsed.positional.length)
+    throw new SidecarError("usage: sidecar push [--no-snapshot] [-m message]");
   const [root, config] = loadProject();
   const sidecarPath = requireSidecarCheckout(root, config);
   const inbox = expandInbox(config, sidecarPath);
@@ -226,34 +275,32 @@ function cmdPush(args: string[]): number {
   pushBranch(sidecarPath, inbox);
   return 0;
 }
-
-function cmdWatch(args: string[]): number {
+function cmdWatch(args) {
   const parsed = parseOptions(args, {
-    boolean: new Set(),
-    value: new Set(["--debounce", "--interval", "--max-interval"]),
+    boolean: new Set,
+    value: new Set(["--debounce", "--interval", "--max-interval"])
   });
   if (parsed.positional.length) {
     throw new SidecarError("usage: sidecar watch [--debounce 30] [--interval 2] [--max-interval 300]");
   }
-
   const debounce = Number(getValue(parsed, "--debounce", "30"));
   const interval = Number(getValue(parsed, "--interval", "2"));
   const maxInterval = Number(getValue(parsed, "--max-interval", "300"));
-  if (!Number.isFinite(debounce) || debounce < 0) throw new SidecarError("--debounce must be >= 0");
-  if (!Number.isFinite(interval) || interval <= 0) throw new SidecarError("--interval must be > 0");
-  if (!Number.isFinite(maxInterval) || maxInterval <= 0) throw new SidecarError("--max-interval must be > 0");
-
+  if (!Number.isFinite(debounce) || debounce < 0)
+    throw new SidecarError("--debounce must be >= 0");
+  if (!Number.isFinite(interval) || interval <= 0)
+    throw new SidecarError("--interval must be > 0");
+  if (!Number.isFinite(maxInterval) || maxInterval <= 0)
+    throw new SidecarError("--max-interval must be > 0");
   const [root, config] = loadProject();
   const sidecarPath = requireSidecarCheckout(root, config);
   const inbox = expandInbox(config, sidecarPath);
   ensureCommitIdentity(sidecarPath);
   ensureInboxBranch(sidecarPath, config, inbox);
-
   console.log(`watching ${sidecarPath} -> ${inbox}`);
   let lastSignature = treeSignature(sidecarPath);
-  let firstDirtyAt: number | undefined;
-  let lastChangeAt: number | undefined;
-
+  let firstDirtyAt;
+  let lastChangeAt;
   while (true) {
     sleep(interval * 1000);
     const signature = treeSignature(sidecarPath);
@@ -264,9 +311,8 @@ function cmdWatch(args: string[]): number {
       lastChangeAt = now;
       continue;
     }
-
-    if (firstDirtyAt === undefined || lastChangeAt === undefined) continue;
-
+    if (firstDirtyAt === undefined || lastChangeAt === undefined)
+      continue;
     const quietFor = now - lastChangeAt;
     const dirtyFor = now - firstDirtyAt;
     if (quietFor >= debounce || dirtyFor >= maxInterval) {
@@ -281,13 +327,13 @@ function cmdWatch(args: string[]): number {
     }
   }
 }
-
-function cmdMerge(args: string[]): number {
+function cmdMerge(args) {
   const parsed = parseOptions(args, {
     boolean: new Set(["--fork-files", "--llm", "--delete-merged-inbox", "--no-push"]),
-    value: new Set(),
+    value: new Set
   });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar merge [--fork-files] [--no-push]");
+  if (parsed.positional.length)
+    throw new SidecarError("usage: sidecar merge [--fork-files] [--no-push]");
   if (parsed.flags.has("--llm")) {
     throw new SidecarError("--llm is reserved for a configured resolver; use --fork-files for now");
   }
@@ -297,58 +343,43 @@ function cmdMerge(args: string[]): number {
   if (!parsed.flags.has("--fork-files")) {
     console.log("sidecar: conflicts will stop the merge; pass --fork-files to preserve all versions");
   }
-
   const [root, config] = loadProject();
   const sidecarPath = requireSidecarCheckout(root, config);
   ensureClean(sidecarPath);
   ensureCommitIdentity(sidecarPath);
   fetch(sidecarPath, false);
   ensureMainBranch(sidecarPath, config);
-
-  const inboxBranches = pendingInboxBranches(sidecarPath, config).filter(
-    (remoteBranch) => !isAncestor(sidecarPath, remoteBranch, "HEAD"),
-  );
+  const inboxBranches = pendingInboxBranches(sidecarPath, config).filter((remoteBranch) => !isAncestor(sidecarPath, remoteBranch, "HEAD"));
   if (!inboxBranches.length) {
     console.log("no inbox branches to merge");
     return 0;
   }
-
-  const merged: string[] = [];
+  const merged = [];
   for (const remoteBranch of inboxBranches) {
     console.log(`merging ${remoteBranch}`);
-    const result = git(
-      sidecarPath,
-      ["merge", "--no-ff", "-m", `Merge ${remoteBranch}`, remoteBranch],
-      { check: false },
-    );
+    const result = git(sidecarPath, ["merge", "--no-ff", "-m", `Merge ${remoteBranch}`, remoteBranch], { check: false });
     if (result.status === 0) {
       merged.push(remoteBranch);
       continue;
     }
-
     if (!hasUnmergedPaths(sidecarPath)) {
       throw new SidecarError(result.stderr.trim() || `merge failed for ${remoteBranch}`);
     }
-
     if (!parsed.flags.has("--fork-files")) {
       git(sidecarPath, ["merge", "--abort"], { check: false });
       throw new SidecarError(`merge conflict in ${remoteBranch}; rerun with --fork-files`);
     }
-
     forkConflicts(sidecarPath, remoteBranch);
     git(sidecarPath, ["commit", "-m", `Merge ${remoteBranch} with forked conflict files`]);
     merged.push(remoteBranch);
   }
-
   if (!parsed.flags.has("--no-push")) {
     pushBranch(sidecarPath, config.branch);
   }
-
   console.log(`merged ${merged.length} inbox branch(es)`);
   return 0;
 }
-
-export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain: boolean): void {
+function cloneOrUpdate(root, config, bootstrapMain) {
   const sidecarPath = resolveSidecarPath(root, config);
   if (fs.existsSync(sidecarPath) && !hasGitMetadata(sidecarPath)) {
     if (fs.readdirSync(sidecarPath).length) {
@@ -356,7 +387,6 @@ export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain
     }
     fs.rmdirSync(sidecarPath);
   }
-
   if (!fs.existsSync(sidecarPath)) {
     gitRaw(["clone", config.remote, sidecarPath]);
   } else if (hasGitMetadata(sidecarPath)) {
@@ -370,18 +400,16 @@ export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain
   } else {
     throw new SidecarError(`${sidecarPath} is not usable as a sidecar checkout`);
   }
-
   ensureCommitIdentity(sidecarPath);
-  if (bootstrapMain) bootstrapMainBranch(sidecarPath, config);
-
+  if (bootstrapMain)
+    bootstrapMainBranch(sidecarPath, config);
   const inbox = expandInbox(config, sidecarPath);
   ensureInboxBranch(sidecarPath, config, inbox);
   console.log(`sidecar checkout ready at ${sidecarPath}`);
 }
-
-export function bootstrapMainBranch(repo: string, config: SidecarConfig): void {
-  if (remoteRefExists(repo, config.branch)) return;
-
+function bootstrapMainBranch(repo, config) {
+  if (remoteRefExists(repo, config.branch))
+    return;
   if (hasAnyCommit(repo)) {
     const current = git(repo, ["branch", "--show-current"]).stdout.trim();
     if (current !== config.branch) {
@@ -394,19 +422,16 @@ export function bootstrapMainBranch(repo: string, config: SidecarConfig): void {
     pushBranch(repo, config.branch);
     return;
   }
-
   git(repo, ["switch", "--orphan", config.branch]);
-  fs.writeFileSync(
-    path.join(repo, "README.md"),
-    "# Sidecar\n\nCanonical sidecar state for this repository.\n",
-    "utf8",
-  );
+  fs.writeFileSync(path.join(repo, "README.md"), `# Sidecar
+
+Canonical sidecar state for this repository.
+`, "utf8");
   git(repo, ["add", "README.md"]);
   git(repo, ["commit", "-m", "Initialize sidecar"]);
   pushBranch(repo, config.branch);
 }
-
-export function ensureMainBranch(repo: string, config: SidecarConfig): void {
+function ensureMainBranch(repo, config) {
   if (branchExists(repo, config.branch)) {
     git(repo, ["switch", config.branch]);
   } else if (remoteRefExists(repo, config.branch)) {
@@ -417,53 +442,44 @@ export function ensureMainBranch(repo: string, config: SidecarConfig): void {
     bootstrapMainBranch(repo, config);
     return;
   }
-
   if (remoteRefExists(repo, config.branch)) {
     git(repo, ["merge", "--ff-only", `origin/${config.branch}`]);
   }
 }
-
-export function ensureInboxBranch(repo: string, config: SidecarConfig, inbox: string): void {
+function ensureInboxBranch(repo, config, inbox) {
   const current = git(repo, ["branch", "--show-current"]).stdout.trim();
-  if (current === inbox) return;
-
+  if (current === inbox)
+    return;
   if (branchExists(repo, inbox)) {
     git(repo, ["switch", inbox]);
     return;
   }
-
   if (remoteRefExists(repo, inbox)) {
     git(repo, ["switch", "-c", inbox, "--track", `origin/${inbox}`]);
     return;
   }
-
   if (remoteRefExists(repo, config.branch)) {
     git(repo, ["switch", "-c", inbox, `origin/${config.branch}`]);
     return;
   }
-
   if (branchExists(repo, config.branch)) {
     git(repo, ["switch", "-c", inbox, config.branch]);
     return;
   }
-
   if (hasAnyCommit(repo)) {
     git(repo, ["switch", "-c", inbox]);
     return;
   }
-
   bootstrapMainBranch(repo, config);
   git(repo, ["switch", "-c", inbox, config.branch]);
 }
-
-export function snapshot(repo: string, mainRoot: string, inbox: string, message = "sidecar snapshot"): boolean {
+function snapshot(repo, mainRoot, inbox, message = "sidecar snapshot") {
   scrubSidecarTree(repo);
   git(repo, ["add", "-A"]);
   if (git(repo, ["diff", "--cached", "--quiet"], { check: false }).status === 0) {
     console.log("no sidecar changes to snapshot");
     return false;
   }
-
   const mainHead = git(mainRoot, ["rev-parse", "--short", "HEAD"], { check: false });
   const mainHeadText = mainHead.status === 0 ? mainHead.stdout.trim() : "unborn";
   const source = `${currentUser()}@${currentHost()}`;
@@ -472,104 +488,92 @@ export function snapshot(repo: string, mainRoot: string, inbox: string, message 
     "",
     `source: ${source}`,
     `main-head: ${mainHeadText}`,
-    `inbox: ${inbox}`,
+    `inbox: ${inbox}`
   ];
-  git(repo, ["commit", "-m", body.join("\n")]);
+  git(repo, ["commit", "-m", body.join(`
+`)]);
   console.log(`committed sidecar snapshot to ${inbox}`);
   return true;
 }
-
-export function scrubSidecarTree(root: string): number {
+function scrubSidecarTree(root) {
   let changed = 0;
   for (const filePath of walkFiles(root)) {
     const relative = path.relative(root, filePath).split(path.sep);
-    if (relative.includes(".git")) continue;
-
-    let data: Buffer;
+    if (relative.includes(".git"))
+      continue;
+    let data;
     try {
       data = fs.readFileSync(filePath);
     } catch {
       continue;
     }
-    if (data.includes(0)) continue;
-
-    let text: string;
+    if (data.includes(0))
+      continue;
+    let text;
     try {
       text = new TextDecoder("utf-8", { fatal: true }).decode(data);
     } catch {
       continue;
     }
-
     const redacted = redactText(text);
     if (redacted !== text) {
       fs.writeFileSync(filePath, redacted, "utf8");
       changed += 1;
     }
   }
-
   if (changed) {
     console.log(`redacted sensitive text in ${changed} sidecar file(s)`);
   }
   return changed;
 }
-
-export function syncBranchBeforePush(repo: string, branch: string): void {
+function syncBranchBeforePush(repo, branch) {
   fetch(repo, true, false);
-  if (!remoteRefExists(repo, branch)) return;
-
+  if (!remoteRefExists(repo, branch))
+    return;
   const remoteBranch = `origin/${branch}`;
-  if (isAncestor(repo, remoteBranch, "HEAD")) return;
-
+  if (isAncestor(repo, remoteBranch, "HEAD"))
+    return;
   if (isDirty(repo)) {
-    throw new SidecarError(
-      `${remoteBranch} has commits not in local ${branch}, and the sidecar checkout has uncommitted changes`,
-    );
+    throw new SidecarError(`${remoteBranch} has commits not in local ${branch}, and the sidecar checkout has uncommitted changes`);
   }
-
   if (isAncestor(repo, "HEAD", remoteBranch)) {
     git(repo, ["merge", "--ff-only", remoteBranch]);
     return;
   }
-
   const result = git(repo, ["rebase", remoteBranch], { check: false });
   if (result.status !== 0) {
     git(repo, ["rebase", "--abort"], { check: false });
     throw new SidecarError(result.stderr.trim() || `could not rebase ${branch} onto ${remoteBranch}`);
   }
 }
-
-export function pushBranch(repo: string, branch: string): void {
+function pushBranch(repo, branch) {
   git(repo, ["push", "-u", "origin", `HEAD:refs/heads/${branch}`]);
   console.log(`pushed ${branch}`);
 }
-
-export function forkConflicts(repo: string, remoteBranch: string): void {
+function forkConflicts(repo, remoteBranch) {
   const conflicts = unmergedPaths(repo);
   if (!Object.keys(conflicts).length) {
     throw new SidecarError("merge reported conflicts, but no unmerged paths were found");
   }
-
   const timestamp = utcTimestamp();
   const branch = remoteBranchName(remoteBranch) || remoteBranch;
   const branchLabel = slug(branch);
   const manifestLabel = fileLabel(branch);
-  const manifest: ConflictManifest = {
+  const manifest = {
     timestamp,
     resolved_by: "fork-files",
     source_branch: branch,
-    paths: [],
+    paths: []
   };
-
-  for (const [conflictPath, stages] of Object.entries(conflicts).sort(([left], [right]) =>
-    left.localeCompare(right),
-  )) {
-    const versions: ConflictVersion[] = [];
+  for (const [conflictPath, stages] of Object.entries(conflicts).sort(([left], [right]) => left.localeCompare(right))) {
+    const versions = [];
     for (const [stage, label] of [
       [2, "main"],
-      [3, branchLabel],
-    ] as const) {
+      [3, branchLabel]
+    ]) {
       const blob = showStage(repo, stage, conflictPath);
-      if (!blob) continue;
+      if (!blob)
+        continue;
       const oid = stages[stage] ?? "";
       const outPath = forkPath(conflictPath, label, oid);
       const fullOut = path.join(repo, outPath);
@@ -580,61 +584,41 @@ export function forkConflicts(repo: string, remoteBranch: string): void {
         label,
         oid,
         path: outPath,
-        sha256: crypto.createHash("sha256").update(blob).digest("hex"),
+        sha256: crypto.createHash("sha256").update(blob).digest("hex")
       });
     }
-
     git(repo, ["rm", "-f", "--ignore-unmatch", "--", conflictPath], { check: false });
     const original = path.join(repo, conflictPath);
-    if (fs.existsSync(original) && fs.statSync(original).isFile()) fs.unlinkSync(original);
-
+    if (fs.existsSync(original) && fs.statSync(original).isFile())
+      fs.unlinkSync(original);
     manifest.paths.push({ path: conflictPath, versions });
   }
-
   const manifestDir = path.join(repo, ".sidecar-conflicts");
   fs.mkdirSync(manifestDir, { recursive: true });
   const manifestPath = path.join(manifestDir, `${timestamp}-${manifestLabel}.json`);
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}
+`, "utf8");
   git(repo, ["add", "-A"]);
   if (hasUnmergedPaths(repo)) {
     throw new SidecarError("fork-files did not clear all unmerged paths");
   }
 }
-
-type ConflictManifest = {
-  timestamp: string;
-  resolved_by: "fork-files";
-  source_branch: string;
-  paths: Array<{ path: string; versions: ConflictVersion[] }>;
-};
-
-type ConflictVersion = {
-  stage: number;
-  label: string;
-  oid: string;
-  path: string;
-  sha256: string;
-};
-
-export function forkPath(conflictPath: string, label: string, oid: string): string {
+function forkPath(conflictPath, label, oid) {
   const parsed = path.parse(conflictPath);
   const shortOid = oid ? oid.slice(0, 7) : "missing";
   const safeLabel = fileLabel(label);
-  const forkName = parsed.ext
-    ? `${parsed.name}.conflict.${safeLabel}.${shortOid}${parsed.ext}`
-    : `${parsed.name}.conflict.${safeLabel}.${shortOid}`;
+  const forkName = parsed.ext ? `${parsed.name}.conflict.${safeLabel}.${shortOid}${parsed.ext}` : `${parsed.name}.conflict.${safeLabel}.${shortOid}`;
   return path.join(parsed.dir, forkName);
 }
-
-export function fileLabel(value: string): string {
+function fileLabel(value) {
   return slug(value).replaceAll("/", "-");
 }
-
-export function unmergedPaths(repo: string): Record<string, Record<number, string>> {
+function unmergedPaths(repo) {
   const result = gitBytes(repo, ["ls-files", "-u", "-z"]);
-  const paths: Record<string, Record<number, string>> = {};
-  for (const record of result.stdout.toString("binary").split("\0")) {
-    if (!record) continue;
+  const paths = {};
+  for (const record of result.stdout.toString("binary").split("\x00")) {
+    if (!record)
+      continue;
     const separator = record.indexOf("\t");
     const meta = record.slice(0, separator);
     const rawPath = record.slice(separator + 1);
@@ -646,85 +630,68 @@ export function unmergedPaths(repo: string): Record<string, Record<number, strin
   }
   return paths;
 }
-
-export function hasUnmergedPaths(repo: string): boolean {
+function hasUnmergedPaths(repo) {
   return Object.keys(unmergedPaths(repo)).length > 0;
 }
-
-export function showStage(repo: string, stage: number, conflictPath: string): Buffer | undefined {
+function showStage(repo, stage, conflictPath) {
   const result = gitBytes(repo, ["show", `:${stage}:${conflictPath}`], { check: false });
   return result.status === 0 ? result.stdout : undefined;
 }
-
-export function pendingInboxBranches(repo: string, config: SidecarConfig): string[] {
+function pendingInboxBranches(repo, config) {
   const prefix = `origin/${inboxPrefix(config)}`;
   const refs = git(repo, ["branch", "-r", "--format=%(refname:short)"]).stdout.split(/\r?\n/);
-  return refs
-    .map((ref) => ref.trim())
-    .filter((ref) => ref.startsWith(prefix) && ref !== "origin/HEAD")
-    .sort();
+  return refs.map((ref) => ref.trim()).filter((ref) => ref.startsWith(prefix) && ref !== "origin/HEAD").sort();
 }
-
-export function inboxPrefix(config: SidecarConfig): string {
+function inboxPrefix(config) {
   const beforeVars = config.inbox.split("{", 1)[0] ?? "";
   return `${beforeVars.replace(/\/+$/, "")}/`;
 }
-
-export function remoteBranchName(remoteBranch: string): string {
+function remoteBranchName(remoteBranch) {
   return remoteBranch.startsWith("origin/") ? remoteBranch.slice("origin/".length) : remoteBranch;
 }
-
-export function expandInbox(config: SidecarConfig, repo?: string): string {
-  const values: Record<string, string> = {
+function expandInbox(config, repo) {
+  const values = {
     user: slug(currentUser()),
     host: slug(currentHost()),
-    random: repo ? checkoutRandom(repo) : "pending",
+    random: repo ? checkoutRandom(repo) : "pending"
   };
-  const inbox = config.inbox
-    .replace(/\{([a-zA-Z0-9_-]+)\}/g, (_match, key: string) => {
-      const value = values[key];
-      if (value === undefined) throw new SidecarError(`unknown inbox template variable {${key}}`);
-      return value;
-    })
-    .replace(/^\/+|\/+$/g, "");
+  const inbox = config.inbox.replace(/\{([a-zA-Z0-9_-]+)\}/g, (_match, key) => {
+    const value = values[key];
+    if (value === undefined)
+      throw new SidecarError(`unknown inbox template variable {${key}}`);
+    return value;
+  }).replace(/^\/+|\/+$/g, "");
   validateBranch(inbox);
   return inbox;
 }
-
-export function checkoutRandom(repo: string): string {
+function checkoutRandom(repo) {
   const gitDirectory = gitDir(repo);
   const idPath = path.join(gitDirectory, "sidecar-id");
   if (fs.existsSync(idPath)) {
     const existing = slug(fs.readFileSync(idPath, "utf8"));
-    if (existing) return existing;
+    if (existing)
+      return existing;
   }
-
   const id = crypto.randomBytes(6).toString("hex");
-  fs.writeFileSync(idPath, `${id}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.writeFileSync(idPath, `${id}
+`, { encoding: "utf8", mode: 384 });
   return id;
 }
-
-export function validateBranch(branch: string): void {
+function validateBranch(branch) {
   const result = gitRaw(["check-ref-format", "--branch", branch], { check: false });
-  if (result.status !== 0) throw new SidecarError(`invalid branch name ${JSON.stringify(branch)}`);
+  if (result.status !== 0)
+    throw new SidecarError(`invalid branch name ${JSON.stringify(branch)}`);
 }
-
-export function slug(value: string): string {
-  const slugged = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._/-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .replace(/^[./]+|[./]+$/g, "");
+function slug(value) {
+  const slugged = value.trim().toLowerCase().replace(/[^a-z0-9._/-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "").replace(/^[./]+|[./]+$/g, "");
   return slugged || "unknown";
 }
-
-export function treeSignature(root: string): string {
+function treeSignature(root) {
   const digest = crypto.createHash("sha256");
   for (const filePath of Array.from(walkEntries(root)).sort()) {
     const relative = path.relative(root, filePath);
-    if (relative.split(path.sep).includes(".git")) continue;
+    if (relative.split(path.sep).includes(".git"))
+      continue;
     try {
       const stat = fs.statSync(filePath);
       digest.update(relative);
@@ -736,60 +703,60 @@ export function treeSignature(root: string): string {
   }
   return digest.digest("hex");
 }
-
-export function loadProject(): [string, SidecarConfig] {
+function loadProject() {
   const root = findConfigRoot(process.cwd());
   return [root, readConfig(path.join(root, ".sidecar"))];
 }
-
-export function findConfigRoot(start: string): string {
+function findConfigRoot(start) {
   let current = path.resolve(start);
   while (true) {
-    if (fs.existsSync(path.join(current, ".sidecar"))) return current;
+    if (fs.existsSync(path.join(current, ".sidecar")))
+      return current;
     const parent = path.dirname(current);
-    if (parent === current) throw new SidecarError("could not find .sidecar");
+    if (parent === current)
+      throw new SidecarError("could not find .sidecar");
     current = parent;
   }
 }
-
-export function gitToplevel(cwd: string): string {
+function gitToplevel(cwd) {
   const result = gitRaw(["-C", cwd, "rev-parse", "--show-toplevel"], { check: false });
-  if (result.status !== 0) throw new SidecarError("not inside a Git repository");
+  if (result.status !== 0)
+    throw new SidecarError("not inside a Git repository");
   return result.stdout.trim();
 }
-
-export function requireSidecarCheckout(root: string, config: SidecarConfig): string {
+function requireSidecarCheckout(root, config) {
   const sidecarPath = resolveSidecarPath(root, config);
   if (!hasGitMetadata(sidecarPath)) {
     throw new SidecarError(`missing sidecar checkout at ${sidecarPath}; run \`sidecar clone\``);
   }
   return sidecarPath;
 }
-
-export function writeConfig(configPath: string, config: SidecarConfig): void {
+function writeConfig(configPath, config) {
   const text = [
     `version = ${config.version}`,
     `remote = ${JSON.stringify(config.remote)}`,
     `path = ${JSON.stringify(config.path)}`,
     `branch = ${JSON.stringify(config.branch)}`,
     `inbox = ${JSON.stringify(config.inbox)}`,
-    "",
-  ].join("\n");
+    ""
+  ].join(`
+`);
   fs.writeFileSync(configPath, text, "utf8");
 }
-
-export function readConfig(configPath: string): SidecarConfig {
-  const values: Record<string, string | number> = {};
+function readConfig(configPath) {
+  const values = {};
   const lines = fs.readFileSync(configPath, "utf8").split(/\r?\n/);
-  for (let index = 0; index < lines.length; index += 1) {
+  for (let index = 0;index < lines.length; index += 1) {
     const lineNumber = index + 1;
     const line = lines[index].split("#", 1)[0].trim();
-    if (!line) continue;
-    if (!line.includes("=")) throw new SidecarError(`${configPath}:${lineNumber} expected key = value`);
+    if (!line)
+      continue;
+    if (!line.includes("="))
+      throw new SidecarError(`${configPath}:${lineNumber} expected key = value`);
     const [rawKey, ...rawValueParts] = line.split("=");
     const key = rawKey.trim();
     const rawValue = rawValueParts.join("=").trim();
-    let value: string | number;
+    let value;
     if (rawValue.startsWith('"') && rawValue.endsWith('"')) {
       value = rawValue.slice(1, -1);
     } else if (/^\d+$/.test(rawValue)) {
@@ -799,35 +766,34 @@ export function readConfig(configPath: string): SidecarConfig {
     }
     values[key] = value;
   }
-
-  if (!values.remote) throw new SidecarError(`${configPath} is missing remote`);
-
+  if (!values.remote)
+    throw new SidecarError(`${configPath} is missing remote`);
   const config = {
     remote: String(values.remote),
     version: Number(values.version ?? 1),
     path: String(values.path ?? DEFAULT_PATH),
     branch: String(values.branch ?? DEFAULT_BRANCH),
-    inbox: String(values.inbox ?? DEFAULT_INBOX),
+    inbox: String(values.inbox ?? DEFAULT_INBOX)
   };
   validateBranch(config.branch);
   return config;
 }
-
-export function ensureGitignoreEntry(gitignorePath: string, sidecarPath: string): void {
+function ensureGitignoreEntry(gitignorePath, sidecarPath) {
   const stripped = sidecarPath.replace(/^\/+|\/+$/g, "");
   const entry = `/${stripped}/`;
   const lines = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, "utf8").split(/\r?\n/) : [];
   if (!lines.includes(entry)) {
     lines.push(entry);
-    fs.writeFileSync(gitignorePath, `${lines.join("\n").replace(/\s+$/g, "")}\n`, "utf8");
+    fs.writeFileSync(gitignorePath, `${lines.join(`
+`).replace(/\s+$/g, "")}
+`, "utf8");
   }
 }
-
-export function ensureClean(repo: string): void {
-  if (isDirty(repo)) throw new SidecarError("sidecar checkout has uncommitted changes");
+function ensureClean(repo) {
+  if (isDirty(repo))
+    throw new SidecarError("sidecar checkout has uncommitted changes");
 }
-
-export function ensureCommitIdentity(repo: string): void {
+function ensureCommitIdentity(repo) {
   if (git(repo, ["config", "user.name"], { check: false }).status !== 0) {
     git(repo, ["config", "user.name", currentUser()]);
   }
@@ -835,52 +801,40 @@ export function ensureCommitIdentity(repo: string): void {
     git(repo, ["config", "user.email", `${slug(currentUser())}@${slug(currentHost())}.local`]);
   }
 }
-
-export function currentUser(): string {
+function currentUser() {
   return process.env.USER || os.userInfo().username || "unknown";
 }
-
-export function currentHost(): string {
+function currentHost() {
   return os.hostname().split(".", 1)[0] || "unknown";
 }
-
-export function fetch(repo: string, quiet: boolean, check = true): void {
+function fetch(repo, quiet, check = true) {
   const args = ["fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"];
-  if (quiet) args.splice(1, 0, "--quiet");
+  if (quiet)
+    args.splice(1, 0, "--quiet");
   git(repo, args, { check });
 }
-
-export function hasAnyCommit(repo: string): boolean {
+function hasAnyCommit(repo) {
   return git(repo, ["rev-parse", "--verify", "HEAD"], { check: false }).status === 0;
 }
-
-export function branchExists(repo: string, branch: string): boolean {
+function branchExists(repo, branch) {
   return git(repo, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { check: false }).status === 0;
 }
-
-export function remoteRefExists(repo: string, branch: string): boolean {
+function remoteRefExists(repo, branch) {
   return git(repo, ["show-ref", "--verify", "--quiet", `refs/remotes/origin/${branch}`], {
-    check: false,
+    check: false
   }).status === 0;
 }
-
-export function isAncestor(repo: string, maybeAncestor: string, descendant: string): boolean {
+function isAncestor(repo, maybeAncestor, descendant) {
   return git(repo, ["merge-base", "--is-ancestor", maybeAncestor, descendant], { check: false }).status === 0;
 }
-
-export function git(repo: string, args: string[], options: { check?: boolean } = {}): GitResult {
+function git(repo, args, options = {}) {
   return gitRaw(["-C", repo, ...args], options);
 }
-
-export function gitBytes(
-  repo: string,
-  args: string[],
-  options: { check?: boolean } = {},
-): GitBytesResult {
+function gitBytes(repo, args, options = {}) {
   const check = options.check ?? true;
   const result = spawnSync("git", ["-C", repo, ...args], {
     encoding: "buffer",
-    maxBuffer: 100 * 1024 * 1024,
+    maxBuffer: 100 * 1024 * 1024
   });
   const status = result.status ?? 1;
   const stdout = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout ?? "");
@@ -890,12 +844,11 @@ export function gitBytes(
   }
   return { status, stdout, stderr };
 }
-
-export function gitRaw(args: string[], options: { check?: boolean } = {}): GitResult {
+function gitRaw(args, options = {}) {
   const check = options.check ?? true;
   const result = spawnSync("git", args, {
     encoding: "utf8",
-    maxBuffer: 100 * 1024 * 1024,
+    maxBuffer: 100 * 1024 * 1024
   });
   const status = result.status ?? 1;
   const stdout = result.stdout ?? "";
@@ -905,16 +858,11 @@ export function gitRaw(args: string[], options: { check?: boolean } = {}): GitRe
   }
   return { status, stdout, stderr };
 }
-
-function parseOptions(
-  args: string[],
-  spec: { boolean: Set<string>; value: Set<string> },
-): ParsedOptions {
-  const flags = new Set<string>();
-  const values = new Map<string, string>();
-  const positional: string[] = [];
-
-  for (let index = 0; index < args.length; index += 1) {
+function parseOptions(args, spec) {
+  const flags = new Set;
+  const values = new Map;
+  const positional = [];
+  for (let index = 0;index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--") {
       positional.push(...args.slice(index + 1));
@@ -924,70 +872,67 @@ function parseOptions(
       positional.push(arg);
       continue;
     }
-
     const equals = arg.indexOf("=");
     const [name, inlineValue] = equals === -1 ? [arg, undefined] : [arg.slice(0, equals), arg.slice(equals + 1)];
     if (spec.value.has(name)) {
       const value = inlineValue ?? args[++index];
-      if (value === undefined) throw new SidecarError(`${name} requires a value`);
+      if (value === undefined)
+        throw new SidecarError(`${name} requires a value`);
       values.set(name, value);
       continue;
     }
-    if (inlineValue !== undefined) throw new SidecarError(`${name} does not take a value`);
+    if (inlineValue !== undefined)
+      throw new SidecarError(`${name} does not take a value`);
     if (spec.boolean.has(name)) {
       flags.add(name);
       continue;
     }
     throw new SidecarError(`unknown option ${name}`);
   }
-
   return { flags, values, positional };
 }
-
-function getValue(parsed: ParsedOptions, name: string, fallback: string): string {
+function getValue(parsed, name, fallback) {
   return parsed.values.get(name) ?? fallback;
 }
-
-function resolveSidecarPath(root: string, config: SidecarConfig): string {
+function resolveSidecarPath(root, config) {
   return path.resolve(root, config.path);
 }
-
-function hasGitMetadata(repo: string): boolean {
+function hasGitMetadata(repo) {
   return fs.existsSync(path.join(repo, ".git"));
 }
-
-function isDirty(repo: string): boolean {
+function isDirty(repo) {
   return Boolean(git(repo, ["status", "--porcelain"]).stdout.trim());
 }
-
-function gitDir(repo: string): string {
+function gitDir(repo) {
   const result = git(repo, ["rev-parse", "--git-dir"]).stdout.trim();
   return path.isAbsolute(result) ? result : path.resolve(repo, result);
 }
-
-function* walkEntries(root: string): Generator<string> {
-  if (!fs.existsSync(root)) return;
+function* walkEntries(root) {
+  if (!fs.existsSync(root))
+    return;
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     const entryPath = path.join(root, entry.name);
     yield entryPath;
-    if (entry.isDirectory()) yield* walkEntries(entryPath);
+    if (entry.isDirectory())
+      yield* walkEntries(entryPath);
   }
 }
-
-function* walkFiles(root: string): Generator<string> {
+function* walkFiles(root) {
   for (const entryPath of walkEntries(root)) {
     try {
-      if (fs.statSync(entryPath).isFile()) yield entryPath;
+      if (fs.statSync(entryPath).isFile())
+        yield entryPath;
     } catch {
       continue;
     }
   }
 }
-
-function sleep(ms: number): void {
+function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
-
-function utcTimestamp(): string {
+function utcTimestamp() {
   return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 }
+
+// src/bin.ts
+process.exit(main());
