@@ -141,7 +141,7 @@ function printUsage(): void {
   console.error(`usage: sidecar <command> [options]
 
 commands:
-  init <remote> [--path sidecar] [--branch main] [--inbox template]
+  init [remote] [--path sidecar] [--branch main] [--inbox template]
   clone
   status
   instances
@@ -157,27 +157,33 @@ function cmdInit(args: string[]): number {
     boolean: new Set(["--no-clone", "--no-bootstrap-main"]),
     value: new Set(["--path", "--branch", "--inbox"]),
   });
-  const remote = parsed.positional[0];
-  if (!remote || parsed.positional.length > 1) {
-    throw new SidecarError("usage: sidecar init <remote> [--path sidecar] [--branch main] [--inbox template]");
+  if (parsed.positional.length > 1) {
+    throw new SidecarError("usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template]");
   }
 
-  const root = gitToplevel(process.cwd());
-  const config: SidecarConfig = {
-    remote,
-    version: 1,
-    path: getValue(parsed, "--path", DEFAULT_PATH),
-    branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
-    inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
-  };
-  validateBranch(config.branch);
-  validateInboxTemplate(config.inbox);
-  writeConfig(path.join(root, ".sidecar"), config);
+  const remote = parsed.positional[0];
+  const existingRoot = remote ? undefined : findConfigRootOptional(process.cwd());
+  const root = existingRoot ?? gitToplevel(process.cwd());
+  const configPath = path.join(root, ".sidecar");
+  const config = existingRoot
+    ? readConfig(configPath)
+    : {
+        remote: remote ?? promptRemote(),
+        version: 1,
+        path: getValue(parsed, "--path", DEFAULT_PATH),
+        branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
+        inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
+      };
+  if (!existingRoot) {
+    validateBranch(config.branch);
+    validateInboxTemplate(config.inbox);
+    writeConfig(configPath, config);
+  }
   const gitignoreEntry = gitignoreEntryForSidecarPath(root, config.path);
   if (gitignoreEntry) {
     ensureGitignoreEntry(path.join(root, ".gitignore"), gitignoreEntry);
   }
-  console.log(`wrote ${path.join(root, ".sidecar")}`);
+  console.log(`${existingRoot ? "using" : "wrote"} ${configPath}`);
   if (gitignoreEntry) {
     console.log(`ignored ${gitignoreEntry.replace(/\/+$/, "")}/`);
   } else {
@@ -1461,6 +1467,27 @@ function projectDependsOnSidecar(projectRoot: string): boolean {
   }
 }
 
+function promptRemote(): string {
+  if (!process.stdin.isTTY) {
+    throw new SidecarError("remote URL is required when no .sidecar config exists");
+  }
+
+  fs.writeSync(1, "sidecar remote URL: ");
+  const chunks: string[] = [];
+  const buffer = Buffer.alloc(1);
+  while (true) {
+    const bytesRead = fs.readSync(0, buffer, 0, 1, null);
+    if (bytesRead === 0) break;
+    const char = buffer.toString("utf8", 0, bytesRead);
+    if (char === "\n" || char === "\r") break;
+    chunks.push(char);
+  }
+
+  const remote = chunks.join("").trim();
+  if (!remote) throw new SidecarError("remote URL is required");
+  return remote;
+}
+
 function addSidecarDevDependency(root: string): void {
   const manifestPath = path.join(root, "package.json");
   if (!fs.existsSync(manifestPath)) return;
@@ -1518,11 +1545,17 @@ export function loadProject(): [string, SidecarConfig] {
 }
 
 export function findConfigRoot(start: string): string {
+  const root = findConfigRootOptional(start);
+  if (root) return root;
+  throw new SidecarError("could not find .sidecar");
+}
+
+function findConfigRootOptional(start: string): string | undefined {
   let current = path.resolve(start);
   while (true) {
     if (fs.existsSync(path.join(current, ".sidecar"))) return current;
     const parent = path.dirname(current);
-    if (parent === current) throw new SidecarError("could not find .sidecar");
+    if (parent === current) return undefined;
     current = parent;
   }
 }

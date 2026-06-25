@@ -80,6 +80,36 @@ describe("sidecar CLI integration", () => {
     expect(instances).toHaveLength(1);
   });
 
+  test("init without a remote reuses existing sidecar config", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    runSidecar(["init", remote, "--no-clone"], main);
+
+    const output = runSidecar(["init"], main);
+
+    expect(output).toContain(`using ${path.join(fs.realpathSync(main), ".sidecar")}`);
+    expect(output).toContain("sidecar checkout ready");
+    expect(fs.existsSync(path.join(main, "sidecar", ".git"))).toBe(true);
+  });
+
+  test("init without a remote requires an interactive prompt when config is missing", () => {
+    const main = initMainRepo();
+
+    const result = spawnSync(process.execPath, [cliPath, "init"], {
+      cwd: main,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state"),
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("remote URL is required when no .sidecar config exists");
+    expect(fs.existsSync(path.join(main, ".sidecar"))).toBe(false);
+  });
+
   test("init supports sidecar paths outside the main repo without adding a gitignore entry", () => {
     const main = initMainRepo();
     const remote = initBareRemote();
