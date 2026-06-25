@@ -263,6 +263,42 @@ describe("sidecar CLI integration", () => {
     expect(log).toContain('"event":"daemon-cycle"');
   });
 
+  test("daemon run --once pulls remote main changes for clean registered instances", () => {
+    const { main, sidecar, remote } = initSidecarProject();
+    const producer = cloneRemoteMain(remote);
+    fs.mkdirSync(path.join(producer, "notes"), { recursive: true });
+    fs.writeFileSync(path.join(producer, "notes", "remote-main.md"), "remote main\n", "utf8");
+    git(producer, ["add", "."]);
+    git(producer, ["commit", "-m", "Update remote main"]);
+    git(producer, ["push", "origin", "HEAD:refs/heads/main"]);
+
+    runSidecar(["daemon", "run", "--once"], main);
+
+    expect(git(sidecar, ["show", "main:notes/remote-main.md"]).stdout).toBe("remote main\n");
+    const log = fs.readFileSync(path.join(main, ".sidecar-test-state", "sidecar.log"), "utf8");
+    expect(log).toContain('"event":"daemon-sync-start"');
+    expect(log).toContain('"remoteChanged":true');
+  });
+
+  test("daemon run --once merges remote inbox changes for clean registered instances", () => {
+    const { main, sidecar, remote } = initSidecarProject();
+    const producer = cloneRemoteMain(remote);
+    git(producer, ["switch", "-c", "sidecar-inbox/test/remote"]);
+    fs.mkdirSync(path.join(producer, "notes"), { recursive: true });
+    fs.writeFileSync(path.join(producer, "notes", "remote-inbox.md"), "remote inbox\n", "utf8");
+    git(producer, ["add", "."]);
+    git(producer, ["commit", "-m", "Update remote inbox"]);
+    git(producer, ["push", "origin", "HEAD:refs/heads/sidecar-inbox/test/remote"]);
+
+    runSidecar(["daemon", "run", "--once"], main);
+
+    expect(gitRaw(["--git-dir", remote, "show", "main:notes/remote-inbox.md"]).stdout).toBe("remote inbox\n");
+    expect(git(sidecar, ["status", "--porcelain"]).stdout.trim()).toBe("");
+    const log = fs.readFileSync(path.join(main, ".sidecar-test-state", "sidecar.log"), "utf8");
+    expect(log).toContain('"event":"daemon-sync-start"');
+    expect(log).toContain('"remoteChanged":true');
+  });
+
   test("daemon run --once clones registered instances with missing checkouts", () => {
     const main = initMainRepo();
     const remote = initBareRemote();
@@ -401,6 +437,14 @@ function initSidecarProject(): { main: string; remote: string; sidecar: string }
   const remote = initBareRemote();
   runSidecar(["init", remote], main);
   return { main, remote, sidecar: path.join(main, "sidecar") };
+}
+
+function cloneRemoteMain(remote: string): string {
+  const repo = tempDir();
+  gitRaw(["clone", "--branch", "main", remote, repo]);
+  git(repo, ["config", "user.name", "Test User"]);
+  git(repo, ["config", "user.email", "test@example.com"]);
+  return repo;
 }
 
 function seedRemoteConflict(sidecar: string): void {

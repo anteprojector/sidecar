@@ -1926,10 +1926,26 @@ function runDaemonCycle() {
       }
       continue;
     }
-    if (status.dirty !== "yes")
+    let remoteChanged = false;
+    try {
+      remoteChanged = hasRemoteReconcileWork(instance.sidecarPath, config);
+    } catch (error) {
+      logSidecarEvent("failure", {
+        command: "daemon",
+        root: instance.root,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      continue;
+    }
+    if (status.dirty !== "yes" && !remoteChanged)
       continue;
     try {
-      logSidecarEvent("daemon-sync-start", { root: instance.root, sidecarPath: instance.sidecarPath });
+      logSidecarEvent("daemon-sync-start", {
+        root: instance.root,
+        sidecarPath: instance.sidecarPath,
+        dirty: status.dirty === "yes",
+        remoteChanged
+      });
       syncProject(instance.root, config, { snapshot: true, message: "sidecar auto sync" });
       registerCurrentInstance(instance.root, config, { event: "daemon-sync", lastSyncAt: nowIso() });
       synced += 1;
@@ -1943,6 +1959,24 @@ function runDaemonCycle() {
   }
   logSidecarEvent("daemon-cycle", { synced, cloned });
   return synced;
+}
+function hasRemoteReconcileWork(sidecarPath, config) {
+  fetch(sidecarPath, true);
+  const inbox = expandInbox(config, sidecarPath);
+  if (remoteRefExists(sidecarPath, inbox)) {
+    if (!branchExists(sidecarPath, inbox))
+      return true;
+    if (!isAncestor(sidecarPath, `origin/${inbox}`, inbox))
+      return true;
+  }
+  if (remoteRefExists(sidecarPath, config.branch)) {
+    if (!branchExists(sidecarPath, config.branch))
+      return true;
+    if (!isAncestor(sidecarPath, `origin/${config.branch}`, config.branch))
+      return true;
+  }
+  const mergeBase = branchExists(sidecarPath, config.branch) ? config.branch : remoteRefExists(sidecarPath, config.branch) ? `origin/${config.branch}` : "HEAD";
+  return pendingInboxBranches(sidecarPath, config).some((remoteBranch) => !isAncestor(sidecarPath, remoteBranch, mergeBase));
 }
 function daemonServiceStatus() {
   if (process.env[SKIP_SERVICE_ENV] === "1") {
