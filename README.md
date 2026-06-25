@@ -1,30 +1,32 @@
 # sidecar
 
-`sidecar` is a small Git-backed sidecar for repo-local development metadata:
-agent plans, scratch artifacts, todo logs, session memory, and other files that
-should be captured aggressively without making the main repo noisy.
+`sidecar` is the place to store your agent artifacts (or whatever you please). 
+It's colocated in your main repo, so your agents have nothign to learn or think about. 
+Yet it auto sync's, so you have little to learn or think about. 
+And its all just git.
 
-The model is intentionally simple:
-
-- A main repo commits a `.sidecar` file.
-- The sidecar repo is cloned into `./sidecar` and gitignored by the main repo.
-- Local changes are committed and pushed to `sidecar-inbox/<user>/<random>`.
-- A merge command folds inbox branches into canonical `main`.
-- Conflicted files can be forked into explicit per-branch versions with
-  `sidecar merge --fork-files`.
+```text
+your-repo/
+|-- .sidecar                  # committed config
+|-- src/
+|-- sidecar/                  # gitignored child repo
+    |-- master_plan.md
+    |-- future_work.md
+    |-- scratch.md
+```
 
 ## Quick start
 
 Install from GitHub:
 
 ```sh
-npm install -g github:rt2zz/sidecar
+npm install -g github:anteprojector/sidecar
 ```
 
 Or link a local checkout:
 
 ```sh
-git clone git@github.com:rt2zz/sidecar.git
+git clone git@github.com:anteprojector/sidecar.git
 cd sidecar
 npm install
 npm run build
