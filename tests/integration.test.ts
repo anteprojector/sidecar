@@ -17,6 +17,30 @@ afterEach(() => {
 });
 
 describe("sidecar CLI integration", () => {
+  test("global executable delegates to a project-local sidecar dependency", () => {
+    const project = tempDir();
+    const localBin = path.join(project, "node_modules", "@anteprojector", "sidecar", "dist", "cli.js");
+    fs.mkdirSync(path.dirname(localBin), { recursive: true });
+    fs.writeFileSync(
+      path.join(project, "package.json"),
+      JSON.stringify({ dependencies: { "@anteprojector/sidecar": "0.1.0" } }),
+      "utf8",
+    );
+    fs.writeFileSync(
+      localBin,
+      "console.log(JSON.stringify({ local: true, argv: process.argv.slice(2), skip: process.env.SIDECAR_SKIP_LOCAL_EXEC }))\n",
+      "utf8",
+    );
+
+    const result = spawnSync(process.execPath, [cliPath, "status"], {
+      cwd: project,
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ local: true, argv: ["status"], skip: "1" });
+  });
+
   test("init writes config, bootstraps sidecar main, and creates an inbox branch", () => {
     const main = initMainRepo();
     const remote = initBareRemote();

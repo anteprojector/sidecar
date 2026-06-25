@@ -23,6 +23,10 @@ Install from GitHub:
 npm install -g github:anteprojector/sidecar
 ```
 
+The package name is `@anteprojector/sidecar`, and the installed command is
+`sidecar`. A globally installed `sidecar` delegates to a project-local
+`@anteprojector/sidecar` dependency when it is run inside that project.
+
 Or link a local checkout:
 
 ```sh

@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 
+// src/bin.ts
+import fs2 from "node:fs";
+import path2 from "node:path";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
 // src/cli.ts
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -935,4 +941,62 @@ function utcTimestamp() {
 }
 
 // src/bin.ts
+var SKIP_LOCAL_EXEC_ENV = "SIDECAR_SKIP_LOCAL_EXEC";
+var PACKAGE_NAME = "@anteprojector/sidecar";
+if (!process.env[SKIP_LOCAL_EXEC_ENV]) {
+  const localExecutable = findLocalExecutable(process.cwd(), fileURLToPath(import.meta.url));
+  if (localExecutable) {
+    const result = spawnSync2(process.execPath, [localExecutable, ...process.argv.slice(2)], {
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        [SKIP_LOCAL_EXEC_ENV]: "1"
+      }
+    });
+    if (result.signal) {
+      process.kill(process.pid, result.signal);
+    }
+    process.exit(result.status ?? 1);
+  }
+}
 process.exit(main());
+function findLocalExecutable(start, self) {
+  let current = path2.resolve(start);
+  while (true) {
+    if (projectDependsOnSidecar(current)) {
+      const candidate = path2.join(current, "node_modules", "@anteprojector", "sidecar", "dist", "cli.js");
+      if (isFile(candidate) && !sameFile(candidate, self)) {
+        return candidate;
+      }
+    }
+    const parent = path2.dirname(current);
+    if (parent === current)
+      return;
+    current = parent;
+  }
+}
+function projectDependsOnSidecar(projectRoot) {
+  const manifestPath = path2.join(projectRoot, "package.json");
+  if (!isFile(manifestPath))
+    return false;
+  try {
+    const manifest = JSON.parse(fs2.readFileSync(manifestPath, "utf8"));
+    return Boolean(manifest.dependencies?.[PACKAGE_NAME] || manifest.devDependencies?.[PACKAGE_NAME] || manifest.optionalDependencies?.[PACKAGE_NAME] || manifest.peerDependencies?.[PACKAGE_NAME]);
+  } catch {
+    return false;
+  }
+}
+function isFile(filePath) {
+  try {
+    return fs2.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+function sameFile(first, second) {
+  try {
+    return fs2.realpathSync(first) === fs2.realpathSync(second);
+  } catch {
+    return false;
+  }
+}

@@ -1,5 +1,5 @@
 {
-  "name": "git-sidecar",
+  "name": "@anteprojector/sidecar",
   "version": "0.1.0",
   "description": "A Git-backed sidecar inbox for repo-local development metadata.",
   "type": "module",
