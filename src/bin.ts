@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { main } from "./cli.js";
 
 const SKIP_LOCAL_EXEC_ENV = "SIDECAR_SKIP_LOCAL_EXEC";
+const GLOBAL_EXEC_ENV = "SIDECAR_GLOBAL_EXEC";
 const PACKAGE_NAME = "@anteprojector/sidecar";
 
 if (!process.env[SKIP_LOCAL_EXEC_ENV]) {
@@ -17,6 +18,7 @@ if (!process.env[SKIP_LOCAL_EXEC_ENV]) {
       env: {
         ...process.env,
         [SKIP_LOCAL_EXEC_ENV]: "1",
+        [GLOBAL_EXEC_ENV]: "1",
       },
     });
     if (result.signal) {

@@ -8,12 +8,14 @@
   },
   "files": [
     "dist",
+    "scripts/postinstall.js",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "rm -rf dist && bun build src/bin.ts --target=node --format=esm --outfile=dist/cli.js",
     "check": "tsc --noEmit -p tsconfig.json",
+    "postinstall": "node scripts/postinstall.js",
     "pretest": "npm run build",
     "test": "vitest run"
   },
@@ -24,5 +26,8 @@
     "@types/node": "^22.13.10",
     "typescript": "^5.8.2",
     "vitest": "^3.0.8"
+  },
+  "dependencies": {
+    "smol-toml": "^1.7.0"
   }
 }

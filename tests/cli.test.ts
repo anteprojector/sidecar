@@ -21,6 +21,7 @@ import {
   type SidecarConfig,
   writeConfig,
   ensureGitignoreEntry,
+  gitignoreEntryForSidecarPath,
 } from "../src/cli.js";
 import { redactText } from "../src/redaction.js";
 
@@ -52,6 +53,27 @@ describe("config", () => {
     expect(config.inbox).toBe(DEFAULT_INBOX);
   });
 
+  test("parses TOML strings with comments and escapes", () => {
+    const root = tempDir();
+    const configPath = path.join(root, ".sidecar");
+    fs.writeFileSync(
+      configPath,
+      [
+        'remote = "git@github.com:org/repo#sidecar.git" # comment outside the value',
+        'path = "meta\\\\data"',
+        'branch = "main"',
+        'inbox = "sidecar-inbox/{user}/{random}"',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const config = readConfig(configPath);
+
+    expect(config.remote).toBe("git@github.com:org/repo#sidecar.git");
+    expect(config.path).toBe("meta\\data");
+  });
+
   test("gitignore entry is root anchored", () => {
     const root = tempDir();
     const gitignorePath = path.join(root, ".gitignore");
@@ -59,6 +81,14 @@ describe("config", () => {
     ensureGitignoreEntry(gitignorePath, "sidecar");
 
     expect(fs.readFileSync(gitignorePath, "utf8")).toBe("/sidecar/\n");
+  });
+
+  test("does not produce gitignore entries for sidecar paths outside the repo", () => {
+    const root = tempDir();
+
+    expect(gitignoreEntryForSidecarPath(root, "sidecar")).toBe("sidecar");
+    expect(gitignoreEntryForSidecarPath(root, path.join(root, "sidecar"))).toBe("sidecar");
+    expect(gitignoreEntryForSidecarPath(root, "../external-sidecar")).toBeUndefined();
   });
 });
 
@@ -79,6 +109,19 @@ describe("inbox identity", () => {
     expect(first).toBe(second);
     expect(first).toMatch(/^sidecar-inbox\/.+\/[a-f0-9]{12}$/);
     expect(checkoutRandom(repo)).toBe(first.split("/").at(-1));
+  });
+
+  test("rejects templated inbox branches without a stable namespace", () => {
+    const repo = initRepo();
+    const config: SidecarConfig = {
+      remote: "x",
+      version: 1,
+      path: "sidecar",
+      branch: "main",
+      inbox: "sidecar-{user}-{random}",
+    };
+
+    expect(() => expandInbox(config, repo)).toThrow(/static branch namespace/);
   });
 });
 
@@ -194,6 +237,18 @@ describe("redaction", () => {
 
     expect(changed).toBe(1);
     expect(fs.readFileSync(path.join(repo, "notes.md"), "utf8")).toBe("GITHUB_TOKEN=<TOKEN>\n");
+  });
+
+  test("does not redact through symlinks", () => {
+    const repo = initRepo();
+    const external = path.join(tempDir(), "external.txt");
+    fs.writeFileSync(external, "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n", "utf8");
+    fs.symlinkSync(external, path.join(repo, "linked.txt"));
+
+    const changed = scrubSidecarTree(repo);
+
+    expect(changed).toBe(0);
+    expect(fs.readFileSync(external, "utf8")).toBe("GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n");
   });
 });
 
