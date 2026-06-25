@@ -998,6 +998,7 @@ export function registerCurrentInstance(
   options: { event: string; lastSyncAt?: string },
 ): void {
   if (!shouldUseGlobalRegistry()) return;
+  ensureDaemonServiceInstalled();
 
   const sidecarPath = resolveSidecarPath(root, config);
   const existing = readInstances();
@@ -1155,6 +1156,14 @@ function installDaemonService(): DaemonServiceStatus {
   spawnSync("launchctl", ["enable", `${domain}/${DAEMON_LABEL}`], { stdio: "ignore" });
   spawnSync("launchctl", ["kickstart", "-k", `${domain}/${DAEMON_LABEL}`], { stdio: "ignore" });
   return daemonServiceStatus();
+}
+
+function ensureDaemonServiceInstalled(): void {
+  if (!readSettings().daemonEnabled) return;
+  const service = daemonServiceStatus();
+  if (!service.available || (service.installed && !service.message)) return;
+  const installed = installDaemonService();
+  logSidecarEvent("daemon-install", { service: installed });
 }
 
 function stopDaemonService(): DaemonServiceStatus {

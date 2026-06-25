@@ -1855,6 +1855,7 @@ function writeInstances(instances) {
 function registerCurrentInstance(root, config, options) {
   if (!shouldUseGlobalRegistry())
     return;
+  ensureDaemonServiceInstalled();
   const sidecarPath = resolveSidecarPath(root, config);
   const existing = readInstances();
   const previous = existing.find((instance2) => instance2.root === root);
@@ -1994,6 +1995,15 @@ function installDaemonService() {
   spawnSync("launchctl", ["enable", `${domain}/${DAEMON_LABEL}`], { stdio: "ignore" });
   spawnSync("launchctl", ["kickstart", "-k", `${domain}/${DAEMON_LABEL}`], { stdio: "ignore" });
   return daemonServiceStatus();
+}
+function ensureDaemonServiceInstalled() {
+  if (!readSettings().daemonEnabled)
+    return;
+  const service = daemonServiceStatus();
+  if (!service.available || service.installed && !service.message)
+    return;
+  const installed = installDaemonService();
+  logSidecarEvent("daemon-install", { service: installed });
 }
 function stopDaemonService() {
   if (process.env[SKIP_SERVICE_ENV] === "1") {

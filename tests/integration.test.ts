@@ -152,6 +152,7 @@ describe("sidecar CLI integration", () => {
         INIT_CWD: main,
         PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
         SIDECAR_STATE_DIR: stateDir,
+        SIDECAR_SKIP_SERVICE: "1",
       },
     });
 
@@ -452,6 +453,7 @@ function runSidecar(args: string[], cwd: string, env: Record<string, string> = {
       ...process.env,
       GIT_TERMINAL_PROMPT: "0",
       SIDECAR_STATE_DIR: path.join(cwd, ".sidecar-test-state"),
+      SIDECAR_SKIP_SERVICE: "1",
       ...env,
     },
   });
