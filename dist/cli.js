@@ -1114,7 +1114,7 @@ commands:
   clone
   status
   instances
-  daemon status|enable|disable|run [--once] [--interval seconds]
+  daemon status|enable|disable|restart|run [--once] [--interval seconds]
   tail [-f|--follow]
   snapshot [--push] [-m message]
   sync [--no-snapshot] [-m message]
@@ -1276,13 +1276,18 @@ function cmdDaemon(args) {
       throw new SidecarError("usage: sidecar daemon disable");
     return cmdDaemonDisable();
   }
+  if (action === "restart") {
+    if (rest.length)
+      throw new SidecarError("usage: sidecar daemon restart");
+    return cmdDaemonRestart();
+  }
   if (action === "run") {
     return cmdDaemonRun(rest);
   }
   if (!action || action.startsWith("-")) {
     return cmdDaemonRun(args);
   }
-  throw new SidecarError("usage: sidecar daemon status|enable|disable|run [--once] [--interval seconds]");
+  throw new SidecarError("usage: sidecar daemon status|enable|disable|restart|run [--once] [--interval seconds]");
 }
 function cmdDaemonStatus() {
   if (!shouldUseGlobalRegistry()) {
@@ -1324,6 +1329,22 @@ function cmdDaemonDisable() {
   const service = stopDaemonService();
   logSidecarEvent("daemon-disable", { service });
   console.log("daemon:   disabled");
+  console.log(`service:  ${daemonServiceLabel(service)}`);
+  if (service.path)
+    console.log(`agent:    ${service.path}`);
+  if (service.message)
+    console.log(`detail:   ${service.message}`);
+  console.log(`settings: ${settingsPath()}`);
+  return 0;
+}
+function cmdDaemonRestart() {
+  if (!shouldUseGlobalRegistry()) {
+    throw new SidecarError("daemon is only available from a globally installed sidecar");
+  }
+  writeSettings({ ...readSettings(), daemonEnabled: true });
+  const service = installDaemonService();
+  logSidecarEvent("daemon-restart", { service });
+  console.log("daemon:   enabled");
   console.log(`service:  ${daemonServiceLabel(service)}`);
   if (service.path)
     console.log(`agent:    ${service.path}`);
@@ -1411,6 +1432,7 @@ function syncProject(root, config, options) {
   syncBranchBeforePush(sidecarPath, inbox);
   pushBranch(sidecarPath, inbox);
   mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: true });
+  refreshInboxFromMain(sidecarPath, config, inbox);
 }
 function cmdMerge(args) {
   const parsed = parseOptions(args, {
@@ -1636,6 +1658,16 @@ function syncBranchBeforePush(repo, branch) {
   if (result.status !== 0) {
     git(repo, ["rebase", "--abort"], { check: false });
     throw new SidecarError(result.stderr.trim() || `could not rebase ${branch} onto ${remoteBranch}`);
+  }
+}
+function refreshInboxFromMain(repo, config, inbox) {
+  if (!branchExists(repo, inbox) || !branchExists(repo, config.branch))
+    return;
+  ensureClean(repo);
+  git(repo, ["switch", inbox]);
+  const result = git(repo, ["merge", "--ff-only", config.branch], { check: false });
+  if (result.status !== 0) {
+    throw new SidecarError(result.stderr.trim() || `could not fast-forward ${inbox} to ${config.branch}`);
   }
 }
 function pushBranch(repo, branch) {
@@ -2013,7 +2045,8 @@ function installDaemonService() {
   const stateDir = sidecarStateDir();
   fs.mkdirSync(stateDir, { recursive: true });
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
-  fs.writeFileSync(plistPath, daemonPlist(currentExecutableInvocation()), "utf8");
+  const invocation = currentExecutableInvocation();
+  fs.writeFileSync(plistPath, daemonPlist(invocation), "utf8");
   const domain = launchctlDomain();
   spawnSync("launchctl", ["bootout", domain, plistPath], { stdio: "ignore" });
   const bootstrap = spawnSync("launchctl", ["bootstrap", domain, plistPath], { encoding: "utf8" });
@@ -2034,10 +2067,19 @@ function ensureDaemonServiceInstalled() {
   if (!readSettings().daemonEnabled)
     return;
   const service = daemonServiceStatus();
-  if (!service.available || service.installed && !service.message)
+  if (!service.available)
+    return;
+  if (service.installed && !service.message && !daemonServiceNeedsInstall())
     return;
   const installed = installDaemonService();
   logSidecarEvent("daemon-install", { service: installed });
+}
+function daemonServiceNeedsInstall() {
+  const plistPath = daemonLaunchAgentPath();
+  if (!plistPath || !fs.existsSync(plistPath))
+    return true;
+  const expectedStamp = currentExecutableStamp(currentExecutableInvocation());
+  return !fs.readFileSync(plistPath, "utf8").includes(`<string>${escapeXml(expectedStamp)}</string>`);
 }
 function stopDaemonService() {
   if (process.env[SKIP_SERVICE_ENV] === "1") {
@@ -2074,6 +2116,17 @@ function currentExecutableInvocation() {
   }
   return [process.execPath, executable, "daemon", "run"];
 }
+function currentExecutableStamp(programArguments) {
+  const executable = programArguments[1];
+  if (!executable)
+    return "unknown";
+  try {
+    const stat = fs.statSync(executable);
+    return `${executable}:${stat.size}:${Math.trunc(stat.mtimeMs)}`;
+  } catch {
+    return executable;
+  }
+}
 function daemonPlist(programArguments) {
   return plist({
     Label: DAEMON_LABEL,
@@ -2083,7 +2136,8 @@ function daemonPlist(programArguments) {
     StandardOutPath: path.join(sidecarStateDir(), "daemon.out.log"),
     StandardErrorPath: path.join(sidecarStateDir(), "daemon.err.log"),
     EnvironmentVariables: {
-      PATH: process.env.PATH || "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+      PATH: process.env.PATH || "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
+      SIDECAR_DAEMON_EXECUTABLE: currentExecutableStamp(programArguments)
     }
   });
 }

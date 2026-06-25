@@ -41,5 +41,6 @@ sidecar clone              # clone the configured sidecar repo if missing
 sidecar sync               # snapshot, push, merge, and push canonical state
 sidecar merge --fork-files # merge inbox branches and preserve conflicts
 sidecar instances          # list known local sidecar checkouts
+sidecar daemon restart     # restart the background auto-sync process
 sidecar tail -f            # follow the machine-level sidecar log
 ```

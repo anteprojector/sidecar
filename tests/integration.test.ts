@@ -205,6 +205,23 @@ describe("sidecar CLI integration", () => {
     expect(log).toContain('"event":"daemon-enable"');
   });
 
+  test("daemon restart reinstalls the service and keeps daemon enabled", () => {
+    const project = tempDir();
+    const stateDir = tempDir();
+
+    const output = runSidecar(["daemon", "restart"], project, {
+      SIDECAR_STATE_DIR: stateDir,
+      SIDECAR_SKIP_SERVICE: "1",
+    });
+
+    expect(output).toContain("daemon:   enabled");
+    expect(output).toContain("service:  unavailable");
+    expect(JSON.parse(fs.readFileSync(path.join(stateDir, "settings.json"), "utf8"))).toEqual({
+      daemonEnabled: true,
+    });
+    expect(fs.readFileSync(path.join(stateDir, "sidecar.log"), "utf8")).toContain('"event":"daemon-restart"');
+  });
+
   test("tail prints the sidecar log", () => {
     const project = tempDir();
     const stateDir = tempDir();
@@ -275,6 +292,7 @@ describe("sidecar CLI integration", () => {
     runSidecar(["daemon", "run", "--once"], main);
 
     expect(git(sidecar, ["show", "main:notes/remote-main.md"]).stdout).toBe("remote main\n");
+    expect(fs.readFileSync(path.join(sidecar, "notes", "remote-main.md"), "utf8")).toBe("remote main\n");
     const log = fs.readFileSync(path.join(main, ".sidecar-test-state", "sidecar.log"), "utf8");
     expect(log).toContain('"event":"daemon-sync-start"');
     expect(log).toContain('"remoteChanged":true');
@@ -293,6 +311,7 @@ describe("sidecar CLI integration", () => {
     runSidecar(["daemon", "run", "--once"], main);
 
     expect(gitRaw(["--git-dir", remote, "show", "main:notes/remote-inbox.md"]).stdout).toBe("remote inbox\n");
+    expect(fs.readFileSync(path.join(sidecar, "notes", "remote-inbox.md"), "utf8")).toBe("remote inbox\n");
     expect(git(sidecar, ["status", "--porcelain"]).stdout.trim()).toBe("");
     const log = fs.readFileSync(path.join(main, ".sidecar-test-state", "sidecar.log"), "utf8");
     expect(log).toContain('"event":"daemon-sync-start"');
