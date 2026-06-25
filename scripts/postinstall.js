@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -19,7 +20,14 @@ try {
 }
 
 function isGlobalInstall() {
-  return process.env.npm_config_global === "true" || process.env.npm_config_global === "1";
+  if (process.env.npm_config_global === "true" || process.env.npm_config_global === "1") return true;
+
+  const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+  return isInside(realpath(packageRoot), realpath(bunGlobalNodeModules()));
+}
+
+function bunGlobalNodeModules() {
+  return path.join(process.env.BUN_INSTALL || path.join(os.homedir(), ".bun"), "install", "global", "node_modules");
 }
 
 function enableDaemon(packageRoot) {

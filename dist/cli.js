@@ -1291,9 +1291,11 @@ function cmdDaemonStatus() {
   const settings = readSettings();
   const service = daemonServiceStatus();
   console.log(`daemon:   ${settings.daemonEnabled ? "enabled" : "disabled"}`);
-  console.log(`service:  ${service.running ? "running" : service.available ? "stopped" : "unavailable"}`);
+  console.log(`service:  ${daemonServiceLabel(service)}`);
   if (service.path)
     console.log(`agent:    ${service.path}`);
+  if (service.message)
+    console.log(`detail:   ${service.message}`);
   console.log(`settings: ${settingsPath()}`);
   console.log(`log:      ${sidecarLogPath()}`);
   return 0;
@@ -1306,9 +1308,11 @@ function cmdDaemonEnable() {
   const service = installDaemonService();
   logSidecarEvent("daemon-enable", { service });
   console.log("daemon:   enabled");
-  console.log(`service:  ${service.running ? "running" : service.available ? "installed" : "unavailable"}`);
+  console.log(`service:  ${daemonServiceLabel(service)}`);
   if (service.path)
     console.log(`agent:    ${service.path}`);
+  if (service.message)
+    console.log(`detail:   ${service.message}`);
   console.log(`settings: ${settingsPath()}`);
   return 0;
 }
@@ -1320,9 +1324,11 @@ function cmdDaemonDisable() {
   const service = stopDaemonService();
   logSidecarEvent("daemon-disable", { service });
   console.log("daemon:   disabled");
-  console.log(`service:  ${service.running ? "running" : service.available ? "stopped" : "unavailable"}`);
+  console.log(`service:  ${daemonServiceLabel(service)}`);
   if (service.path)
     console.log(`agent:    ${service.path}`);
+  if (service.message)
+    console.log(`detail:   ${service.message}`);
   console.log(`settings: ${settingsPath()}`);
   return 0;
 }
@@ -1938,28 +1944,36 @@ function runDaemonCycle() {
   return synced;
 }
 function daemonServiceStatus() {
-  if (process.env[SKIP_SERVICE_ENV] === "1")
-    return { available: false, running: false, message: "skipped" };
+  if (process.env[SKIP_SERVICE_ENV] === "1") {
+    return { available: false, installed: false, running: false, message: "skipped" };
+  }
   const plistPath = daemonLaunchAgentPath();
   if (!plistPath)
-    return { available: false, running: false, message: "unsupported platform" };
+    return { available: false, installed: false, running: false, message: "unsupported platform" };
+  if (!fs.existsSync(plistPath)) {
+    return { available: true, installed: false, running: false, path: plistPath };
+  }
   const result = spawnSync("launchctl", ["print", `${launchctlDomain()}/${DAEMON_LABEL}`], {
     encoding: "utf8"
   });
+  const running = result.status === 0 && /\bstate = running\b/.test(result.stdout);
   return {
     available: true,
-    running: result.status === 0 && /\bstate = running\b/.test(result.stdout),
-    path: plistPath
+    installed: true,
+    running,
+    path: plistPath,
+    message: running || result.status === 0 ? undefined : launchctlMessage(result)
   };
 }
 function installDaemonService() {
-  if (process.env[SKIP_SERVICE_ENV] === "1")
-    return { available: false, running: false, message: "skipped" };
+  if (process.env[SKIP_SERVICE_ENV] === "1") {
+    return { available: false, installed: false, running: false, message: "skipped" };
+  }
   const plistPath = daemonLaunchAgentPath();
   if (!plistPath)
-    return { available: false, running: false, message: "unsupported platform" };
+    return { available: false, installed: false, running: false, message: "unsupported platform" };
   if (typeof process.getuid === "function" && process.getuid() === 0) {
-    return { available: false, running: false, path: plistPath, message: "root install skipped" };
+    return { available: false, installed: false, running: false, path: plistPath, message: "root install skipped" };
   }
   const stateDir = sidecarStateDir();
   fs.mkdirSync(stateDir, { recursive: true });
@@ -1971,6 +1985,7 @@ function installDaemonService() {
   if (bootstrap.status !== 0) {
     return {
       available: true,
+      installed: true,
       running: false,
       path: plistPath,
       message: bootstrap.stderr.trim() || bootstrap.stdout.trim() || "launchctl bootstrap failed"
@@ -1981,13 +1996,26 @@ function installDaemonService() {
   return daemonServiceStatus();
 }
 function stopDaemonService() {
-  if (process.env[SKIP_SERVICE_ENV] === "1")
-    return { available: false, running: false, message: "skipped" };
+  if (process.env[SKIP_SERVICE_ENV] === "1") {
+    return { available: false, installed: false, running: false, message: "skipped" };
+  }
   const plistPath = daemonLaunchAgentPath();
   if (!plistPath)
-    return { available: false, running: false, message: "unsupported platform" };
+    return { available: false, installed: false, running: false, message: "unsupported platform" };
   spawnSync("launchctl", ["bootout", launchctlDomain(), plistPath], { stdio: "ignore" });
-  return { available: true, running: false, path: plistPath };
+  return { available: true, installed: fs.existsSync(plistPath), running: false, path: plistPath };
+}
+function daemonServiceLabel(service) {
+  if (!service.available)
+    return "unavailable";
+  if (!service.installed)
+    return "uninstalled";
+  return service.running ? "running" : "stopped";
+}
+function launchctlMessage(result) {
+  const stderr = typeof result.stderr === "string" ? result.stderr.trim() : "";
+  const stdout = typeof result.stdout === "string" ? result.stdout.trim() : "";
+  return stderr || stdout || undefined;
 }
 function launchctlDomain() {
   const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().uid;
