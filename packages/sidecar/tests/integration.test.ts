@@ -390,7 +390,7 @@ describe("sidecar CLI integration", () => {
     expect(output).toContain(`log:      ${path.join(stateDir, "sidecar.log")}`);
     expect(output).toContain(main);
     expect(output).toContain("checkout: present");
-    expect(output).toContain("dirty:   no");
+    expect(output).toMatch(/dirty:\s+no/);
 
     const instances = JSON.parse(fs.readFileSync(path.join(stateDir, "instances.json"), "utf8"));
     expect(instances).toHaveLength(1);
@@ -995,6 +995,96 @@ describe("sidecar CLI integration", () => {
     const pushed = gitRaw(["--git-dir", remote, "show", `${inbox}:big.md`]).stdout;
     expect(pushed.length).toBe(big.length - "sk-test1234567890abcdef".length + "<API_KEY>".length);
     expect(pushed.endsWith("OPENAI_API_KEY=<API_KEY>\n")).toBe(true);
+  });
+
+  test("a second machine round-trips redacted content without wedging or leaking", () => {
+    const { main: mainA, remote, sidecar: sidecarA } = initSidecarProject();
+    const original = "OPENAI_API_KEY=sk-test1234567890abcdef\n";
+    fs.writeFileSync(path.join(sidecarA, "notes.md"), original, "utf8");
+    runSidecar(["sync"], mainA);
+
+    // Machine B joins the same remote: its checkout receives the redacted
+    // blob (the secret never left machine A).
+    const mainB = initMainRepo();
+    runSidecar(["init", remote], mainB);
+    const sidecarB = path.join(mainB, "sidecar");
+    expect(fs.readFileSync(path.join(sidecarB, "notes.md"), "utf8")).toBe(
+      "OPENAI_API_KEY=<API_KEY>\n",
+    );
+    // Redaction must be idempotent: a checkout full of placeholders reads as
+    // clean, or every sync on B would churn or wedge.
+    expect(git(sidecarB, ["status", "--porcelain"]).stdout.trim()).toBe("");
+
+    fs.writeFileSync(path.join(sidecarB, "from-b.md"), "hello from machine B\n", "utf8");
+    runSidecar(["sync"], mainB);
+    expect(git(sidecarB, ["status", "--porcelain"]).stdout.trim()).toBe("");
+
+    // A picks up B's file; A's untouched secret file keeps its original.
+    runSidecar(["sync"], mainA);
+    expect(fs.readFileSync(path.join(sidecarA, "from-b.md"), "utf8")).toBe("hello from machine B\n");
+    expect(fs.readFileSync(path.join(sidecarA, "notes.md"), "utf8")).toBe(original);
+  });
+
+  test("a lost push race on main retries, reconciles, and lands the merge", () => {
+    const { main, remote, sidecar } = initSidecarProject();
+    fs.writeFileSync(path.join(sidecar, "first.md"), "first\n", "utf8");
+    runSidecar(["sync"], main);
+
+    // Simulate the race window: the remote rejects the next main push once,
+    // exactly what the loser of a concurrent merge sees.
+    const hookPath = path.join(remote, "hooks", "pre-receive");
+    fs.writeFileSync(
+      hookPath,
+      [
+        "#!/bin/sh",
+        'while read old new ref; do',
+        '  if [ "$ref" = "refs/heads/main" ] && [ ! -f reject-once-marker ]; then',
+        "    touch reject-once-marker",
+        '    echo "simulated concurrent push" >&2',
+        "    exit 1",
+        "  fi",
+        "done",
+        "exit 0",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    fs.chmodSync(hookPath, 0o755);
+
+    fs.writeFileSync(path.join(sidecar, "second.md"), "second\n", "utf8");
+    const output = runSidecar(["sync"], main);
+
+    expect(output).toContain("push of main was rejected; refetching and retrying");
+    expect(output).toContain("pushed main");
+    expect(gitRaw(["--git-dir", remote, "show", "main:second.md"]).stdout).toBe("second\n");
+  });
+
+  test("a diverged local main heals from the remote without touching checkout files", () => {
+    const { main, remote, sidecar } = initSidecarProject();
+    const original = "OPENAI_API_KEY=sk-test1234567890abcdef\n";
+    fs.writeFileSync(path.join(sidecar, "notes.md"), original, "utf8");
+    runSidecar(["sync"], main);
+
+    // Another machine wins a race and the remote main is rewritten without
+    // this machine's merge commit: drop it and add an unrelated commit.
+    const other = cloneRemoteMain(remote);
+    git(other, ["reset", "--hard", "HEAD~1"]);
+    fs.writeFileSync(path.join(other, "from-other.md"), "other machine\n", "utf8");
+    git(other, ["add", "from-other.md"]);
+    git(other, ["commit", "-m", "Other machine change"]);
+    git(other, ["push", "--force", "origin", "main"]);
+
+    fs.writeFileSync(path.join(sidecar, "second.md"), "second\n", "utf8");
+    runSidecar(["sync"], main);
+
+    // The remote side won, the still-pending inbox branch was re-merged on
+    // top of it, and the local originals survived the reset.
+    expect(gitRaw(["--git-dir", remote, "show", "main:from-other.md"]).stdout).toBe("other machine\n");
+    expect(gitRaw(["--git-dir", remote, "show", "main:second.md"]).stdout).toBe("second\n");
+    expect(gitRaw(["--git-dir", remote, "show", "main:notes.md"]).stdout).toBe(
+      "OPENAI_API_KEY=<API_KEY>\n",
+    );
+    expect(fs.readFileSync(path.join(sidecar, "notes.md"), "utf8")).toBe(original);
   });
 
   test("--redaction secrets flows through init, config, and the git filter", () => {

@@ -1,6 +1,6 @@
 {
   "name": "@projectors/sidecar",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "A Git-backed sidecar inbox for repo-local development metadata.",
   "license": "MIT",
   "repository": {
@@ -26,8 +26,8 @@
     "check": "tsc --noEmit -p tsconfig.json",
     "dev": "bun build src/bin.ts --target=node --format=esm --external chokidar --outfile=dist/cli.js --watch",
     "postinstall": "node scripts/postinstall.js",
-    "prepack": "cp ../../README.md README.md && cp ../../LICENSE LICENSE",
-    "prepublishOnly": "bun run check && bun run test",
+    "prepack": "cp ../../README.md README.md && cp ../../LICENSE LICENSE && bun run build",
+    "prepublishOnly": "bun run check",
     "test": "bun run build && vitest run"
   },
   "engines": {

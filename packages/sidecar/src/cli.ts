@@ -7,7 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "smol-toml";
 
-import { type Role, paint } from "./color.js";
+import { type Role, colorLevel, paint, stripColor } from "./color.js";
 import {
   DEFAULT_REDACTION_MODE,
   NO_REDACT_PRAGMA,
@@ -116,7 +116,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       });
     }
     if (error instanceof SidecarError) {
-      console.error(`sidecar: ${error.message}`);
+      console.error(`${paint("bad", "sidecar:", colorLevel(process.stderr))} ${error.message}`);
       return 1;
     }
     if (error instanceof Error && error.name === "AbortError") {
@@ -129,9 +129,14 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
 
 function run(argv: string[]): number | Promise<number> {
   const [command, ...rest] = argv;
-  if (!command || command === "--help" || command === "-h") {
-    printUsage();
-    return command ? 0 : 1;
+  if (!command) {
+    // No command is an error, so usage goes to stderr and the exit is nonzero.
+    printUsage("stderr");
+    return 1;
+  }
+  if (command === "--help" || command === "-h" || command === "help") {
+    printUsage("stdout");
+    return 0;
   }
   if (command === "--version" || command === "-v" || command === "version") {
     console.log(packageVersion());
@@ -169,28 +174,85 @@ function run(argv: string[]): number | Promise<number> {
       return cmdRedact(rest);
     case "redactions":
       return cmdRedactions(rest);
-    default:
-      throw new SidecarError(`unknown command ${JSON.stringify(command)}`);
+    default: {
+      const suggestion = closestCommand(command);
+      throw new SidecarError(
+        `unknown command ${JSON.stringify(command)}${suggestion ? `; did you mean ${JSON.stringify(suggestion)}?` : ""}`,
+      );
+    }
   }
 }
 
-function printUsage(): void {
-  console.error(`usage: sidecar <command> [options]
+const KNOWN_COMMANDS = [
+  "init",
+  "clone",
+  "deinit",
+  "status",
+  "instances",
+  "tail",
+  "daemon",
+  "register-install",
+  "set-install-source",
+  "update",
+  "snapshot",
+  "sync",
+  "merge",
+  "redact",
+  "redactions",
+  "version",
+  "help",
+] as const;
 
-commands:
+export function closestCommand(input: string): string | undefined {
+  let best: { command: string; distance: number } | undefined;
+  for (const command of KNOWN_COMMANDS) {
+    const distance = editDistance(input.toLowerCase(), command);
+    if (!best || distance < best.distance) best = { command, distance };
+  }
+  // Only suggest near-misses; "frobnicate" should not turn into "instances".
+  return best && best.distance <= 2 ? best.command : undefined;
+}
+
+function editDistance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= a.length; i += 1) {
+    let previous = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const current = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1));
+      previous = current;
+    }
+  }
+  return row[b.length];
+}
+
+function printUsage(target: "stdout" | "stderr"): void {
+  const write = target === "stdout" ? console.log : console.error;
+  const level = colorLevel(target === "stdout" ? process.stdout : process.stderr);
+  const header = (text: string): string => paint("label", text, level);
+  write(`usage: sidecar <command> [options]
+
+${header("common:")}
   init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii]
+  status [--json]
+  redactions               preview what redaction rewrites before content is pushed
+
+${header("sync & daemon:")}
+  sync [--no-snapshot] [--soft] [-m message]
+  daemon status|enable|disable|restart|autoupdate on|off|run [--once] [--interval seconds]
+  instances [--json]
+  tail [-f|--follow] [-n|--lines count]
+  update
+
+${header("advanced (mostly run for you by init, git, and the daemon):")}
   clone [--if-missing]
   deinit
-  status
-  instances
-  daemon status|enable|disable|restart|autoupdate on|off|run [--once] [--interval seconds]
-  update
-  tail [-f|--follow] [-n|--lines count]
   snapshot [--push] [-m message]
-  sync [--no-snapshot] [--soft] [-m message]
   merge [--fork-files] [--no-push]
-  redactions (preview what redaction changes before content is pushed)
-  redact (git clean filter: stdin -> redacted stdout)`);
+  redact                   git clean filter: stdin -> redacted stdout
+  register-install
+  set-install-source npm|bun|curl [--if-unset]`);
 }
 
 function cmdDeinit(args: string[]): number {
@@ -234,7 +296,7 @@ function cmdDeinit(args: string[]): number {
   removeLegacyGitHooks(root);
   unregisterInstance(root);
 
-  console.log(`removed sidecar from ${root}`);
+  console.log(`removed sidecar from ${paint("repo", root)}`);
   return 0;
 }
 
@@ -276,10 +338,9 @@ function cmdInit(args: string[]): number {
         path: getValue(parsed, "--path", DEFAULT_PATH),
         branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
         inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
-        redaction: redactionModeConfigValue(
-          getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE),
-          "--redaction",
-        ),
+        redaction: parsed.values.has("--redaction")
+          ? redactionModeConfigValue(getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE), "--redaction")
+          : promptRedactionMode(),
       };
   if (!existingRoot) {
     validateRemote(config.remote);
@@ -288,13 +349,13 @@ function cmdInit(args: string[]): number {
     writeConfig(configPath, config);
   }
   const ignoreEntry = ensureSidecarIgnored(root, config.path);
-  console.log(`${existingRoot ? "using" : "wrote"} ${configPath}`);
+  console.log(`${existingRoot ? "using" : "wrote"} ${paint("brand", configPath)}`);
   if (ignoreEntry) {
     const name = ignoreEntry.replace(/\/+$/, "");
     console.log(`ignored ${name}/ via .gitignore`);
     if (hasZedInclusion(root, ignoreEntry)) {
       console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
-    } else if (promptYesNo(`include ${name}/ in Zed file search via .zed/settings.json? [Y/n] `)) {
+    } else if (promptYesNo(`include ${name}/ in Zed file search via .zed/settings.json?`)) {
       if (ensureZedInclusion(root, ignoreEntry)) {
         console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
       } else {
@@ -355,7 +416,7 @@ function ensureGlobalSidecar(): string | undefined {
       console.log(`no global sidecar found; ${installHint} to enable daemon auto sync`);
       return undefined;
     }
-    if (promptYesNo("no global sidecar found; install it now for daemon auto sync? [Y/n] ")) {
+    if (promptYesNo("no global sidecar found; install it now for daemon auto sync?")) {
       installGlobalSidecar();
       return findGlobalSidecarExecutable();
     }
@@ -370,7 +431,7 @@ function ensureGlobalSidecar(): string | undefined {
     console.log(`global sidecar is ${state} (current v${currentVersion}); ${installHint.replace("install with", "update with")}`);
     return globalSidecar;
   }
-  if (promptYesNo(`global sidecar is ${state} (current v${currentVersion}); update it now? [Y/n] `)) {
+  if (promptYesNo(`global sidecar is ${state} (current v${currentVersion}); update it now?`)) {
     installGlobalSidecar();
     return findGlobalSidecarExecutable() ?? globalSidecar;
   }
@@ -476,14 +537,27 @@ function cmdClone(args: string[]): number {
 const STATUS_LABEL_WIDTH = "pending inbox:".length;
 
 /** One `label: value` row. The label is dim so the eye lands on the values. */
+function labelLine(width: number, label: string, value: string, role?: Role, indent = ""): void {
+  const padded = `${label}:`.padEnd(width);
+  console.log(`${indent}${paint("label", padded)} ${role ? paint(role, value) : value}`);
+}
+
 function statusLine(label: string, value: string, role?: Role): void {
-  const padded = `${label}:`.padEnd(STATUS_LABEL_WIDTH);
-  console.log(`${paint("label", padded)} ${role ? paint(role, value) : value}`);
+  labelLine(STATUS_LABEL_WIDTH, label, value, role);
+}
+
+/** "4 minutes ago (2026-07-25 09:12)", falling back to the raw string. */
+function formatTimestampPair(iso: string): string {
+  const relative = formatRelativeTime(iso);
+  const absolute = formatLocalTimestamp(iso);
+  if (!relative || !absolute) return iso;
+  return `${relative} ${paint("quiet", `(${absolute})`)}`;
 }
 
 function cmdStatus(args: string[]): number {
-  const parsed = parseOptions(args, { boolean: new Set(), value: new Set() });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar status");
+  const parsed = parseOptions(args, { boolean: new Set(["--json"]), value: new Set() });
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar status [--json]");
+  if (parsed.flags.has("--json")) return cmdStatusJson();
 
   const [root, config] = loadProject();
   const sidecarPath = resolveSidecarPath(root, config);
@@ -511,22 +585,49 @@ function cmdStatus(args: string[]): number {
   printDaemonLine();
   printLastSyncLine(root);
 
+  const pending = pendingStatusInboxBranches(sidecarPath, config);
+  if (pending.length) {
+    statusLine("pending inbox", String(pending.length), "attn");
+    for (const branchName of pending) console.log(`  ${paint("brand", branchName)}`);
+  } else {
+    statusLine("pending inbox", "none", "quiet");
+  }
+  return 0;
+}
+
+function cmdStatusJson(): number {
+  const [root, config] = loadProject();
+  const sidecarPath = resolveSidecarPath(root, config);
+  const checkoutPresent = hasGitMetadata(sidecarPath);
+  const inbox = expandInbox(config, checkoutPresent ? sidecarPath : undefined);
+  const branch = checkoutPresent ? git(sidecarPath, ["branch", "--show-current"]).stdout.trim() : undefined;
+  const payload = {
+    root,
+    sidecarPath,
+    remote: config.remote,
+    branch: config.branch,
+    inbox,
+    checkout: checkoutPresent ? "present" : "missing",
+    currentBranch: branch || undefined,
+    dirty: checkoutPresent ? Boolean(git(sidecarPath, ["status", "--porcelain"]).stdout.trim()) : undefined,
+    daemon: daemonHealth().text,
+    lastSyncAt: readInstances().find((instance) => instance.root === root)?.lastSyncAt,
+    pendingInbox: checkoutPresent ? pendingStatusInboxBranches(sidecarPath, config) : undefined,
+  };
+  console.log(JSON.stringify(payload, null, 2));
+  return 0;
+}
+
+function pendingStatusInboxBranches(sidecarPath: string, config: SidecarConfig): string[] {
   fetch(sidecarPath, true, false);
   const base = remoteRefExists(sidecarPath, config.branch)
     ? `origin/${config.branch}`
     : branchExists(sidecarPath, config.branch)
       ? config.branch
       : "HEAD";
-  const pending = pendingInboxBranches(sidecarPath, config).filter(
+  return pendingInboxBranches(sidecarPath, config).filter(
     (remoteBranch) => !isAncestor(sidecarPath, remoteBranch, base),
   );
-  if (pending.length) {
-    statusLine("pending inbox", String(pending.length), "attn");
-    for (const branchName of pending) console.log(`  ${branchName}`);
-  } else {
-    statusLine("pending inbox", "none", "quiet");
-  }
-  return 0;
 }
 
 /**
@@ -556,15 +657,9 @@ function printLastSyncLine(root: string): void {
     statusLine("last sync", "never", "quiet");
     return;
   }
-  const relative = formatRelativeTime(lastSyncAt);
-  const absolute = formatLocalTimestamp(lastSyncAt);
-  if (!relative || !absolute) {
-    statusLine("last sync", lastSyncAt);
-    return;
-  }
   // Age isn't colored: a sidecar only syncs when something changed, so a quiet
   // week is normal and flagging it would train you to ignore the color.
-  statusLine("last sync", `${relative} ${paint("quiet", `(${absolute})`)}`);
+  statusLine("last sync", formatTimestampPair(lastSyncAt));
 }
 
 /** "4 minutes ago" — floored, so it never claims more time has passed than has. */
@@ -616,24 +711,27 @@ function cmdInstances(args: string[]): number {
     return 0;
   }
 
-  console.log(`registry: ${instancesPath()}`);
-  console.log(`log:      ${sidecarLogPath()}`);
+  console.log(`${paint("label", "registry:")} ${paint("quiet", instancesPath())}`);
+  console.log(`${paint("label", "log:     ")} ${paint("quiet", sidecarLogPath())}`);
   if (!statuses.length) {
     console.log("instances: none");
     return 0;
   }
 
+  // "checkout:" is the longest label; matches the width `status` values use.
+  const width = "checkout:".length;
+  const line = (label: string, value: string, role?: Role): void => labelLine(width, label, value, role, "  ");
   for (const status of statuses) {
     console.log("");
-    console.log(status.root);
-    console.log(`  sidecar: ${status.sidecarPath}`);
-    console.log(`  remote:  ${status.remote}`);
-    console.log(`  branch:  ${status.currentBranch || "(unknown)"}`);
-    console.log(`  config:  ${status.config}`);
-    console.log(`  checkout:${status.checkout === "present" ? " present" : " missing"}`);
-    console.log(`  dirty:   ${status.dirty}`);
-    console.log(`  updated: ${status.updatedAt}`);
-    if (status.lastSyncAt) console.log(`  synced:  ${status.lastSyncAt}`);
+    console.log(paint("repo", status.root));
+    line("sidecar", status.sidecarPath, "brand");
+    line("remote", status.remote, "brand");
+    line("branch", status.currentBranch || "(unknown)");
+    line("config", status.config, status.config === "ok" ? undefined : "bad");
+    line("checkout", status.checkout, status.checkout === "present" ? undefined : "bad");
+    line("dirty", status.dirty, status.dirty === "yes" ? "attn" : "quiet");
+    line("updated", formatTimestampPair(status.updatedAt));
+    if (status.lastSyncAt) line("synced", formatTimestampPair(status.lastSyncAt));
   }
   return 0;
 }
@@ -725,6 +823,37 @@ function cmdDaemonAutoUpdate(args: string[]): number {
   return 0;
 }
 
+// "settings:" is the longest label; padding matches the historical layout.
+const DAEMON_LABEL_WIDTH = "settings:".length;
+
+function daemonLine(label: string, value: string, role?: Role): void {
+  labelLine(DAEMON_LABEL_WIDTH, label, value, role);
+}
+
+/**
+ * The `daemon`/`service`/`agent`/... block every daemon subcommand prints.
+ * `stopped` is only red while the daemon is enabled: after an explicit
+ * disable it is the state the user just asked for.
+ */
+function printDaemonBlock(service: DaemonServiceStatus, enabled: boolean): void {
+  daemonLine("daemon", enabled ? "enabled" : "disabled", enabled ? "ok" : "attn");
+  printServiceLines(service, enabled);
+  daemonLine("settings", settingsPath(), "quiet");
+}
+
+function printServiceLines(service: DaemonServiceStatus, enabled: boolean): void {
+  const role: Role = service.running
+    ? "ok"
+    : !service.available
+      ? "quiet"
+      : enabled && service.installed
+        ? "bad"
+        : "quiet";
+  daemonLine("service", daemonServiceLabel(service), role);
+  if (service.path) daemonLine("agent", service.path, "quiet");
+  if (service.message) daemonLine("detail", service.message);
+}
+
 function cmdDaemonStatus(): number {
   if (!shouldUseGlobalRegistry()) {
     throw new SidecarError("daemon is only available from a globally installed sidecar");
@@ -732,13 +861,11 @@ function cmdDaemonStatus(): number {
 
   const settings = readSettings();
   const service = daemonServiceStatus();
-  console.log(`daemon:   ${settings.daemonEnabled ? "enabled" : "disabled"}`);
-  console.log(`update:   ${settings.autoUpdate ? "auto" : "manual"}`);
-  console.log(`service:  ${daemonServiceLabel(service)}`);
-  if (service.path) console.log(`agent:    ${service.path}`);
-  if (service.message) console.log(`detail:   ${service.message}`);
-  console.log(`settings: ${settingsPath()}`);
-  console.log(`log:      ${sidecarLogPath()}`);
+  daemonLine("daemon", settings.daemonEnabled ? "enabled" : "disabled", settings.daemonEnabled ? "ok" : "attn");
+  daemonLine("update", settings.autoUpdate ? "auto" : "manual");
+  printServiceLines(service, settings.daemonEnabled);
+  daemonLine("settings", settingsPath(), "quiet");
+  daemonLine("log", sidecarLogPath(), "quiet");
   return 0;
 }
 
@@ -750,11 +877,7 @@ function cmdDaemonEnable(): number {
   writeSettings({ ...readSettings(), daemonEnabled: true });
   const service = installDaemonService();
   logSidecarEvent("daemon-enable", { service });
-  console.log("daemon:   enabled");
-  console.log(`service:  ${daemonServiceLabel(service)}`);
-  if (service.path) console.log(`agent:    ${service.path}`);
-  if (service.message) console.log(`detail:   ${service.message}`);
-  console.log(`settings: ${settingsPath()}`);
+  printDaemonBlock(service, true);
   return 0;
 }
 
@@ -766,11 +889,7 @@ function cmdDaemonDisable(): number {
   writeSettings({ ...readSettings(), daemonEnabled: false });
   const service = stopDaemonService();
   logSidecarEvent("daemon-disable", { service });
-  console.log("daemon:   disabled");
-  console.log(`service:  ${daemonServiceLabel(service)}`);
-  if (service.path) console.log(`agent:    ${service.path}`);
-  if (service.message) console.log(`detail:   ${service.message}`);
-  console.log(`settings: ${settingsPath()}`);
+  printDaemonBlock(service, false);
   return 0;
 }
 
@@ -782,11 +901,7 @@ function cmdDaemonRestart(): number {
   writeSettings({ ...readSettings(), daemonEnabled: true });
   const service = installDaemonService();
   logSidecarEvent("daemon-restart", { service });
-  console.log("daemon:   enabled");
-  console.log(`service:  ${daemonServiceLabel(service)}`);
-  if (service.path) console.log(`agent:    ${service.path}`);
-  if (service.message) console.log(`detail:   ${service.message}`);
-  console.log(`settings: ${settingsPath()}`);
+  printDaemonBlock(service, true);
   return 0;
 }
 
@@ -838,8 +953,7 @@ async function cmdUpdate(args: string[]): Promise<number> {
 
   console.log(`updated sidecar v${result.current} -> v${result.latest}`);
   const service = installDaemonService();
-  console.log(`service:  ${daemonServiceLabel(service)}`);
-  if (service.message) console.log(`detail:   ${service.message}`);
+  printServiceLines(service, readSettings().daemonEnabled);
   return 0;
 }
 
@@ -1068,7 +1182,7 @@ function mergeInboxBranchesAt(
 
     const merged: string[] = [];
     for (const remoteBranch of inboxBranches) {
-      console.log(`merging ${remoteBranch}`);
+      console.log(`merging ${paint("brand", remoteBranch)}`);
       const result = git(
         sidecarPath,
         ["merge", "--no-ff", "-m", `Merge ${remoteBranch}`, remoteBranch],
@@ -1168,11 +1282,14 @@ function printRedactionDiff(original: string, redacted: string): void {
     const pushedPath = path.join(scratch, "pushed");
     fs.writeFileSync(localPath, original, "utf8");
     fs.writeFileSync(pushedPath, redacted, "utf8");
-    const diff = gitRaw(["diff", "--no-index", "--", localPath, pushedPath], { check: false });
+    // stdout is captured, so git sees a pipe and drops color on its own;
+    // re-request it at the fidelity of the terminal we forward to.
+    const color = colorLevel() > 0 ? ["--color"] : [];
+    const diff = gitRaw(["diff", "--no-index", ...color, "--", localPath, pushedPath], { check: false });
     // Keep only the hunks: removed/added content lines can legitimately start
     // with "---"/"+++" inside a hunk, so filtering by prefix would drop them.
     const lines = diff.stdout.split("\n");
-    const firstHunk = lines.findIndex((line) => line.startsWith("@@"));
+    const firstHunk = lines.findIndex((line) => stripColor(line).startsWith("@@"));
     const body = firstHunk === -1 ? "" : lines.slice(firstHunk).join("\n").trimEnd();
     if (body) console.log(body);
   } finally {
@@ -1226,7 +1343,7 @@ export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain
 
   const inbox = expandInbox(config, sidecarPath);
   ensureInboxBranch(sidecarPath, config, inbox);
-  console.log(`sidecar checkout ready at ${sidecarPath}`);
+  console.log(`sidecar checkout ready at ${paint("brand", sidecarPath)}`);
 }
 
 export function bootstrapMainBranch(repo: string, config: SidecarConfig): void {
@@ -1352,7 +1469,7 @@ export function snapshot(
     `inbox: ${inbox}`,
   ];
   git(repo, ["commit", "-m", body.join("\n")]);
-  console.log(`committed sidecar snapshot to ${inbox}`);
+  console.log(`committed sidecar snapshot to ${paint("brand", inbox)}`);
   reportRedactions(repo, staged, redactionMode);
   return true;
 }
@@ -1533,7 +1650,7 @@ function refreshInboxFromMain(repo: string, config: SidecarConfig, inbox: string
 
 export function pushBranch(repo: string, branch: string): void {
   git(repo, ["push", "-u", "origin", `HEAD:refs/heads/${branch}`]);
-  console.log(`pushed ${branch}`);
+  console.log(`pushed ${paint("brand", branch)}`);
 }
 
 export function forkConflicts(repo: string, remoteBranch: string): void {
@@ -2386,9 +2503,37 @@ function promptRemote(root: string): string {
   }
 
   console.log("sidecar stores its files in a separate git repo that you own — any empty repo works.");
-  const remote = promptLine("sidecar remote URL (leave blank to create one with gh): ");
-  if (remote) return remote;
-  return createRemoteWithGh(root);
+  // Re-ask on an invalid URL instead of failing the whole init over a typo.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const remote = promptLine(`sidecar remote URL ${paint("quiet", "(leave blank to create one with gh)")}: `);
+    if (!remote) return createRemoteWithGh(root);
+    try {
+      validateRemote(remote);
+      return remote;
+    } catch (error) {
+      console.log(error instanceof SidecarError ? `sidecar: ${error.message}` : String(error));
+    }
+  }
+  throw new SidecarError("no valid remote URL provided");
+}
+
+// Non-interactive inits keep the default (the strictest mode): scripts must
+// never end up with weaker redaction than an unattended `sidecar init` implies.
+function promptRedactionMode(): RedactionMode {
+  if (!process.stdin.isTTY) return DEFAULT_REDACTION_MODE;
+
+  console.log("redaction rewrites sensitive values out of pushed content; your local files are never touched.");
+  console.log(`  secrets+pii  redact API keys, tokens, emails, and other PII ${paint("quiet", "(recommended)")}`);
+  console.log("  secrets      redact API keys and tokens only");
+  console.log("  none         push content verbatim");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const answer = promptLine(`redaction mode ${paint("quiet", `[${DEFAULT_REDACTION_MODE}]`)}: `).toLowerCase();
+    if (!answer) return DEFAULT_REDACTION_MODE;
+    if ((REDACTION_MODES as readonly string[]).includes(answer)) return answer as RedactionMode;
+    console.log(`invalid redaction mode; expected one of ${REDACTION_MODES.join(", ")}`);
+  }
+  console.log(`keeping the default (${DEFAULT_REDACTION_MODE})`);
+  return DEFAULT_REDACTION_MODE;
 }
 
 function createRemoteWithGh(root: string): string {
@@ -2405,7 +2550,7 @@ function createRemoteWithGh(root: string): string {
   const baseName = parsedOrigin?.repo ?? path.basename(root);
   const suggested = owner ? `${owner}/${baseName}-sidecar` : `${baseName}-sidecar`;
 
-  const answer = promptLine(`repository to create [${suggested}]: `) || suggested;
+  const answer = promptLine(`repository to create ${paint("quiet", `[${suggested}]`)}: `) || suggested;
   const fullName = answer.includes("/") ? answer : owner ? `${owner}/${answer}` : undefined;
   if (!fullName) {
     throw new SidecarError("could not determine the repository owner; enter it as owner/name");
@@ -2451,7 +2596,7 @@ function promptOverwriteConfig(configPath: string, existingRemote: string, newRe
     );
   }
   console.log(`${configPath} already exists (remote ${existingRemote})`);
-  const answer = promptLine("overwrite it with the new settings? [y/N] ").toLowerCase();
+  const answer = promptLine(`overwrite it with the new settings? ${paint("quiet", "[y/N]")} `).toLowerCase();
   return answer === "y" || answer === "yes";
 }
 
@@ -2459,14 +2604,15 @@ function promptOverwriteConfig(configPath: string, existingRemote: string, newRe
 // a missing terminal answers "no".
 function promptYesNo(question: string): boolean {
   if (!process.stdin.isTTY) return false;
-  const answer = promptLine(question).toLowerCase();
+  const answer = promptLine(`${question} ${paint("quiet", "[Y/n]")} `).toLowerCase();
   return answer === "" || answer === "y" || answer === "yes";
 }
 
 function promptLine(prompt: string): string {
   fs.writeSync(1, prompt);
   // Node keeps a TTY stdin non-blocking, so reads on fd 0 hit EAGAIN while idle.
-  const fd = fs.openSync("/dev/tty", "r");
+  // Windows has no /dev/tty; CONIN$ is the console-input device there.
+  const fd = fs.openSync(process.platform === "win32" ? "CONIN$" : "/dev/tty", "r");
   try {
     const chunks: string[] = [];
     const buffer = Buffer.alloc(1);
