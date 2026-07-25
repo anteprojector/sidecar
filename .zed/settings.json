@@ -1,0 +1,6 @@
+{
+  "file_scan_inclusions": [
+    ".env*",
+    "sidecar/**"
+  ]
+}

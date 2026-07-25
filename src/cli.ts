@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
 import { parse as parseToml } from "smol-toml";
@@ -13,9 +13,10 @@ import { redactText } from "./redaction.js";
 export const DEFAULT_PATH = "sidecar";
 export const DEFAULT_BRANCH = "main";
 export const DEFAULT_INBOX = "sidecar-inbox/{user}/{random}";
-const PACKAGE_NAME = "@anteprojector/sidecar";
-const PACKAGE_SPEC = "github:anteprojector/sidecar";
+export const PACKAGE_NAME = "@projectors/sidecar";
+const PACKAGE_SPEC = "@projectors/sidecar";
 const GLOBAL_EXEC_ENV = "SIDECAR_GLOBAL_EXEC";
+const SKIP_LOCAL_EXEC_ENV = "SIDECAR_SKIP_LOCAL_EXEC";
 const STATE_DIR_ENV = "SIDECAR_STATE_DIR";
 const SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE";
 const DAEMON_LABEL = "com.anteprojector.sidecar";
@@ -74,11 +75,13 @@ type InstanceStatus = SidecarInstance & {
 
 export type SidecarSettings = {
   daemonEnabled: boolean;
+  autoUpdate: boolean;
+  lastUpdateCheckAt?: string;
 };
 
-export function main(argv = process.argv.slice(2)): number {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   try {
-    const status = run(argv);
+    const status = await run(argv);
     const command = argv[0];
     if (command && shouldUseGlobalRegistry()) {
       logSidecarEvent("command", { command, status });
@@ -104,11 +107,15 @@ export function main(argv = process.argv.slice(2)): number {
   }
 }
 
-function run(argv: string[]): number {
+function run(argv: string[]): number | Promise<number> {
   const [command, ...rest] = argv;
   if (!command || command === "--help" || command === "-h") {
     printUsage();
     return command ? 0 : 1;
+  }
+  if (command === "--version" || command === "-v" || command === "version") {
+    console.log(packageVersion());
+    return 0;
   }
 
   switch (command) {
@@ -126,6 +133,8 @@ function run(argv: string[]): number {
       return cmdDaemon(rest);
     case "register-install":
       return cmdRegisterInstall(rest);
+    case "update":
+      return cmdUpdate(rest);
     case "snapshot":
       return cmdSnapshot(rest);
     case "sync":
@@ -142,10 +151,11 @@ function printUsage(): void {
 
 commands:
   init [remote] [--path sidecar] [--branch main] [--inbox template]
-  clone
+  clone [--if-missing]
   status
   instances
-  daemon status|enable|disable|restart|run [--once] [--interval seconds]
+  daemon status|enable|disable|restart|autoupdate on|off|run [--once] [--interval seconds]
+  update
   tail [-f|--follow]
   snapshot [--push] [-m message]
   sync [--no-snapshot] [-m message]
@@ -179,15 +189,25 @@ function cmdInit(args: string[]): number {
     validateInboxTemplate(config.inbox);
     writeConfig(configPath, config);
   }
-  const gitignoreEntry = gitignoreEntryForSidecarPath(root, config.path);
-  if (gitignoreEntry) {
-    ensureGitignoreEntry(path.join(root, ".gitignore"), gitignoreEntry);
-  }
+  const ignoreEntry = ensureSidecarIgnored(root, config.path);
   console.log(`${existingRoot ? "using" : "wrote"} ${configPath}`);
-  if (gitignoreEntry) {
-    console.log(`ignored ${gitignoreEntry.replace(/\/+$/, "")}/`);
+  if (ignoreEntry) {
+    const name = ignoreEntry.replace(/\/+$/, "");
+    console.log(`ignored ${name}/ via .gitignore`);
+    if (hasZedInclusion(root, ignoreEntry)) {
+      console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
+    } else if (promptYesNo(`include ${name}/ in Zed file search via .zed/settings.json? [Y/n] `)) {
+      if (ensureZedInclusion(root, ignoreEntry)) {
+        console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
+      } else {
+        console.log(`could not parse .zed/settings.json; add "${name}/**" to file_scan_inclusions manually`);
+      }
+    }
   } else {
-    console.log(`sidecar path outside repo; not updating ${path.join(root, ".gitignore")}`);
+    console.log(`sidecar path outside repo; not updating .gitignore`);
+  }
+  if (removeLegacyGitHooks(root)) {
+    console.log("removed legacy sidecar git hooks; syncing is manual or via the global daemon");
   }
 
   if (!parsed.flags.has("--no-clone")) {
@@ -195,17 +215,130 @@ function cmdInit(args: string[]): number {
   }
   registerCurrentInstance(root, config, { event: "init" });
   addSidecarDevDependency(root);
+  const globalSidecar = ensureGlobalSidecar();
+  if (globalSidecar) registerInstallWithGlobalSidecar(globalSidecar, root);
+  return 0;
+}
+
+function ensureGlobalSidecar(): string | undefined {
+  const installHint = `install with \`npm install -g ${PACKAGE_SPEC}\``;
+  const globalSidecar = findGlobalSidecarExecutable();
+  if (!globalSidecar) {
+    if (!process.stdin.isTTY) {
+      console.log(`no global sidecar found; ${installHint} to enable daemon auto sync`);
+      return undefined;
+    }
+    if (promptYesNo("no global sidecar found; install it now for daemon auto sync? [Y/n] ")) {
+      installGlobalSidecar();
+      return findGlobalSidecarExecutable();
+    }
+    return undefined;
+  }
+
+  const globalVersion = globalSidecarVersion(globalSidecar);
+  const currentVersion = packageVersion();
+  if (globalVersion && compareVersions(globalVersion, currentVersion) >= 0) return globalSidecar;
+  const state = globalVersion ? `v${globalVersion}` : "an unknown version";
+  if (!process.stdin.isTTY) {
+    console.log(`global sidecar is ${state} (current v${currentVersion}); ${installHint.replace("install with", "update with")}`);
+    return globalSidecar;
+  }
+  if (promptYesNo(`global sidecar is ${state} (current v${currentVersion}); update it now? [Y/n] `)) {
+    installGlobalSidecar();
+    return findGlobalSidecarExecutable() ?? globalSidecar;
+  }
+  return globalSidecar;
+}
+
+function registerInstallWithGlobalSidecar(executable: string, root: string): void {
+  const result = spawnSync(executable, ["register-install"], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      [SKIP_LOCAL_EXEC_ENV]: "1",
+      [GLOBAL_EXEC_ENV]: "1",
+    },
+  });
+  if (result.status !== 0) {
+    throw new SidecarError(
+      `global sidecar registration failed: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}`,
+    );
+  }
+}
+
+export function findGlobalSidecarExecutable(): string | undefined {
+  const names = process.platform === "win32" ? ["sidecar.cmd", "sidecar.ps1", "sidecar"] : ["sidecar"];
+  for (const entry of (process.env.PATH || "").split(path.delimiter).filter(Boolean)) {
+    for (const name of names) {
+      const candidate = path.join(entry, name);
+      if (!isFilePath(candidate)) continue;
+      if (isProjectLocalPath(realpathOr(candidate))) continue;
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+export function globalSidecarVersion(executable: string): string | undefined {
+  const result = spawnSync(executable, ["--version"], {
+    encoding: "utf8",
+    env: { ...process.env, [SKIP_LOCAL_EXEC_ENV]: "1" },
+  });
+  if (result.status !== 0) return undefined;
+  const version = result.stdout.trim();
+  return /^\d+\.\d+\.\d+$/.test(version) ? version : undefined;
+}
+
+function installGlobalSidecar(): void {
+  const bun = findExecutableOnPath(process.platform === "win32" ? "bun.exe" : "bun");
+  const command = bun ? [bun, "add", "-g", PACKAGE_SPEC] : ["npm", "install", "-g", PACKAGE_SPEC];
+  console.log(`running ${command.join(" ")}`);
+  const result = spawnSync(command[0], command.slice(1), { stdio: "inherit" });
+  if (result.status !== 0) {
+    throw new SidecarError(`global sidecar install failed; run \`${command.join(" ")}\` manually`);
+  }
+}
+
+export function findExecutableOnPath(name: string): string | undefined {
+  for (const entry of (process.env.PATH || "").split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(entry, name);
+    if (isFilePath(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+function isFilePath(filePath: string): boolean {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+export function compareVersions(a: string, b: string): number {
+  const left = a.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const right = b.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const diff = (left[index] ?? 0) - (right[index] ?? 0);
+    if (diff) return diff < 0 ? -1 : 1;
+  }
   return 0;
 }
 
 function cmdClone(args: string[]): number {
   const parsed = parseOptions(args, {
-    boolean: new Set(["--no-bootstrap-main"]),
+    boolean: new Set(["--no-bootstrap-main", "--if-missing"]),
     value: new Set(),
   });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar clone [--no-bootstrap-main]");
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar clone [--if-missing] [--no-bootstrap-main]");
 
   const [root, config] = loadProject();
+  removeLegacyGitHooks(root);
+  if (parsed.flags.has("--if-missing")) {
+    const sidecarPath = resolveSidecarPath(root, config);
+    if (fs.existsSync(sidecarPath) && hasGitMetadata(sidecarPath)) return 0;
+  }
   cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   registerCurrentInstance(root, config, { event: "clone" });
   return 0;
@@ -315,7 +448,12 @@ function cmdTail(args: string[]): number {
   return 0;
 }
 
-function cmdDaemon(args: string[]): number {
+function cmdDaemon(args: string[]): number | Promise<number> {
+  if (isProjectLocalPath(currentExecutablePath())) {
+    throw new SidecarError(
+      "daemon commands must run from a globally installed sidecar, not a project-local dependency",
+    );
+  }
   const [action, ...rest] = args;
   if (action === "status") {
     if (rest.length) throw new SidecarError("usage: sidecar daemon status");
@@ -333,13 +471,31 @@ function cmdDaemon(args: string[]): number {
     if (rest.length) throw new SidecarError("usage: sidecar daemon restart");
     return cmdDaemonRestart();
   }
+  if (action === "autoupdate") {
+    return cmdDaemonAutoUpdate(rest);
+  }
   if (action === "run") {
     return cmdDaemonRun(rest);
   }
   if (!action || action.startsWith("-")) {
     return cmdDaemonRun(args);
   }
-  throw new SidecarError("usage: sidecar daemon status|enable|disable|restart|run [--once] [--interval seconds]");
+  throw new SidecarError(
+    "usage: sidecar daemon status|enable|disable|restart|autoupdate on|off|run [--once] [--interval seconds]",
+  );
+}
+
+function cmdDaemonAutoUpdate(args: string[]): number {
+  const [value, ...rest] = args;
+  if (rest.length || (value !== "on" && value !== "off")) {
+    throw new SidecarError("usage: sidecar daemon autoupdate on|off");
+  }
+  if (!shouldUseGlobalRegistry()) {
+    throw new SidecarError("daemon is only available from a globally installed sidecar");
+  }
+  writeSettings({ ...readSettings(), autoUpdate: value === "on" });
+  console.log(`autoupdate: ${value}`);
+  return 0;
 }
 
 function cmdDaemonStatus(): number {
@@ -350,6 +506,7 @@ function cmdDaemonStatus(): number {
   const settings = readSettings();
   const service = daemonServiceStatus();
   console.log(`daemon:   ${settings.daemonEnabled ? "enabled" : "disabled"}`);
+  console.log(`update:   ${settings.autoUpdate ? "auto" : "manual"}`);
   console.log(`service:  ${daemonServiceLabel(service)}`);
   if (service.path) console.log(`agent:    ${service.path}`);
   if (service.message) console.log(`detail:   ${service.message}`);
@@ -406,29 +563,57 @@ function cmdDaemonRestart(): number {
   return 0;
 }
 
-function cmdDaemonRun(args: string[]): number {
+async function cmdDaemonRun(args: string[]): Promise<number> {
   const parsed = parseOptions(args, {
     boolean: new Set(["--once"]),
-    value: new Set(["--interval"]),
+    value: new Set(["--interval", "--debounce"]),
   });
   if (parsed.positional.length) throw new SidecarError("usage: sidecar daemon run [--once] [--interval seconds]");
   if (!shouldUseGlobalRegistry()) {
     throw new SidecarError("daemon is only available from a globally installed sidecar");
   }
 
-  const intervalSeconds = Number(getValue(parsed, "--interval", "300"));
+  const intervalSeconds = Number(getValue(parsed, "--interval", "600"));
   if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
     throw new SidecarError("--interval must be > 0");
   }
-
-  logSidecarEvent("daemon-start", { intervalSeconds, once: parsed.flags.has("--once") });
-  console.log(`sidecar daemon polling every ${intervalSeconds}s`);
-
-  while (true) {
-    runDaemonCycle();
-    if (parsed.flags.has("--once")) return 0;
-    sleep(intervalSeconds * 1000);
+  const debounceSeconds = Number(getValue(parsed, "--debounce", "60"));
+  if (!Number.isFinite(debounceSeconds) || debounceSeconds < 0) {
+    throw new SidecarError("--debounce must be >= 0");
   }
+
+  const { runDaemonLoop } = await import("./daemon.js");
+  return runDaemonLoop({
+    once: parsed.flags.has("--once"),
+    intervalSeconds,
+    debounceSeconds,
+  });
+}
+
+async function cmdUpdate(args: string[]): Promise<number> {
+  if (args.length) throw new SidecarError("usage: sidecar update");
+  if (isProjectLocalPath(currentExecutablePath())) {
+    throw new SidecarError("update must run from a globally installed sidecar; update local installs with your package manager");
+  }
+
+  console.log(`checking npm for ${PACKAGE_NAME} updates...`);
+  const { checkAndInstallUpdate } = await import("./daemon.js");
+  const result = await checkAndInstallUpdate();
+  logSidecarEvent("manual-update", { ...result });
+
+  if (result.status === "current") {
+    console.log(`sidecar v${result.current} is up to date`);
+    return 0;
+  }
+  if (result.status !== "updated") {
+    throw new SidecarError(result.message ?? `update ${result.status}`);
+  }
+
+  console.log(`updated sidecar v${result.current} -> v${result.latest}`);
+  const service = installDaemonService();
+  console.log(`service:  ${daemonServiceLabel(service)}`);
+  if (service.message) console.log(`detail:   ${service.message}`);
+  return 0;
 }
 
 function cmdRegisterInstall(args: string[]): number {
@@ -470,6 +655,7 @@ function cmdSync(args: string[]): number {
   if (parsed.positional.length) throw new SidecarError("usage: sidecar sync [--no-snapshot] [-m message]");
 
   const [root, config] = loadProject();
+  removeLegacyGitHooks(root);
   syncProject(root, config, {
     snapshot: !parsed.flags.has("--no-snapshot"),
     message: getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined,
@@ -479,18 +665,27 @@ function cmdSync(args: string[]): number {
 }
 
 function syncProject(root: string, config: SidecarConfig, options: { snapshot: boolean; message?: string }): void {
-  const sidecarPath = ensureSidecarCheckout(root, config);
-  const inbox = expandInbox(config, sidecarPath);
-  ensureCommitIdentity(sidecarPath);
-  fetch(sidecarPath, true, false);
-  ensureInboxBranch(sidecarPath, config, inbox);
-  if (options.snapshot) {
-    snapshot(sidecarPath, root, inbox, options.message);
+  const releaseLock = acquireSyncLock(root);
+  if (!releaseLock) {
+    console.log("another sidecar sync is already running; skipping");
+    return;
   }
-  syncBranchBeforePush(sidecarPath, inbox);
-  pushBranch(sidecarPath, inbox);
-  mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: true });
-  refreshInboxFromMain(sidecarPath, config, inbox);
+  try {
+    const sidecarPath = ensureSidecarCheckout(root, config);
+    const inbox = expandInbox(config, sidecarPath);
+    ensureCommitIdentity(sidecarPath);
+    fetch(sidecarPath, true, false);
+    ensureInboxBranch(sidecarPath, config, inbox);
+    if (options.snapshot) {
+      snapshot(sidecarPath, root, inbox, options.message);
+    }
+    syncBranchBeforePush(sidecarPath, inbox);
+    pushBranch(sidecarPath, inbox);
+    mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: true });
+    refreshInboxFromMain(sidecarPath, config, inbox);
+  } finally {
+    releaseLock();
+  }
 }
 
 function cmdMerge(args: string[]): number {
@@ -986,28 +1181,37 @@ export function daemonLaunchAgentPath(): string | undefined {
   return path.join(os.homedir(), "Library", "LaunchAgents", `${DAEMON_LABEL}.plist`);
 }
 
+const DEFAULT_SETTINGS: SidecarSettings = { daemonEnabled: true, autoUpdate: true };
+
 export function readSettings(): SidecarSettings {
   const filePath = settingsPath();
-  if (!fs.existsSync(filePath)) return { daemonEnabled: true };
+  if (!fs.existsSync(filePath)) return { ...DEFAULT_SETTINGS };
   try {
     const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
-    if (!raw || typeof raw !== "object") return { daemonEnabled: true };
+    if (!raw || typeof raw !== "object") return { ...DEFAULT_SETTINGS };
     const record = raw as Record<string, unknown>;
     return {
       daemonEnabled: typeof record.daemonEnabled === "boolean" ? record.daemonEnabled : true,
+      autoUpdate: typeof record.autoUpdate === "boolean" ? record.autoUpdate : true,
+      lastUpdateCheckAt: typeof record.lastUpdateCheckAt === "string" ? record.lastUpdateCheckAt : undefined,
     };
   } catch (error) {
     logSidecarEvent("failure", {
       command: "daemon",
       message: `could not read ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
     });
-    return { daemonEnabled: true };
+    return { ...DEFAULT_SETTINGS };
   }
 }
 
 export function writeSettings(settings: SidecarSettings): void {
   ensureStateDir();
-  fs.writeFileSync(settingsPath(), `${JSON.stringify({ daemonEnabled: settings.daemonEnabled }, null, 2)}\n`, "utf8");
+  const record: Record<string, unknown> = {
+    daemonEnabled: settings.daemonEnabled,
+    autoUpdate: settings.autoUpdate,
+  };
+  if (settings.lastUpdateCheckAt) record.lastUpdateCheckAt = settings.lastUpdateCheckAt;
+  fs.writeFileSync(settingsPath(), `${JSON.stringify(record, null, 2)}\n`, "utf8");
 }
 
 export function readInstances(): SidecarInstance[] {
@@ -1070,110 +1274,6 @@ export function listInstanceStatuses(): InstanceStatus[] {
   return readInstances().map((instance) => instanceStatus(instance));
 }
 
-export function runDaemonCycle(): number {
-  const settings = readSettings();
-  if (!settings.daemonEnabled) {
-    logSidecarEvent("daemon-skip", { reason: "daemon-disabled" });
-    return 0;
-  }
-
-  let synced = 0;
-  let cloned = 0;
-  for (const instance of readInstances()) {
-    const status = instanceStatus(instance);
-    if (status.config !== "ok") {
-      logSidecarEvent("daemon-skip", {
-        root: instance.root,
-        reason: `config-${status.config}`,
-      });
-      continue;
-    }
-    let config: SidecarConfig;
-    try {
-      config = readConfig(instance.configPath);
-    } catch (error) {
-      logSidecarEvent("failure", {
-        command: "daemon",
-        root: instance.root,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      continue;
-    }
-    if (status.checkout !== "present") {
-      try {
-        logSidecarEvent("daemon-clone-start", { root: instance.root, sidecarPath: instance.sidecarPath });
-        cloneOrUpdate(instance.root, config, true);
-        registerCurrentInstance(instance.root, config, { event: "daemon-clone" });
-        cloned += 1;
-      } catch (error) {
-        logSidecarEvent("failure", {
-          command: "daemon",
-          root: instance.root,
-          message: error instanceof Error ? error.message : String(error),
-        });
-      }
-      continue;
-    }
-    let remoteChanged = false;
-    try {
-      remoteChanged = hasRemoteReconcileWork(instance.sidecarPath, config);
-    } catch (error) {
-      logSidecarEvent("failure", {
-        command: "daemon",
-        root: instance.root,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      continue;
-    }
-    if (status.dirty !== "yes" && !remoteChanged) continue;
-
-    try {
-      logSidecarEvent("daemon-sync-start", {
-        root: instance.root,
-        sidecarPath: instance.sidecarPath,
-        dirty: status.dirty === "yes",
-        remoteChanged,
-      });
-      syncProject(instance.root, config, { snapshot: true, message: "sidecar auto sync" });
-      registerCurrentInstance(instance.root, config, { event: "daemon-sync", lastSyncAt: nowIso() });
-      synced += 1;
-    } catch (error) {
-      logSidecarEvent("failure", {
-        command: "daemon",
-        root: instance.root,
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  logSidecarEvent("daemon-cycle", { synced, cloned });
-  return synced;
-}
-
-function hasRemoteReconcileWork(sidecarPath: string, config: SidecarConfig): boolean {
-  fetch(sidecarPath, true);
-
-  const inbox = expandInbox(config, sidecarPath);
-  if (remoteRefExists(sidecarPath, inbox)) {
-    if (!branchExists(sidecarPath, inbox)) return true;
-    if (!isAncestor(sidecarPath, `origin/${inbox}`, inbox)) return true;
-  }
-
-  if (remoteRefExists(sidecarPath, config.branch)) {
-    if (!branchExists(sidecarPath, config.branch)) return true;
-    if (!isAncestor(sidecarPath, `origin/${config.branch}`, config.branch)) return true;
-  }
-
-  const mergeBase = branchExists(sidecarPath, config.branch)
-    ? config.branch
-    : remoteRefExists(sidecarPath, config.branch)
-      ? `origin/${config.branch}`
-      : "HEAD";
-  return pendingInboxBranches(sidecarPath, config).some(
-    (remoteBranch) => !isAncestor(sidecarPath, remoteBranch, mergeBase),
-  );
-}
-
 type DaemonServiceStatus = {
   available: boolean;
   installed: boolean;
@@ -1182,25 +1282,61 @@ type DaemonServiceStatus = {
   message?: string;
 };
 
+export function daemonServicePath(): string | undefined {
+  if (process.platform === "darwin") return daemonLaunchAgentPath();
+  if (process.platform === "linux") {
+    const configDir = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+    return path.join(configDir, "systemd", "user", `${DAEMON_LABEL}.service`);
+  }
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+    return path.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "sidecar-daemon.vbs");
+  }
+  return undefined;
+}
+
+export function daemonPidPath(): string {
+  return path.join(sidecarStateDir(), "daemon.pid");
+}
+
+export function isDaemonRunning(): boolean {
+  let pid: number;
+  try {
+    pid = Number(fs.readFileSync(daemonPidPath(), "utf8").trim());
+  } catch {
+    return false;
+  }
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function daemonServiceFileContents(invocation: string[]): string {
+  if (process.platform === "darwin") return daemonPlist(invocation);
+  if (process.platform === "linux") return daemonSystemdUnit(invocation);
+  return daemonWindowsStartupScript(invocation);
+}
+
 function daemonServiceStatus(): DaemonServiceStatus {
   if (process.env[SKIP_SERVICE_ENV] === "1") {
     return { available: false, installed: false, running: false, message: "skipped" };
   }
-  const plistPath = daemonLaunchAgentPath();
-  if (!plistPath) return { available: false, installed: false, running: false, message: "unsupported platform" };
-  if (!fs.existsSync(plistPath)) {
-    return { available: true, installed: false, running: false, path: plistPath };
-  }
-  const result = spawnSync("launchctl", ["print", `${launchctlDomain()}/${DAEMON_LABEL}`], {
-    encoding: "utf8",
-  });
-  const running = result.status === 0 && /\bstate = running\b/.test(result.stdout);
+  const servicePath = daemonServicePath();
+  if (!servicePath) return { available: false, installed: false, running: false, message: "unsupported platform" };
+  const message =
+    process.platform === "linux" && !findExecutableOnPath("systemctl")
+      ? "systemd unavailable; run `sidecar daemon run` manually"
+      : undefined;
   return {
     available: true,
-    installed: true,
-    running,
-    path: plistPath,
-    message: running || result.status === 0 ? undefined : launchctlMessage(result),
+    installed: fs.existsSync(servicePath),
+    running: isDaemonRunning(),
+    path: servicePath,
+    message,
   };
 }
 
@@ -1208,32 +1344,65 @@ function installDaemonService(): DaemonServiceStatus {
   if (process.env[SKIP_SERVICE_ENV] === "1") {
     return { available: false, installed: false, running: false, message: "skipped" };
   }
-  const plistPath = daemonLaunchAgentPath();
-  if (!plistPath) return { available: false, installed: false, running: false, message: "unsupported platform" };
+  const servicePath = daemonServicePath();
+  if (!servicePath) return { available: false, installed: false, running: false, message: "unsupported platform" };
   if (typeof process.getuid === "function" && process.getuid() === 0) {
-    return { available: false, installed: false, running: false, path: plistPath, message: "root install skipped" };
+    return { available: false, installed: false, running: false, path: servicePath, message: "root install skipped" };
   }
 
-  const stateDir = sidecarStateDir();
-  fs.mkdirSync(stateDir, { recursive: true });
-  fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+  fs.mkdirSync(sidecarStateDir(), { recursive: true });
+  fs.mkdirSync(path.dirname(servicePath), { recursive: true });
   const invocation = currentExecutableInvocation();
-  fs.writeFileSync(plistPath, daemonPlist(invocation), "utf8");
+  fs.writeFileSync(servicePath, daemonServiceFileContents(invocation), "utf8");
 
-  const domain = launchctlDomain();
-  spawnSync("launchctl", ["bootout", domain, plistPath], { stdio: "ignore" });
-  const bootstrap = spawnSync("launchctl", ["bootstrap", domain, plistPath], { encoding: "utf8" });
-  if (bootstrap.status !== 0) {
-    return {
-      available: true,
-      installed: true,
-      running: false,
-      path: plistPath,
-      message: bootstrap.stderr.trim() || bootstrap.stdout.trim() || "launchctl bootstrap failed",
-    };
+  if (process.platform === "darwin") {
+    const domain = launchctlDomain();
+    spawnSync("launchctl", ["bootout", domain, servicePath], { stdio: "ignore" });
+    const bootstrap = spawnSync("launchctl", ["bootstrap", domain, servicePath], { encoding: "utf8" });
+    if (bootstrap.status !== 0) {
+      return {
+        available: true,
+        installed: true,
+        running: false,
+        path: servicePath,
+        message: bootstrap.stderr.trim() || bootstrap.stdout.trim() || "launchctl bootstrap failed",
+      };
+    }
+    spawnSync("launchctl", ["enable", `${domain}/${DAEMON_LABEL}`], { stdio: "ignore" });
+    spawnSync("launchctl", ["kickstart", "-k", `${domain}/${DAEMON_LABEL}`], { stdio: "ignore" });
+    return daemonServiceStatus();
   }
-  spawnSync("launchctl", ["enable", `${domain}/${DAEMON_LABEL}`], { stdio: "ignore" });
-  spawnSync("launchctl", ["kickstart", "-k", `${domain}/${DAEMON_LABEL}`], { stdio: "ignore" });
+
+  if (process.platform === "linux") {
+    if (!findExecutableOnPath("systemctl")) {
+      return {
+        available: true,
+        installed: true,
+        running: isDaemonRunning(),
+        path: servicePath,
+        message: "systemd unavailable; run `sidecar daemon run` manually",
+      };
+    }
+    spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
+    const enable = spawnSync("systemctl", ["--user", "enable", "--now", `${DAEMON_LABEL}.service`], {
+      encoding: "utf8",
+    });
+    spawnSync("systemctl", ["--user", "restart", `${DAEMON_LABEL}.service`], { stdio: "ignore" });
+    if (enable.status !== 0) {
+      return {
+        available: true,
+        installed: true,
+        running: isDaemonRunning(),
+        path: servicePath,
+        message: enable.stderr.trim() || enable.stdout.trim() || "systemctl enable failed",
+      };
+    }
+    return daemonServiceStatus();
+  }
+
+  // Windows: a Startup-folder script needs no elevation, unlike schtasks ONLOGON.
+  stopDaemonProcess();
+  startDetachedDaemon(invocation);
   return daemonServiceStatus();
 }
 
@@ -1241,10 +1410,60 @@ function stopDaemonService(): DaemonServiceStatus {
   if (process.env[SKIP_SERVICE_ENV] === "1") {
     return { available: false, installed: false, running: false, message: "skipped" };
   }
-  const plistPath = daemonLaunchAgentPath();
-  if (!plistPath) return { available: false, installed: false, running: false, message: "unsupported platform" };
-  spawnSync("launchctl", ["bootout", launchctlDomain(), plistPath], { stdio: "ignore" });
-  return { available: true, installed: fs.existsSync(plistPath), running: false, path: plistPath };
+  const servicePath = daemonServicePath();
+  if (!servicePath) return { available: false, installed: false, running: false, message: "unsupported platform" };
+  if (process.platform === "darwin") {
+    spawnSync("launchctl", ["bootout", launchctlDomain(), servicePath], { stdio: "ignore" });
+  } else if (process.platform === "linux" && findExecutableOnPath("systemctl")) {
+    spawnSync("systemctl", ["--user", "disable", "--now", `${DAEMON_LABEL}.service`], { stdio: "ignore" });
+  } else if (process.platform === "win32" && fs.existsSync(servicePath)) {
+    fs.rmSync(servicePath, { force: true });
+  }
+  stopDaemonProcess();
+  return { available: true, installed: fs.existsSync(servicePath), running: false, path: servicePath };
+}
+
+function stopDaemonProcess(): void {
+  let pid: number;
+  try {
+    pid = Number(fs.readFileSync(daemonPidPath(), "utf8").trim());
+  } catch {
+    return;
+  }
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    // Already gone.
+  }
+}
+
+export function startDetachedDaemon(invocation: string[] = currentExecutableInvocation()): void {
+  const child = spawn(invocation[0], invocation.slice(1), {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: { ...process.env, [SKIP_LOCAL_EXEC_ENV]: "1", [GLOBAL_EXEC_ENV]: "1" },
+  });
+  child.unref();
+}
+
+// The daemon calls this each cycle so a deleted service definition comes back
+// on its own; activation is left to the next enable/restart or login.
+export function ensureDaemonServiceFile(): void {
+  if (process.env[SKIP_SERVICE_ENV] === "1") return;
+  const servicePath = daemonServicePath();
+  if (!servicePath || fs.existsSync(servicePath)) return;
+  try {
+    fs.mkdirSync(path.dirname(servicePath), { recursive: true });
+    fs.writeFileSync(servicePath, daemonServiceFileContents(currentExecutableInvocation()), "utf8");
+    logSidecarEvent("daemon-service-heal", { path: servicePath });
+  } catch (error) {
+    logSidecarEvent("failure", {
+      command: "daemon",
+      message: `could not restore service file: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
 }
 
 function daemonServiceLabel(service: DaemonServiceStatus): string {
@@ -1265,13 +1484,11 @@ function launchctlDomain(): string {
 }
 
 function currentExecutableInvocation(): string[] {
-  let executable = process.argv[1] || fileURLToPath(import.meta.url);
-  try {
-    executable = fs.realpathSync(executable);
-  } catch {
-    executable = path.resolve(executable);
-  }
-  return [process.execPath, executable, "daemon", "run"];
+  return [process.execPath, currentExecutablePath(), "daemon", "run"];
+}
+
+function currentExecutablePath(): string {
+  return realpathOr(process.argv[1] || fileURLToPath(import.meta.url));
 }
 
 function currentExecutableStamp(programArguments: string[]): string {
@@ -1298,6 +1515,31 @@ function daemonPlist(programArguments: string[]): string {
       SIDECAR_DAEMON_EXECUTABLE: currentExecutableStamp(programArguments),
     },
   });
+}
+
+function daemonSystemdUnit(programArguments: string[]): string {
+  const execStart = programArguments.map((part) => `"${part.replaceAll('"', '\\"')}"`).join(" ");
+  return [
+    "[Unit]",
+    "Description=sidecar background sync daemon",
+    "",
+    "[Service]",
+    `ExecStart=${execStart}`,
+    "Restart=always",
+    "RestartSec=10",
+    `Environment="PATH=${process.env.PATH || "/usr/local/bin:/usr/bin:/bin"}"`,
+    `Environment="SIDECAR_DAEMON_EXECUTABLE=${currentExecutableStamp(programArguments)}"`,
+    "",
+    "[Install]",
+    "WantedBy=default.target",
+    "",
+  ].join("\n");
+}
+
+function daemonWindowsStartupScript(programArguments: string[]): string {
+  // VBScript doubles quotes to escape them; window style 0 keeps it hidden.
+  const command = programArguments.map((part) => `""${part}""`).join(" ");
+  return `CreateObject("WScript.Shell").Run "${command}", 0, False\r\n`;
 }
 
 function plist(value: Record<string, unknown>): string {
@@ -1337,9 +1579,19 @@ function escapeXml(value: string): string {
     .replaceAll("'", "&apos;");
 }
 
+const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
+
 export function logSidecarEvent(event: string, fields: Record<string, unknown> = {}): void {
   try {
     ensureStateDir();
+    const logPath = sidecarLogPath();
+    try {
+      if (fs.statSync(logPath).size > LOG_ROTATE_BYTES) {
+        fs.renameSync(logPath, `${logPath}.1`);
+      }
+    } catch {
+      // Missing log file: nothing to rotate.
+    }
     const record = {
       timestamp: nowIso(),
       event,
@@ -1435,6 +1687,48 @@ function shouldUseGlobalRegistry(): boolean {
   return process.env[GLOBAL_EXEC_ENV] === "1" || !findDependencyRoot(process.cwd());
 }
 
+function isProjectLocalPath(executable: string): boolean {
+  const depRoot = findDependencyRoot(path.dirname(executable));
+  if (!depRoot) return false;
+  if (realpathOr(depRoot) === realpathOr(bunGlobalRoot())) return false;
+  return isInsidePath(executable, path.join(depRoot, "node_modules"));
+}
+
+export function bunGlobalRoot(): string {
+  return path.join(process.env.BUN_INSTALL || path.join(os.homedir(), ".bun"), "install", "global");
+}
+
+function realpathOr(filePath: string): string {
+  try {
+    return fs.realpathSync(filePath);
+  } catch {
+    return path.resolve(filePath);
+  }
+}
+
+function isInsidePath(child: string, parent: string): boolean {
+  const relative = path.relative(parent, child);
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+export function packageVersion(): string {
+  let current = path.dirname(fileURLToPath(import.meta.url));
+  while (true) {
+    const manifestPath = path.join(current, "package.json");
+    if (fs.existsSync(manifestPath)) {
+      try {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { name?: string; version?: string };
+        if (manifest.name === PACKAGE_NAME && manifest.version) return manifest.version;
+      } catch {
+        // keep walking; an unrelated or unreadable manifest is not ours
+      }
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return "0.0.0";
+    current = parent;
+  }
+}
+
 function findDependencyRoot(start: string): string | undefined {
   let current = path.resolve(start);
   while (true) {
@@ -1445,7 +1739,7 @@ function findDependencyRoot(start: string): string | undefined {
   }
 }
 
-function projectDependsOnSidecar(projectRoot: string): boolean {
+export function projectDependsOnSidecar(projectRoot: string): boolean {
   const manifestPath = path.join(projectRoot, "package.json");
   if (!fs.existsSync(manifestPath)) return false;
 
@@ -1472,25 +1766,48 @@ function promptRemote(): string {
     throw new SidecarError("remote URL is required when no .sidecar config exists");
   }
 
-  fs.writeSync(1, "sidecar remote URL: ");
-  const chunks: string[] = [];
-  const buffer = Buffer.alloc(1);
-  while (true) {
-    const bytesRead = fs.readSync(0, buffer, 0, 1, null);
-    if (bytesRead === 0) break;
-    const char = buffer.toString("utf8", 0, bytesRead);
-    if (char === "\n" || char === "\r") break;
-    chunks.push(char);
-  }
-
-  const remote = chunks.join("").trim();
+  const remote = promptLine("sidecar remote URL: ");
   if (!remote) throw new SidecarError("remote URL is required");
   return remote;
+}
+
+function promptYesNo(question: string): boolean {
+  if (!process.stdin.isTTY) return true;
+  const answer = promptLine(question).toLowerCase();
+  return answer === "" || answer === "y" || answer === "yes";
+}
+
+function promptLine(prompt: string): string {
+  fs.writeSync(1, prompt);
+  // Node keeps a TTY stdin non-blocking, so reads on fd 0 hit EAGAIN while idle.
+  const fd = fs.openSync("/dev/tty", "r");
+  try {
+    const chunks: string[] = [];
+    const buffer = Buffer.alloc(1);
+    while (true) {
+      const bytesRead = fs.readSync(fd, buffer, 0, 1, null);
+      if (bytesRead === 0) break;
+      const char = buffer.toString("utf8", 0, bytesRead);
+      if (char === "\n" || char === "\r") break;
+      chunks.push(char);
+    }
+    return chunks.join("").trim();
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function addSidecarDevDependency(root: string): void {
   const manifestPath = path.join(root, "package.json");
   if (!fs.existsSync(manifestPath)) return;
+  try {
+    // Running init inside the sidecar package repo itself must not add a
+    // self-dependency that would shadow the dev build via local delegation.
+    const existing = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { name?: string };
+    if (existing?.name === PACKAGE_NAME) return;
+  } catch {
+    // Unreadable manifests fail with a clear error just below.
+  }
 
   let manifest: Record<string, unknown>;
   try {
@@ -1509,7 +1826,7 @@ function addSidecarDevDependency(root: string): void {
     dependencySpec(manifest.dependencies) ??
     dependencySpec(manifest.optionalDependencies) ??
     dependencySpec(manifest.peerDependencies) ??
-    PACKAGE_SPEC;
+    `^${packageVersion()}`;
 
   manifest.devDependencies = {
     ...objectValue(manifest.devDependencies),
@@ -1564,6 +1881,12 @@ export function gitToplevel(cwd: string): string {
   const result = gitRaw(["-C", cwd, "rev-parse", "--show-toplevel"], { check: false });
   if (result.status !== 0) throw new SidecarError("not inside a Git repository");
   return result.stdout.trim();
+}
+
+export function gitCommonDir(root: string): string {
+  const result = gitRaw(["-C", root, "rev-parse", "--git-common-dir"], { check: false });
+  if (result.status !== 0) throw new SidecarError("not inside a Git repository");
+  return path.resolve(root, result.stdout.trim());
 }
 
 export function requireSidecarCheckout(root: string, config: SidecarConfig): string {
@@ -1622,17 +1945,158 @@ export function readConfig(configPath: string): SidecarConfig {
   return config;
 }
 
-export function ensureGitignoreEntry(gitignorePath: string, sidecarPath: string): void {
-  const stripped = sidecarPath.replace(/^\/+|\/+$/g, "");
-  const entry = `/${stripped}/`;
-  const lines = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, "utf8").split(/\r?\n/) : [];
-  if (!lines.includes(entry)) {
-    lines.push(entry);
-    fs.writeFileSync(gitignorePath, `${lines.join("\n").replace(/\s+$/g, "")}\n`, "utf8");
+// Earlier sidecar versions installed background-sync git hooks in local
+// installs. Local sidecar is now manual-sync only, so every command that
+// touches a project removes any hooks a previous version left behind.
+const LEGACY_HOOK_NAMES = ["post-commit", "pre-push"] as const;
+const LEGACY_HOOK_HELPER = "sidecar-sync-hook";
+const LEGACY_HOOK_MARKER = "sidecar-sync";
+const LEGACY_SYNC_STAMP_FILE = "sidecar-last-sync";
+
+export function removeLegacyGitHooks(root: string): boolean {
+  let removed = false;
+  try {
+    const commonDir = gitCommonDir(root);
+    const hooksDir = path.join(commonDir, "hooks");
+    for (const name of LEGACY_HOOK_NAMES) {
+      const hookPath = path.join(hooksDir, name);
+      if (!fs.existsSync(hookPath)) continue;
+      const lines = fs.readFileSync(hookPath, "utf8").split("\n");
+      const kept = lines.filter((line) => !line.includes(LEGACY_HOOK_MARKER));
+      if (kept.length === lines.length) continue;
+      if (kept.every((line) => !line.trim() || line.trim() === "#!/bin/sh")) {
+        fs.rmSync(hookPath);
+      } else {
+        fs.writeFileSync(hookPath, `${kept.join("\n").replace(/\n*$/, "\n")}`, "utf8");
+      }
+      removed = true;
+    }
+    const helperPath = path.join(hooksDir, LEGACY_HOOK_HELPER);
+    if (fs.existsSync(helperPath)) {
+      fs.rmSync(helperPath);
+      removed = true;
+    }
+    fs.rmSync(path.join(commonDir, LEGACY_SYNC_STAMP_FILE), { force: true });
+  } catch {
+    // Cleanup is best-effort; never block the command that triggered it.
+  }
+  if (removed) logSidecarEvent("legacy-hooks-removed", { root });
+  return removed;
+}
+
+export function acquireSyncLock(root: string): (() => void) | undefined {
+  const lockDir = path.join(gitCommonDir(root), "sidecar-sync-lock");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.mkdirSync(lockDir);
+      fs.writeFileSync(path.join(lockDir, "pid"), String(process.pid), "utf8");
+      return () => fs.rmSync(lockDir, { recursive: true, force: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (!syncLockIsStale(lockDir)) return undefined;
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+  }
+  return undefined;
+}
+
+function syncLockIsStale(lockDir: string): boolean {
+  let pid: number;
+  try {
+    pid = Number(fs.readFileSync(path.join(lockDir, "pid"), "utf8").trim());
+  } catch {
+    // No pid yet: the holder may be mid-acquire, so only steal an old lock.
+    try {
+      return Date.now() - fs.statSync(lockDir).mtimeMs > 10 * 60 * 1000;
+    } catch {
+      return true;
+    }
+  }
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "EPERM";
   }
 }
 
-export function gitignoreEntryForSidecarPath(root: string, sidecarPath: string): string | undefined {
+export function ensureSidecarIgnored(root: string, sidecarPath: string): string | undefined {
+  const entry = ignoreEntryForSidecarPath(root, sidecarPath);
+  if (!entry) return undefined;
+  ensureIgnoreEntry(path.join(root, ".gitignore"), entry);
+  // Interim sidecar versions wrote the entry to .git/info/exclude instead.
+  removeIgnoreEntry(path.join(gitCommonDir(root), "info", "exclude"), entry);
+  return entry;
+}
+
+export function ensureIgnoreEntry(ignorePath: string, sidecarPath: string): void {
+  const stripped = sidecarPath.replace(/^\/+|\/+$/g, "");
+  const entry = `/${stripped}/`;
+  const lines = fs.existsSync(ignorePath) ? fs.readFileSync(ignorePath, "utf8").split(/\r?\n/) : [];
+  if (!lines.includes(entry)) {
+    lines.push(entry);
+    fs.writeFileSync(ignorePath, `${lines.join("\n").replace(/\s+$/g, "")}\n`, "utf8");
+  }
+}
+
+export function removeIgnoreEntry(ignorePath: string, sidecarPath: string): void {
+  if (!fs.existsSync(ignorePath)) return;
+  const stripped = sidecarPath.replace(/^\/+|\/+$/g, "");
+  const entry = `/${stripped}/`;
+  const lines = fs.readFileSync(ignorePath, "utf8").split(/\r?\n/);
+  const kept = lines.filter((line) => line !== entry);
+  if (kept.length === lines.length) return;
+  if (kept.every((line) => !line.trim())) {
+    fs.rmSync(ignorePath);
+  } else {
+    fs.writeFileSync(ignorePath, `${kept.join("\n").replace(/\s+$/g, "")}\n`, "utf8");
+  }
+}
+
+export function hasZedInclusion(root: string, sidecarPath: string): boolean {
+  const settingsPath = path.join(root, ".zed", "settings.json");
+  if (!fs.existsSync(settingsPath)) return false;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    const inclusions = (parsed as Record<string, unknown>).file_scan_inclusions;
+    return Array.isArray(inclusions) && inclusions.includes(zedInclusionGlob(sidecarPath));
+  } catch {
+    return false;
+  }
+}
+
+function zedInclusionGlob(sidecarPath: string): string {
+  return `${sidecarPath.replace(/^\/+|\/+$/g, "")}/**`;
+}
+
+export function ensureZedInclusion(root: string, sidecarPath: string): boolean {
+  const glob = zedInclusionGlob(sidecarPath);
+  const settingsPath = path.join(root, ".zed", "settings.json");
+  let settings: Record<string, unknown> = {};
+  if (fs.existsSync(settingsPath)) {
+    try {
+      // Zed settings allow JSONC; bail rather than clobber comments we cannot round-trip.
+      const parsed = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+      settings = parsed as Record<string, unknown>;
+    } catch {
+      return false;
+    }
+  }
+  // Setting file_scan_inclusions replaces Zed's default [".env*"], so carry it over.
+  const inclusions = Array.isArray(settings.file_scan_inclusions) ? settings.file_scan_inclusions : [".env*"];
+  if (!inclusions.includes(glob)) {
+    inclusions.push(glob);
+    settings.file_scan_inclusions = inclusions;
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  }
+  return true;
+}
+
+export function ignoreEntryForSidecarPath(root: string, sidecarPath: string): string | undefined {
   const resolvedRoot = path.resolve(root);
   const resolvedSidecarPath = path.resolve(root, sidecarPath);
   const relative = path.relative(resolvedRoot, resolvedSidecarPath);

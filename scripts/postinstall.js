@@ -13,6 +13,7 @@ try {
   if (isGlobalInstall()) {
     enableDaemon(packageRoot);
   } else {
+    cloneIfMissing(packageRoot);
     registerWithGlobalSidecar(packageRoot);
   }
 } catch (error) {
@@ -45,6 +46,25 @@ function enableDaemon(packageRoot) {
     return;
   }
   console.warn(result.stdout.trim() || `sidecar: enabled daemon ${LABEL}`);
+}
+
+function cloneIfMissing(packageRoot) {
+  const projectRoot = findInstallProjectRoot();
+  if (!projectRoot || !fs.existsSync(path.join(projectRoot, ".sidecar"))) return;
+
+  const cliPath = path.join(packageRoot, "dist", "cli.js");
+  if (!fs.existsSync(cliPath)) return;
+
+  const result = spawnSync(process.execPath, [cliPath, "clone", "--if-missing"], {
+    cwd: projectRoot,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    console.warn(`sidecar: clone failed: ${result.stderr.trim() || result.stdout.trim()}`);
+    return;
+  }
+  const output = result.stdout.trim();
+  if (output) console.warn(output);
 }
 
 function registerWithGlobalSidecar(packageRoot) {

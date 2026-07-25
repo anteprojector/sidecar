@@ -1,7 +1,15 @@
 {
-  "name": "@anteprojector/sidecar",
-  "version": "0.1.0",
+  "name": "@projectors/sidecar",
+  "version": "0.5.0",
   "description": "A Git-backed sidecar inbox for repo-local development metadata.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anteprojector/sidecar.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
     "sidecar": "dist/cli.js"
@@ -13,9 +21,10 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "rm -rf dist && bun build src/bin.ts --target=node --format=esm --outfile=dist/cli.js",
+    "build": "rm -rf dist && bun build src/bin.ts --target=node --format=esm --external chokidar --outfile=dist/cli.js",
     "check": "tsc --noEmit -p tsconfig.json",
     "postinstall": "node scripts/postinstall.js",
+    "prepublishOnly": "npm run check && npm test",
     "pretest": "npm run build",
     "test": "vitest run"
   },
@@ -28,6 +37,7 @@
     "vitest": "^3.0.8"
   },
   "dependencies": {
+    "chokidar": "^4.0.3",
     "smol-toml": "^1.7.0"
   }
 }

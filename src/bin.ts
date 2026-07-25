@@ -8,33 +8,41 @@ import { main } from "./cli.js";
 
 const SKIP_LOCAL_EXEC_ENV = "SIDECAR_SKIP_LOCAL_EXEC";
 const GLOBAL_EXEC_ENV = "SIDECAR_GLOBAL_EXEC";
-const PACKAGE_NAME = "@anteprojector/sidecar";
+const PACKAGE_NAME = "@projectors/sidecar";
+// Commands that mutate global state (launchd service, instance registry) must
+// execute in this global install, never in a project-local copy — a delegated
+// daemon command would write a launchd plist pointing at node_modules.
+const GLOBAL_ONLY_COMMANDS = new Set(["daemon", "register-install", "update"]);
 
 if (!process.env[SKIP_LOCAL_EXEC_ENV]) {
   const localExecutable = findLocalExecutable(process.cwd(), fileURLToPath(import.meta.url));
   if (localExecutable) {
-    const result = spawnSync(process.execPath, [localExecutable, ...process.argv.slice(2)], {
-      stdio: "inherit",
-      env: {
-        ...process.env,
-        [SKIP_LOCAL_EXEC_ENV]: "1",
-        [GLOBAL_EXEC_ENV]: "1",
-      },
-    });
-    if (result.signal) {
-      process.kill(process.pid, result.signal);
+    if (GLOBAL_ONLY_COMMANDS.has(process.argv[2])) {
+      process.env[GLOBAL_EXEC_ENV] = "1";
+    } else {
+      const result = spawnSync(process.execPath, [localExecutable, ...process.argv.slice(2)], {
+        stdio: "inherit",
+        env: {
+          ...process.env,
+          [SKIP_LOCAL_EXEC_ENV]: "1",
+          [GLOBAL_EXEC_ENV]: "1",
+        },
+      });
+      if (result.signal) {
+        process.kill(process.pid, result.signal);
+      }
+      process.exit(result.status ?? 1);
     }
-    process.exit(result.status ?? 1);
   }
 }
 
-process.exit(main());
+process.exit(await main());
 
 function findLocalExecutable(start: string, self: string): string | undefined {
   let current = path.resolve(start);
   while (true) {
     if (projectDependsOnSidecar(current)) {
-      const candidate = path.join(current, "node_modules", "@anteprojector", "sidecar", "dist", "cli.js");
+      const candidate = path.join(current, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
       if (isFile(candidate) && !sameFile(candidate, self)) {
         return candidate;
       }

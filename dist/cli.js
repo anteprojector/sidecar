@@ -1,168 +1,156 @@
 #!/usr/bin/env node
-
-// src/bin.ts
-import fs2 from "node:fs";
-import path2 from "node:path";
-import { spawnSync as spawnSync2 } from "node:child_process";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
-
-// src/cli.ts
-import crypto from "node:crypto";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { TextDecoder } from "node:util";
+import { createRequire } from "node:module";
+var __create = Object.create;
+var __getProtoOf = Object.getPrototypeOf;
+var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __toESM = (mod, isNodeMode, target) => {
+  target = mod != null ? __create(__getProtoOf(mod)) : {};
+  const to = isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target;
+  for (let key of __getOwnPropNames(mod))
+    if (!__hasOwnProp.call(to, key))
+      __defProp(to, key, {
+        get: () => mod[key],
+        enumerable: true
+      });
+  return to;
+};
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, {
+      get: all[name],
+      enumerable: true,
+      configurable: true,
+      set: (newValue) => all[name] = () => newValue
+    });
+};
+var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
+var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
 // node_modules/smol-toml/dist/date.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-var DATE_TIME_RE = /^(\d{4}-\d{2}-\d{2})?[T ]?(?:(\d{2}):\d{2}(?::\d{2}(?:\.\d+)?)?)?(Z|[-+]\d{2}:\d{2})?$/i;
-
-class TomlDate extends Date {
-  #hasDate = false;
-  #hasTime = false;
-  #offset = null;
-  constructor(date) {
-    let hasDate = true;
-    let hasTime = true;
-    let offset = "Z";
-    if (typeof date === "string") {
-      let match = date.match(DATE_TIME_RE);
-      if (match) {
-        if (!match[1]) {
-          hasDate = false;
-          date = `0000-01-01T${date}`;
-        }
-        hasTime = !!match[2];
-        hasTime && date[10] === " " && (date = date.replace(" ", "T"));
-        if (match[2] && +match[2] > 23) {
-          date = "";
+var DATE_TIME_RE, TomlDate;
+var init_date = __esm(() => {
+  /*!
+   * Copyright (c) Squirrel Chat et al., All rights reserved.
+   * SPDX-License-Identifier: BSD-3-Clause
+   *
+   * Redistribution and use in source and binary forms, with or without
+   * modification, are permitted provided that the following conditions are met:
+   *
+   * 1. Redistributions of source code must retain the above copyright notice, this
+   *    list of conditions and the following disclaimer.
+   * 2. Redistributions in binary form must reproduce the above copyright notice,
+   *    this list of conditions and the following disclaimer in the
+   *    documentation and/or other materials provided with the distribution.
+   * 3. Neither the name of the copyright holder nor the names of its contributors
+   *    may be used to endorse or promote products derived from this software without
+   *    specific prior written permission.
+   *
+   * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+   * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+   * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+   * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+   * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+   * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+   * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+   * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+   * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+   */
+  DATE_TIME_RE = /^(\d{4}-\d{2}-\d{2})?[T ]?(?:(\d{2}):\d{2}(?::\d{2}(?:\.\d+)?)?)?(Z|[-+]\d{2}:\d{2})?$/i;
+  TomlDate = class TomlDate extends Date {
+    #hasDate = false;
+    #hasTime = false;
+    #offset = null;
+    constructor(date) {
+      let hasDate = true;
+      let hasTime = true;
+      let offset = "Z";
+      if (typeof date === "string") {
+        let match = date.match(DATE_TIME_RE);
+        if (match) {
+          if (!match[1]) {
+            hasDate = false;
+            date = `0000-01-01T${date}`;
+          }
+          hasTime = !!match[2];
+          hasTime && date[10] === " " && (date = date.replace(" ", "T"));
+          if (match[2] && +match[2] > 23) {
+            date = "";
+          } else {
+            offset = match[3] || null;
+            date = date.toUpperCase();
+            if (!offset && hasTime)
+              date += "Z";
+          }
         } else {
-          offset = match[3] || null;
-          date = date.toUpperCase();
-          if (!offset && hasTime)
-            date += "Z";
+          date = "";
         }
-      } else {
-        date = "";
+      }
+      super(date);
+      if (!isNaN(this.getTime())) {
+        this.#hasDate = hasDate;
+        this.#hasTime = hasTime;
+        this.#offset = offset;
       }
     }
-    super(date);
-    if (!isNaN(this.getTime())) {
-      this.#hasDate = hasDate;
-      this.#hasTime = hasTime;
-      this.#offset = offset;
+    isDateTime() {
+      return this.#hasDate && this.#hasTime;
     }
-  }
-  isDateTime() {
-    return this.#hasDate && this.#hasTime;
-  }
-  isLocal() {
-    return !this.#hasDate || !this.#hasTime || !this.#offset;
-  }
-  isDate() {
-    return this.#hasDate && !this.#hasTime;
-  }
-  isTime() {
-    return this.#hasTime && !this.#hasDate;
-  }
-  isValid() {
-    return this.#hasDate || this.#hasTime;
-  }
-  toISOString() {
-    let iso = super.toISOString();
-    if (this.isDate())
-      return iso.slice(0, 10);
-    if (this.isTime())
-      return iso.slice(11, 23);
-    if (this.#offset === null)
-      return iso.slice(0, -1);
-    if (this.#offset === "Z")
-      return iso;
-    let offset = +this.#offset.slice(1, 3) * 60 + +this.#offset.slice(4, 6);
-    offset = this.#offset[0] === "-" ? offset : -offset;
-    let offsetDate = new Date(this.getTime() - offset * 60000);
-    return offsetDate.toISOString().slice(0, -1) + this.#offset;
-  }
-  static wrapAsOffsetDateTime(jsDate, offset = "Z") {
-    let date = new TomlDate(jsDate);
-    date.#offset = offset;
-    return date;
-  }
-  static wrapAsLocalDateTime(jsDate) {
-    let date = new TomlDate(jsDate);
-    date.#offset = null;
-    return date;
-  }
-  static wrapAsLocalDate(jsDate) {
-    let date = new TomlDate(jsDate);
-    date.#hasTime = false;
-    date.#offset = null;
-    return date;
-  }
-  static wrapAsLocalTime(jsDate) {
-    let date = new TomlDate(jsDate);
-    date.#hasDate = false;
-    date.#offset = null;
-    return date;
-  }
-}
+    isLocal() {
+      return !this.#hasDate || !this.#hasTime || !this.#offset;
+    }
+    isDate() {
+      return this.#hasDate && !this.#hasTime;
+    }
+    isTime() {
+      return this.#hasTime && !this.#hasDate;
+    }
+    isValid() {
+      return this.#hasDate || this.#hasTime;
+    }
+    toISOString() {
+      let iso = super.toISOString();
+      if (this.isDate())
+        return iso.slice(0, 10);
+      if (this.isTime())
+        return iso.slice(11, 23);
+      if (this.#offset === null)
+        return iso.slice(0, -1);
+      if (this.#offset === "Z")
+        return iso;
+      let offset = +this.#offset.slice(1, 3) * 60 + +this.#offset.slice(4, 6);
+      offset = this.#offset[0] === "-" ? offset : -offset;
+      let offsetDate = new Date(this.getTime() - offset * 60000);
+      return offsetDate.toISOString().slice(0, -1) + this.#offset;
+    }
+    static wrapAsOffsetDateTime(jsDate, offset = "Z") {
+      let date = new TomlDate(jsDate);
+      date.#offset = offset;
+      return date;
+    }
+    static wrapAsLocalDateTime(jsDate) {
+      let date = new TomlDate(jsDate);
+      date.#offset = null;
+      return date;
+    }
+    static wrapAsLocalDate(jsDate) {
+      let date = new TomlDate(jsDate);
+      date.#hasTime = false;
+      date.#offset = null;
+      return date;
+    }
+    static wrapAsLocalTime(jsDate) {
+      let date = new TomlDate(jsDate);
+      date.#hasDate = false;
+      date.#offset = null;
+      return date;
+    }
+  };
+});
 
 // node_modules/smol-toml/dist/error.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
 function getLineColFromPtr(string, ptr) {
   let lines = string.slice(0, ptr).split(/\r\n|\n|\r/g);
   return [lines.length, lines.pop().length + 1];
@@ -188,54 +176,53 @@ function makeCodeBlock(string, line, column) {
   }
   return codeblock;
 }
-
-class TomlError extends Error {
-  line;
-  column;
-  codeblock;
-  constructor(message, options) {
-    const [line, column] = getLineColFromPtr(options.toml, options.ptr);
-    const codeblock = makeCodeBlock(options.toml, line, column);
-    super(`Invalid TOML document: ${message}
+var TomlError;
+var init_error = __esm(() => {
+  /*!
+   * Copyright (c) Squirrel Chat et al., All rights reserved.
+   * SPDX-License-Identifier: BSD-3-Clause
+   *
+   * Redistribution and use in source and binary forms, with or without
+   * modification, are permitted provided that the following conditions are met:
+   *
+   * 1. Redistributions of source code must retain the above copyright notice, this
+   *    list of conditions and the following disclaimer.
+   * 2. Redistributions in binary form must reproduce the above copyright notice,
+   *    this list of conditions and the following disclaimer in the
+   *    documentation and/or other materials provided with the distribution.
+   * 3. Neither the name of the copyright holder nor the names of its contributors
+   *    may be used to endorse or promote products derived from this software without
+   *    specific prior written permission.
+   *
+   * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+   * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+   * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+   * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+   * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+   * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+   * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+   * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+   * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+   */
+  TomlError = class TomlError extends Error {
+    line;
+    column;
+    codeblock;
+    constructor(message, options) {
+      const [line, column] = getLineColFromPtr(options.toml, options.ptr);
+      const codeblock = makeCodeBlock(options.toml, line, column);
+      super(`Invalid TOML document: ${message}
 
 ${codeblock}`, options);
-    this.line = line;
-    this.column = column;
-    this.codeblock = codeblock;
-  }
-}
+      this.line = line;
+      this.column = column;
+      this.codeblock = codeblock;
+    }
+  };
+});
 
 // node_modules/smol-toml/dist/primitive.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-var INT_REGEX = /^((0x[0-9a-fA-F](_?[0-9a-fA-F])*)|(([+-]|0[ob])?\d(_?\d)*))$/;
-var FLOAT_REGEX = /^[+-]?\d(_?\d)*(\.\d(_?\d)*)?([eE][+-]?\d(_?\d)*)?$/;
-var LEADING_ZERO = /^[+-]?0[0-9_]/;
 function parseString(str, ptr) {
   let c = str[ptr++];
   let first = c;
@@ -384,35 +371,43 @@ function parseValue(value, toml, ptr, integersAsBigInt) {
   }
   return date;
 }
+var INT_REGEX, FLOAT_REGEX, LEADING_ZERO;
+var init_primitive = __esm(() => {
+  init_date();
+  init_error();
+  /*!
+   * Copyright (c) Squirrel Chat et al., All rights reserved.
+   * SPDX-License-Identifier: BSD-3-Clause
+   *
+   * Redistribution and use in source and binary forms, with or without
+   * modification, are permitted provided that the following conditions are met:
+   *
+   * 1. Redistributions of source code must retain the above copyright notice, this
+   *    list of conditions and the following disclaimer.
+   * 2. Redistributions in binary form must reproduce the above copyright notice,
+   *    this list of conditions and the following disclaimer in the
+   *    documentation and/or other materials provided with the distribution.
+   * 3. Neither the name of the copyright holder nor the names of its contributors
+   *    may be used to endorse or promote products derived from this software without
+   *    specific prior written permission.
+   *
+   * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+   * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+   * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+   * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+   * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+   * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+   * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+   * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+   * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+   */
+  INT_REGEX = /^((0x[0-9a-fA-F](_?[0-9a-fA-F])*)|(([+-]|0[ob])?\d(_?\d)*))$/;
+  FLOAT_REGEX = /^[+-]?\d(_?\d)*(\.\d(_?\d)*)?([eE][+-]?\d(_?\d)*)?$/;
+  LEADING_ZERO = /^[+-]?0[0-9_]/;
+});
 
 // node_modules/smol-toml/dist/util.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
 function indexOfNewline(str, start = 0, end = str.length) {
   let idx = str.indexOf(`
 `, start);
@@ -473,35 +468,38 @@ function skipUntil(str, ptr, sep, end, banNewLines = false) {
     ptr
   });
 }
+var init_util = __esm(() => {
+  init_error();
+  /*!
+   * Copyright (c) Squirrel Chat et al., All rights reserved.
+   * SPDX-License-Identifier: BSD-3-Clause
+   *
+   * Redistribution and use in source and binary forms, with or without
+   * modification, are permitted provided that the following conditions are met:
+   *
+   * 1. Redistributions of source code must retain the above copyright notice, this
+   *    list of conditions and the following disclaimer.
+   * 2. Redistributions in binary form must reproduce the above copyright notice,
+   *    this list of conditions and the following disclaimer in the
+   *    documentation and/or other materials provided with the distribution.
+   * 3. Neither the name of the copyright holder nor the names of its contributors
+   *    may be used to endorse or promote products derived from this software without
+   *    specific prior written permission.
+   *
+   * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+   * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+   * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+   * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+   * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+   * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+   * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+   * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+   * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+   */
+});
 
 // node_modules/smol-toml/dist/extract.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
 function sliceAndTrimEndOf(str, startPtr, endPtr) {
   let value = str.slice(startPtr, endPtr);
   let commentIdx = value.indexOf("#");
@@ -568,36 +566,41 @@ function extractValue(str, ptr, end, depth, integersAsBigInt) {
     endPtr
   ];
 }
+var init_extract = __esm(() => {
+  init_primitive();
+  init_struct();
+  init_util();
+  init_error();
+  /*!
+   * Copyright (c) Squirrel Chat et al., All rights reserved.
+   * SPDX-License-Identifier: BSD-3-Clause
+   *
+   * Redistribution and use in source and binary forms, with or without
+   * modification, are permitted provided that the following conditions are met:
+   *
+   * 1. Redistributions of source code must retain the above copyright notice, this
+   *    list of conditions and the following disclaimer.
+   * 2. Redistributions in binary form must reproduce the above copyright notice,
+   *    this list of conditions and the following disclaimer in the
+   *    documentation and/or other materials provided with the distribution.
+   * 3. Neither the name of the copyright holder nor the names of its contributors
+   *    may be used to endorse or promote products derived from this software without
+   *    specific prior written permission.
+   *
+   * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+   * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+   * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+   * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+   * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+   * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+   * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+   * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+   * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+   */
+});
 
 // node_modules/smol-toml/dist/struct.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
-var KEY_PART_RE = /^[a-zA-Z0-9-_]+[ \t]*$/;
 function parseKey(str, ptr, end = "=") {
   let dot = ptr - 1;
   let parsed = [];
@@ -739,35 +742,43 @@ function parseArray(str, ptr, depth, integersAsBigInt) {
   }
   return [res, ptr];
 }
+var KEY_PART_RE;
+var init_struct = __esm(() => {
+  init_primitive();
+  init_extract();
+  init_util();
+  init_error();
+  /*!
+   * Copyright (c) Squirrel Chat et al., All rights reserved.
+   * SPDX-License-Identifier: BSD-3-Clause
+   *
+   * Redistribution and use in source and binary forms, with or without
+   * modification, are permitted provided that the following conditions are met:
+   *
+   * 1. Redistributions of source code must retain the above copyright notice, this
+   *    list of conditions and the following disclaimer.
+   * 2. Redistributions in binary form must reproduce the above copyright notice,
+   *    this list of conditions and the following disclaimer in the
+   *    documentation and/or other materials provided with the distribution.
+   * 3. Neither the name of the copyright holder nor the names of its contributors
+   *    may be used to endorse or promote products derived from this software without
+   *    specific prior written permission.
+   *
+   * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+   * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+   * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+   * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+   * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+   * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+   * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+   * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+   * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+   */
+  KEY_PART_RE = /^[a-zA-Z0-9-_]+[ \t]*$/;
+});
 
 // node_modules/smol-toml/dist/parse.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
 function peekTable(key, table, meta, type) {
   let t = table;
   let m = meta;
@@ -880,84 +891,107 @@ function parse(toml, { maxDepth = 1000, integersAsBigInt } = {}) {
   }
   return res;
 }
+var init_parse = __esm(() => {
+  init_struct();
+  init_extract();
+  init_util();
+  init_error();
+  /*!
+   * Copyright (c) Squirrel Chat et al., All rights reserved.
+   * SPDX-License-Identifier: BSD-3-Clause
+   *
+   * Redistribution and use in source and binary forms, with or without
+   * modification, are permitted provided that the following conditions are met:
+   *
+   * 1. Redistributions of source code must retain the above copyright notice, this
+   *    list of conditions and the following disclaimer.
+   * 2. Redistributions in binary form must reproduce the above copyright notice,
+   *    this list of conditions and the following disclaimer in the
+   *    documentation and/or other materials provided with the distribution.
+   * 3. Neither the name of the copyright holder nor the names of its contributors
+   *    may be used to endorse or promote products derived from this software without
+   *    specific prior written permission.
+   *
+   * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+   * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+   * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+   * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+   * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+   * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+   * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+   * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+   * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+   */
+});
 
 // node_modules/smol-toml/dist/stringify.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
+var init_stringify = __esm(() => {
+  /*!
+   * Copyright (c) Squirrel Chat et al., All rights reserved.
+   * SPDX-License-Identifier: BSD-3-Clause
+   *
+   * Redistribution and use in source and binary forms, with or without
+   * modification, are permitted provided that the following conditions are met:
+   *
+   * 1. Redistributions of source code must retain the above copyright notice, this
+   *    list of conditions and the following disclaimer.
+   * 2. Redistributions in binary form must reproduce the above copyright notice,
+   *    this list of conditions and the following disclaimer in the
+   *    documentation and/or other materials provided with the distribution.
+   * 3. Neither the name of the copyright holder nor the names of its contributors
+   *    may be used to endorse or promote products derived from this software without
+   *    specific prior written permission.
+   *
+   * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+   * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+   * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+   * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+   * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+   * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+   * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+   * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+   * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+   */
+});
 
 // node_modules/smol-toml/dist/index.js
-/*!
- * Copyright (c) Squirrel Chat et al., All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the copyright holder nor the names of its contributors
- *    may be used to endorse or promote products derived from this software without
- *    specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- */
+var init_dist = __esm(() => {
+  init_parse();
+  init_stringify();
+  init_date();
+  init_error();
+  /*!
+   * Copyright (c) Squirrel Chat et al., All rights reserved.
+   * SPDX-License-Identifier: BSD-3-Clause
+   *
+   * Redistribution and use in source and binary forms, with or without
+   * modification, are permitted provided that the following conditions are met:
+   *
+   * 1. Redistributions of source code must retain the above copyright notice, this
+   *    list of conditions and the following disclaimer.
+   * 2. Redistributions in binary form must reproduce the above copyright notice,
+   *    this list of conditions and the following disclaimer in the
+   *    documentation and/or other materials provided with the distribution.
+   * 3. Neither the name of the copyright holder nor the names of its contributors
+   *    may be used to endorse or promote products derived from this software without
+   *    specific prior written permission.
+   *
+   * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+   * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+   * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+   * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+   * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+   * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+   * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+   * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+   * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+   */
+});
 
 // src/redaction.ts
-var KEY_NAME_PATTERN = String.raw`[A-Za-z_][A-Za-z0-9_-]*`;
-var QUOTED_KEY_SECRET_REGEX = new RegExp(String.raw`(["'])(${KEY_NAME_PATTERN})\1(\s*:\s*)(["'])([^"'\r\n]+)(\4)`, "g");
-var ASSIGNMENT_SECRET_REGEX = new RegExp(String.raw`\b(${KEY_NAME_PATTERN})(\s*[:=]\s*)(["']?)([^\s"',;` + "`" + String.raw`]+)(\3)`, "g");
-var AUTHORIZATION_HEADER_REGEX = /\b(authorization\s*:\s*bearer\s+)([^\s"',;`]+)/gi;
-var BARE_BEARER_TOKEN_REGEX = /\b(Bearer\s+)(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9._~+/-]{20,})\b/g;
-var TOKEN_PATTERNS = [
-  [/\bAKIA[0-9A-Z]{16}\b/g, "<API_KEY>"],
-  [/\bsk-ant-[A-Za-z0-9_-]{16,}\b/g, "<API_KEY>"],
-  [/\bsk-[A-Za-z0-9_-]{16,}\b/g, "<API_KEY>"],
-  [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b/g, "<TOKEN>"],
-  [/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "<TOKEN>"],
-  [/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "<TOKEN>"],
-  [/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "<TOKEN>"]
-];
-var EMAIL_REGEX = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
-var PHONE_REGEX = /\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b/g;
-var SSN_REGEX = /\b\d{3}-\d{2}-\d{4}\b/g;
-var CREDIT_CARD_CANDIDATE_REGEX = /\b(?:\d[ -]*?){13,19}\b/g;
 function redactText(input) {
   let output = input.replace(AUTHORIZATION_HEADER_REGEX, (_match, prefix) => `${prefix}<TOKEN>`).replace(BARE_BEARER_TOKEN_REGEX, (_match, prefix) => `${prefix}<TOKEN>`).replace(QUOTED_KEY_SECRET_REGEX, (match, keyQuote, key, separator, valueQuote, _value) => isSensitiveKey(key) ? `${keyQuote}${key}${keyQuote}${separator}${valueQuote}${placeholderForKey(key)}${valueQuote}` : match).replace(ASSIGNMENT_SECRET_REGEX, (match, key, separator, quote) => isSensitiveKey(key) ? `${key}${separator}${quote}${placeholderForKey(key)}${quote}` : match);
   for (const [pattern, replacement] of TOKEN_PATTERNS) {
@@ -1031,27 +1065,548 @@ function isLikelyCreditCard(value) {
   }
   return sum % 10 === 0;
 }
+var KEY_NAME_PATTERN, QUOTED_KEY_SECRET_REGEX, ASSIGNMENT_SECRET_REGEX, AUTHORIZATION_HEADER_REGEX, BARE_BEARER_TOKEN_REGEX, TOKEN_PATTERNS, EMAIL_REGEX, PHONE_REGEX, SSN_REGEX, CREDIT_CARD_CANDIDATE_REGEX;
+var init_redaction = __esm(() => {
+  KEY_NAME_PATTERN = String.raw`[A-Za-z_][A-Za-z0-9_-]*`;
+  QUOTED_KEY_SECRET_REGEX = new RegExp(String.raw`(["'])(${KEY_NAME_PATTERN})\1(\s*:\s*)(["'])([^"'\r\n]+)(\4)`, "g");
+  ASSIGNMENT_SECRET_REGEX = new RegExp(String.raw`\b(${KEY_NAME_PATTERN})(\s*[:=]\s*)(["']?)([^\s"',;` + "`" + String.raw`]+)(\3)`, "g");
+  AUTHORIZATION_HEADER_REGEX = /\b(authorization\s*:\s*bearer\s+)([^\s"',;`]+)/gi;
+  BARE_BEARER_TOKEN_REGEX = /\b(Bearer\s+)(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9._~+/-]{20,})\b/g;
+  TOKEN_PATTERNS = [
+    [/\bAKIA[0-9A-Z]{16}\b/g, "<API_KEY>"],
+    [/\bsk-ant-[A-Za-z0-9_-]{16,}\b/g, "<API_KEY>"],
+    [/\bsk-[A-Za-z0-9_-]{16,}\b/g, "<API_KEY>"],
+    [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b/g, "<TOKEN>"],
+    [/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "<TOKEN>"],
+    [/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "<TOKEN>"],
+    [/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "<TOKEN>"]
+  ];
+  EMAIL_REGEX = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+  PHONE_REGEX = /\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b/g;
+  SSN_REGEX = /\b\d{3}-\d{2}-\d{4}\b/g;
+  CREDIT_CARD_CANDIDATE_REGEX = /\b(?:\d[ -]*?){13,19}\b/g;
+});
 
-// src/cli.ts
-var DEFAULT_PATH = "sidecar";
-var DEFAULT_BRANCH = "main";
-var DEFAULT_INBOX = "sidecar-inbox/{user}/{random}";
-var PACKAGE_NAME = "@anteprojector/sidecar";
-var PACKAGE_SPEC = "github:anteprojector/sidecar";
-var GLOBAL_EXEC_ENV = "SIDECAR_GLOBAL_EXEC";
-var STATE_DIR_ENV = "SIDECAR_STATE_DIR";
-var SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE";
-var DAEMON_LABEL = "com.anteprojector.sidecar";
-
-class SidecarError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "SidecarError";
+// src/daemon.ts
+var exports_daemon = {};
+__export(exports_daemon, {
+  selectWatchTargets: () => selectWatchTargets,
+  runDaemonLoop: () => runDaemonLoop,
+  compileGitignoreMatcher: () => compileGitignoreMatcher,
+  checkAndInstallUpdate: () => checkAndInstallUpdate,
+  WATCH_LIMIT: () => WATCH_LIMIT
+});
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+async function runDaemonLoop(options) {
+  const state = {
+    options,
+    syncing: new Set,
+    lastSyncEndAt: new Map,
+    pendingTimers: new Map,
+    trailingPending: new Set,
+    failures: new Map,
+    skipUntilCycle: new Map,
+    misses: new Map,
+    watchers: new Map,
+    cycleCount: 0,
+    lastWatchCount: -1,
+    refreshing: false,
+    staleNotified: false
+  };
+  console.log(`sidecar daemon polling every ${options.intervalSeconds}s`);
+  logSidecarEvent("daemon-start", {
+    intervalSeconds: options.intervalSeconds,
+    debounceSeconds: options.debounceSeconds,
+    once: options.once,
+    pid: process.pid
+  });
+  if (options.once) {
+    await runCycle(state);
+    return 0;
+  }
+  await acquireDaemonPid();
+  installShutdownHandlers();
+  await watchRegistry(state);
+  const bootVersion = packageVersion();
+  while (true) {
+    maybeAdoptNewerInstall(state, bootVersion);
+    await runCycle(state);
+    ensureDaemonServiceFile();
+    await refreshWatchers(state);
+    await maybeAutoUpdate();
+    await delay(options.intervalSeconds * 1000);
   }
 }
-function main(argv = process.argv.slice(2)) {
+function maybeAdoptNewerInstall(state, bootVersion) {
+  const diskVersion = packageVersion();
+  if (diskVersion !== bootVersion) {
+    logSidecarEvent("daemon-stale", { running: bootVersion, installed: diskVersion, reason: "in-place-update" });
+    restartAfterUpdate();
+    return;
+  }
+  const onPath = findGlobalSidecarExecutable();
+  if (!onPath)
+    return;
+  if (realpathOr(onPath) === realpathOr(currentCliPath()))
+    return;
+  const pathVersion = globalSidecarVersion(onPath);
+  if (!pathVersion || pathVersion === diskVersion)
+    return;
+  if (process.stdout.isTTY) {
+    if (!state.staleNotified) {
+      state.staleNotified = true;
+      console.log(`sidecar v${pathVersion} is installed at ${onPath}; run \`sidecar daemon restart\` to switch to it`);
+    }
+    return;
+  }
+  logSidecarEvent("daemon-stale", {
+    running: diskVersion,
+    installed: pathVersion,
+    executable: onPath,
+    reason: "new-install"
+  });
+  const child = spawn(onPath, ["daemon", "restart"], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: { ...process.env, [SKIP_LOCAL_EXEC_ENV]: "1", [GLOBAL_EXEC_ENV]: "1" }
+  });
+  child.unref();
+}
+async function runCycle(state) {
+  const settings = readSettings();
+  if (!settings.daemonEnabled) {
+    logSidecarEvent("daemon-skip", { reason: "daemon-disabled" });
+    return;
+  }
+  state.cycleCount += 1;
+  let synced = 0;
+  let failed = 0;
+  let skipped = 0;
+  for (const instance of readInstances()) {
+    if (!fs.existsSync(instance.configPath)) {
+      const misses = (state.misses.get(instance.root) ?? 0) + 1;
+      state.misses.set(instance.root, misses);
+      if (misses >= PRUNE_AFTER_MISSES) {
+        pruneInstance(instance.root);
+        state.misses.delete(instance.root);
+      } else {
+        logSidecarEvent("daemon-skip", { root: instance.root, reason: "config-missing", misses });
+      }
+      skipped += 1;
+      continue;
+    }
+    state.misses.delete(instance.root);
+    if (state.cycleCount < (state.skipUntilCycle.get(instance.root) ?? 0)) {
+      skipped += 1;
+      continue;
+    }
+    if (await syncInstance(state, instance.root, "cycle")) {
+      synced += 1;
+    } else {
+      failed += 1;
+    }
+  }
+  logSidecarEvent("daemon-cycle", { synced, failed, skipped });
+}
+function pruneInstance(root) {
+  writeInstances(readInstances().filter((instance) => instance.root !== root));
+  logSidecarEvent("daemon-prune", { root, reason: "config-missing" });
+}
+async function syncInstance(state, root, trigger) {
+  if (state.syncing.has(root))
+    return false;
+  state.syncing.add(root);
   try {
-    const status = run(argv);
+    const localCli = localSidecarCliPath(root);
+    const cli = localCli ?? currentCliPath();
+    logSidecarEvent("daemon-sync-start", { root, trigger, local: Boolean(localCli) });
+    const result = await runChild(process.execPath, [cli, "sync"], {
+      cwd: root,
+      env: { ...process.env, [SKIP_LOCAL_EXEC_ENV]: "1", [GLOBAL_EXEC_ENV]: "1" },
+      timeoutMs: SYNC_TIMEOUT_MS
+    });
+    if (result.status === 0) {
+      state.failures.delete(root);
+      state.skipUntilCycle.delete(root);
+      logSidecarEvent("daemon-sync", { root, trigger, local: Boolean(localCli) });
+      return true;
+    }
+    const failures = (state.failures.get(root) ?? 0) + 1;
+    state.failures.set(root, failures);
+    state.skipUntilCycle.set(root, state.cycleCount + Math.min(2 ** (failures - 1), MAX_BACKOFF_CYCLES));
+    logSidecarEvent("failure", {
+      command: "daemon",
+      root,
+      trigger,
+      message: result.timedOut ? "sync timed out" : result.output.trim().slice(-500) || `sync exited ${result.status}`
+    });
+    return false;
+  } finally {
+    state.syncing.delete(root);
+    state.lastSyncEndAt.set(root, Date.now());
+  }
+}
+function localSidecarCliPath(root) {
+  if (!projectDependsOnSidecar(root))
+    return;
+  const candidate = path.join(root, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+  if (!isFile(candidate))
+    return;
+  try {
+    if (fs.realpathSync(candidate) === fs.realpathSync(currentCliPath()))
+      return;
+  } catch {}
+  return candidate;
+}
+function currentCliPath() {
+  return process.argv[1] || fileURLToPath(import.meta.url);
+}
+function selectWatchTargets(instances, limit = WATCH_LIMIT) {
+  return [...instances].filter((instance) => fs.existsSync(instance.configPath) && fs.existsSync(instance.sidecarPath)).sort((left, right) => instanceRecency(right) - instanceRecency(left)).slice(0, limit);
+}
+function instanceRecency(instance) {
+  const time = Date.parse(instance.lastSyncAt ?? instance.updatedAt ?? instance.registeredAt);
+  return Number.isFinite(time) ? time : 0;
+}
+async function loadChokidar() {
+  if (chokidarModule !== undefined)
+    return chokidarModule;
+  try {
+    chokidarModule = await import("chokidar");
+  } catch (error) {
+    chokidarModule = null;
+    logSidecarEvent("daemon-watch-unavailable", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+    console.log("file watching unavailable; relying on interval sync");
+  }
+  return chokidarModule;
+}
+async function refreshWatchers(state) {
+  if (state.refreshing)
+    return;
+  state.refreshing = true;
+  try {
+    const chokidar = await loadChokidar();
+    if (!chokidar)
+      return;
+    const targets = new Map(selectWatchTargets(readInstances()).map((instance) => [instance.root, instance.sidecarPath]));
+    for (const [root, watcher] of [...state.watchers]) {
+      if (targets.has(root))
+        continue;
+      state.watchers.delete(root);
+      await watcher.close().catch(() => {
+        return;
+      });
+    }
+    for (const [root, sidecarPath] of targets) {
+      if (state.watchers.has(root))
+        continue;
+      try {
+        const watcher = chokidar.watch(sidecarPath, {
+          ignored: watchIgnoreMatcher(sidecarPath),
+          ignoreInitial: true,
+          persistent: true
+        });
+        watcher.on("all", () => scheduleWatchSync(state, root));
+        watcher.on("error", (error) => {
+          logSidecarEvent("failure", {
+            command: "daemon",
+            root,
+            message: `watcher error: ${error instanceof Error ? error.message : String(error)}`
+          });
+        });
+        state.watchers.set(root, watcher);
+      } catch (error) {
+        logSidecarEvent("failure", {
+          command: "daemon",
+          root,
+          message: `could not watch ${sidecarPath}: ${error instanceof Error ? error.message : String(error)}`
+        });
+      }
+    }
+    if (state.watchers.size !== state.lastWatchCount) {
+      state.lastWatchCount = state.watchers.size;
+      logSidecarEvent("daemon-watch", { watching: state.watchers.size });
+    }
+  } finally {
+    state.refreshing = false;
+  }
+}
+function scheduleWatchSync(state, root) {
+  if (state.syncing.has(root))
+    return;
+  if (Date.now() - (state.lastSyncEndAt.get(root) ?? 0) < SYNC_ECHO_GRACE_MS)
+    return;
+  if (state.pendingTimers.has(root)) {
+    state.trailingPending.add(root);
+    return;
+  }
+  logSidecarEvent("daemon-watch-debounce", { root, windowSeconds: state.options.debounceSeconds });
+  const timer = setTimeout(() => {
+    state.pendingTimers.delete(root);
+    if (state.trailingPending.delete(root)) {
+      syncInstance(state, root, "watch-trailing");
+    }
+  }, state.options.debounceSeconds * 1000);
+  state.pendingTimers.set(root, timer);
+  syncInstance(state, root, "watch");
+}
+async function watchRegistry(state) {
+  const chokidar = await loadChokidar();
+  if (!chokidar)
+    return;
+  try {
+    const watcher = chokidar.watch(sidecarStateDir(), { ignoreInitial: true, depth: 0 });
+    watcher.on("all", (...args) => {
+      const filePath = typeof args[1] === "string" ? args[1] : "";
+      if (path.basename(filePath) !== "instances.json")
+        return;
+      if (state.registryTimer)
+        return;
+      state.registryTimer = setTimeout(() => {
+        state.registryTimer = undefined;
+        refreshWatchers(state);
+      }, 5000);
+    });
+  } catch (error) {
+    logSidecarEvent("failure", {
+      command: "daemon",
+      message: `could not watch registry: ${error instanceof Error ? error.message : String(error)}`
+    });
+  }
+}
+function compileGitignoreMatcher(lines) {
+  const rules = [];
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\r$/, "").trim();
+    if (!line || line.startsWith("#") || line.startsWith("!"))
+      continue;
+    let pattern = line.replace(/\/+$/, "");
+    const anchored = pattern.startsWith("/") || pattern.includes("/");
+    pattern = pattern.replace(/^\/+/, "");
+    const body = pattern.split("/").map((segment) => segment === "**" ? "\x00" : segment.split("*").map((piece) => piece.split("?").map(escapeRegex).join("[^/]")).join("[^/]*")).join("/").replaceAll("\x00/", "(?:.*/)?").replaceAll("/\x00", "(?:/.*)?").replaceAll("\x00", ".*");
+    rules.push(new RegExp(`${anchored ? "^" : "(^|.*/)"}${body}(/.*)?$`));
+  }
+  return (relativePath) => {
+    const normalized = relativePath.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!normalized)
+      return false;
+    return rules.some((rule) => rule.test(normalized));
+  };
+}
+function watchIgnoreMatcher(sidecarPath) {
+  let gitignore;
+  try {
+    const ignoreFile = path.join(sidecarPath, ".gitignore");
+    if (fs.existsSync(ignoreFile)) {
+      gitignore = compileGitignoreMatcher(fs.readFileSync(ignoreFile, "utf8").split(`
+`));
+    }
+  } catch {}
+  const root = path.resolve(sidecarPath);
+  return (candidate) => {
+    const relative = path.relative(root, candidate);
+    if (!relative)
+      return false;
+    const normalized = relative.split(path.sep).join("/");
+    if (normalized.startsWith(".."))
+      return true;
+    if (normalized === ".git" || normalized.startsWith(".git/"))
+      return true;
+    return gitignore ? gitignore(normalized) : false;
+  };
+}
+async function checkAndInstallUpdate() {
+  const current = packageVersion();
+  const npm = findExecutableOnPath(process.platform === "win32" ? "npm.cmd" : "npm");
+  if (!npm)
+    return { status: "skipped", current, message: "npm not found on PATH" };
+  const view = await runChild(npm, ["view", PACKAGE_NAME, "version"], { timeoutMs: 60000 });
+  const latest = view.stdout.trim();
+  if (view.status !== 0 || !/^\d+\.\d+\.\d+$/.test(latest)) {
+    return {
+      status: "failed",
+      current,
+      message: `version check failed: ${(latest || view.output.trim()).slice(-200)}`
+    };
+  }
+  if (compareVersions(latest, current) <= 0) {
+    return { status: "current", current, latest };
+  }
+  const usesBun = isInsidePath(realpathOr(currentCliPath()), realpathOr(bunGlobalRoot()));
+  const bun = usesBun ? findExecutableOnPath(process.platform === "win32" ? "bun.exe" : "bun") : undefined;
+  const installer = bun ?? npm;
+  const args = bun ? ["add", "-g", `${PACKAGE_NAME}@${latest}`] : ["install", "-g", `${PACKAGE_NAME}@${latest}`];
+  const install = await runChild(installer, args, { timeoutMs: 300000 });
+  if (install.status !== 0) {
+    return {
+      status: "failed",
+      current,
+      latest,
+      message: `install of ${latest} failed: ${install.output.trim().slice(-500)}`
+    };
+  }
+  return { status: "updated", current, latest };
+}
+async function maybeAutoUpdate() {
+  if (process.env[SKIP_UPDATE_ENV] === "1")
+    return;
+  const settings = readSettings();
+  if (!settings.autoUpdate)
+    return;
+  const last = settings.lastUpdateCheckAt ? Date.parse(settings.lastUpdateCheckAt) : 0;
+  if (Number.isFinite(last) && Date.now() - last < UPDATE_CHECK_INTERVAL_MS)
+    return;
+  writeSettings({ ...settings, lastUpdateCheckAt: new Date().toISOString() });
+  const result = await checkAndInstallUpdate();
+  if (result.status === "updated") {
+    logSidecarEvent("daemon-update", { from: result.current, to: result.latest });
+    ensureDaemonServiceFile();
+    restartAfterUpdate();
+    return;
+  }
+  if (result.status === "current") {
+    logSidecarEvent("daemon-update-check", { current: result.current, latest: result.latest });
+    return;
+  }
+  logSidecarEvent("daemon-update-skip", { reason: result.status, message: result.message });
+}
+function restartAfterUpdate() {
+  if (process.stdout.isTTY) {
+    console.log("sidecar updated; restart this daemon to pick up the new version");
+    return;
+  }
+  removeOwnPidFile();
+  if (process.platform === "win32")
+    startDetachedDaemon();
+  process.exit(0);
+}
+async function acquireDaemonPid() {
+  const pidPath = daemonPidPath();
+  while (true) {
+    const holder = readPid(pidPath);
+    if (holder && holder !== process.pid && pidAlive(holder)) {
+      logSidecarEvent("daemon-wait", { holder });
+      await delay(30000);
+      continue;
+    }
+    fs.mkdirSync(path.dirname(pidPath), { recursive: true });
+    fs.writeFileSync(pidPath, `${process.pid}
+`, "utf8");
+    return;
+  }
+}
+function installShutdownHandlers() {
+  const shutdown = () => {
+    removeOwnPidFile();
+    process.exit(0);
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+  process.on("exit", removeOwnPidFile);
+}
+function removeOwnPidFile() {
+  try {
+    if (readPid(daemonPidPath()) === process.pid)
+      fs.rmSync(daemonPidPath(), { force: true });
+  } catch {}
+}
+function readPid(pidPath) {
+  try {
+    const pid = Number(fs.readFileSync(pidPath, "utf8").trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return;
+  }
+}
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+function runChild(command, args, options) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env ?? process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
+    });
+    let output = "";
+    let stdout = "";
+    let timedOut = false;
+    const append = (chunk) => {
+      output = (output + chunk.toString("utf8")).slice(-8192);
+    };
+    child.stdout?.on("data", (chunk) => {
+      stdout = (stdout + chunk.toString("utf8")).slice(-8192);
+      append(chunk);
+    });
+    child.stderr?.on("data", append);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, options.timeoutMs);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ status: 1, output: output || String(error), stdout, timedOut });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ status: code ?? 1, output, stdout, timedOut });
+    });
+  });
+}
+function isFile(filePath) {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+function realpathOr(filePath) {
+  try {
+    return fs.realpathSync(filePath);
+  } catch {
+    return path.resolve(filePath);
+  }
+}
+function isInsidePath(child, parent) {
+  const relative = path.relative(parent, child);
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+var SKIP_LOCAL_EXEC_ENV = "SIDECAR_SKIP_LOCAL_EXEC", GLOBAL_EXEC_ENV = "SIDECAR_GLOBAL_EXEC", SKIP_UPDATE_ENV = "SIDECAR_SKIP_UPDATE", WATCH_LIMIT = 100, SYNC_TIMEOUT_MS, UPDATE_CHECK_INTERVAL_MS, PRUNE_AFTER_MISSES = 3, SYNC_ECHO_GRACE_MS = 5000, MAX_BACKOFF_CYCLES = 6, chokidarModule;
+var init_daemon = __esm(() => {
+  init_cli();
+  SYNC_TIMEOUT_MS = 10 * 60 * 1000;
+  UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+});
+
+// src/cli.ts
+import crypto from "node:crypto";
+import fs2 from "node:fs";
+import os from "node:os";
+import path2 from "node:path";
+import { spawn as spawn2, spawnSync } from "node:child_process";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { TextDecoder } from "node:util";
+async function main(argv = process.argv.slice(2)) {
+  try {
+    const status = await run(argv);
     const command = argv[0];
     if (command && shouldUseGlobalRegistry()) {
       logSidecarEvent("command", { command, status });
@@ -1082,6 +1637,10 @@ function run(argv) {
     printUsage();
     return command ? 0 : 1;
   }
+  if (command === "--version" || command === "-v" || command === "version") {
+    console.log(packageVersion());
+    return 0;
+  }
   switch (command) {
     case "init":
       return cmdInit(rest);
@@ -1097,6 +1656,8 @@ function run(argv) {
       return cmdDaemon(rest);
     case "register-install":
       return cmdRegisterInstall(rest);
+    case "update":
+      return cmdUpdate(rest);
     case "snapshot":
       return cmdSnapshot(rest);
     case "sync":
@@ -1112,10 +1673,11 @@ function printUsage() {
 
 commands:
   init [remote] [--path sidecar] [--branch main] [--inbox template]
-  clone
+  clone [--if-missing]
   status
   instances
-  daemon status|enable|disable|restart|run [--once] [--interval seconds]
+  daemon status|enable|disable|restart|autoupdate on|off|run [--once] [--interval seconds]
+  update
   tail [-f|--follow]
   snapshot [--push] [-m message]
   sync [--no-snapshot] [-m message]
@@ -1132,7 +1694,7 @@ function cmdInit(args) {
   const remote = parsed.positional[0];
   const existingRoot = remote ? undefined : findConfigRootOptional(process.cwd());
   const root = existingRoot ?? gitToplevel(process.cwd());
-  const configPath = path.join(root, ".sidecar");
+  const configPath = path2.join(root, ".sidecar");
   const config = existingRoot ? readConfig(configPath) : {
     remote: remote ?? promptRemote(),
     version: 1,
@@ -1145,31 +1707,151 @@ function cmdInit(args) {
     validateInboxTemplate(config.inbox);
     writeConfig(configPath, config);
   }
-  const gitignoreEntry = gitignoreEntryForSidecarPath(root, config.path);
-  if (gitignoreEntry) {
-    ensureGitignoreEntry(path.join(root, ".gitignore"), gitignoreEntry);
-  }
+  const ignoreEntry = ensureSidecarIgnored(root, config.path);
   console.log(`${existingRoot ? "using" : "wrote"} ${configPath}`);
-  if (gitignoreEntry) {
-    console.log(`ignored ${gitignoreEntry.replace(/\/+$/, "")}/`);
+  if (ignoreEntry) {
+    const name = ignoreEntry.replace(/\/+$/, "");
+    console.log(`ignored ${name}/ via .gitignore`);
+    if (hasZedInclusion(root, ignoreEntry)) {
+      console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
+    } else if (promptYesNo(`include ${name}/ in Zed file search via .zed/settings.json? [Y/n] `)) {
+      if (ensureZedInclusion(root, ignoreEntry)) {
+        console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
+      } else {
+        console.log(`could not parse .zed/settings.json; add "${name}/**" to file_scan_inclusions manually`);
+      }
+    }
   } else {
-    console.log(`sidecar path outside repo; not updating ${path.join(root, ".gitignore")}`);
+    console.log(`sidecar path outside repo; not updating .gitignore`);
+  }
+  if (removeLegacyGitHooks(root)) {
+    console.log("removed legacy sidecar git hooks; syncing is manual or via the global daemon");
   }
   if (!parsed.flags.has("--no-clone")) {
     cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   }
   registerCurrentInstance(root, config, { event: "init" });
   addSidecarDevDependency(root);
+  const globalSidecar = ensureGlobalSidecar();
+  if (globalSidecar)
+    registerInstallWithGlobalSidecar(globalSidecar, root);
+  return 0;
+}
+function ensureGlobalSidecar() {
+  const installHint = `install with \`npm install -g ${PACKAGE_SPEC}\``;
+  const globalSidecar = findGlobalSidecarExecutable();
+  if (!globalSidecar) {
+    if (!process.stdin.isTTY) {
+      console.log(`no global sidecar found; ${installHint} to enable daemon auto sync`);
+      return;
+    }
+    if (promptYesNo("no global sidecar found; install it now for daemon auto sync? [Y/n] ")) {
+      installGlobalSidecar();
+      return findGlobalSidecarExecutable();
+    }
+    return;
+  }
+  const globalVersion = globalSidecarVersion(globalSidecar);
+  const currentVersion = packageVersion();
+  if (globalVersion && compareVersions(globalVersion, currentVersion) >= 0)
+    return globalSidecar;
+  const state = globalVersion ? `v${globalVersion}` : "an unknown version";
+  if (!process.stdin.isTTY) {
+    console.log(`global sidecar is ${state} (current v${currentVersion}); ${installHint.replace("install with", "update with")}`);
+    return globalSidecar;
+  }
+  if (promptYesNo(`global sidecar is ${state} (current v${currentVersion}); update it now? [Y/n] `)) {
+    installGlobalSidecar();
+    return findGlobalSidecarExecutable() ?? globalSidecar;
+  }
+  return globalSidecar;
+}
+function registerInstallWithGlobalSidecar(executable, root) {
+  const result = spawnSync(executable, ["register-install"], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      [SKIP_LOCAL_EXEC_ENV2]: "1",
+      [GLOBAL_EXEC_ENV2]: "1"
+    }
+  });
+  if (result.status !== 0) {
+    throw new SidecarError(`global sidecar registration failed: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}`);
+  }
+}
+function findGlobalSidecarExecutable() {
+  const names = process.platform === "win32" ? ["sidecar.cmd", "sidecar.ps1", "sidecar"] : ["sidecar"];
+  for (const entry of (process.env.PATH || "").split(path2.delimiter).filter(Boolean)) {
+    for (const name of names) {
+      const candidate = path2.join(entry, name);
+      if (!isFilePath(candidate))
+        continue;
+      if (isProjectLocalPath(realpathOr2(candidate)))
+        continue;
+      return candidate;
+    }
+  }
+  return;
+}
+function globalSidecarVersion(executable) {
+  const result = spawnSync(executable, ["--version"], {
+    encoding: "utf8",
+    env: { ...process.env, [SKIP_LOCAL_EXEC_ENV2]: "1" }
+  });
+  if (result.status !== 0)
+    return;
+  const version = result.stdout.trim();
+  return /^\d+\.\d+\.\d+$/.test(version) ? version : undefined;
+}
+function installGlobalSidecar() {
+  const bun = findExecutableOnPath(process.platform === "win32" ? "bun.exe" : "bun");
+  const command = bun ? [bun, "add", "-g", PACKAGE_SPEC] : ["npm", "install", "-g", PACKAGE_SPEC];
+  console.log(`running ${command.join(" ")}`);
+  const result = spawnSync(command[0], command.slice(1), { stdio: "inherit" });
+  if (result.status !== 0) {
+    throw new SidecarError(`global sidecar install failed; run \`${command.join(" ")}\` manually`);
+  }
+}
+function findExecutableOnPath(name) {
+  for (const entry of (process.env.PATH || "").split(path2.delimiter).filter(Boolean)) {
+    const candidate = path2.join(entry, name);
+    if (isFilePath(candidate))
+      return candidate;
+  }
+  return;
+}
+function isFilePath(filePath) {
+  try {
+    return fs2.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+function compareVersions(a, b) {
+  const left = a.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const right = b.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  for (let index = 0;index < Math.max(left.length, right.length); index += 1) {
+    const diff = (left[index] ?? 0) - (right[index] ?? 0);
+    if (diff)
+      return diff < 0 ? -1 : 1;
+  }
   return 0;
 }
 function cmdClone(args) {
   const parsed = parseOptions(args, {
-    boolean: new Set(["--no-bootstrap-main"]),
+    boolean: new Set(["--no-bootstrap-main", "--if-missing"]),
     value: new Set
   });
   if (parsed.positional.length)
-    throw new SidecarError("usage: sidecar clone [--no-bootstrap-main]");
+    throw new SidecarError("usage: sidecar clone [--if-missing] [--no-bootstrap-main]");
   const [root, config] = loadProject();
+  removeLegacyGitHooks(root);
+  if (parsed.flags.has("--if-missing")) {
+    const sidecarPath = resolveSidecarPath(root, config);
+    if (fs2.existsSync(sidecarPath) && hasGitMetadata(sidecarPath))
+      return 0;
+  }
   cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   registerCurrentInstance(root, config, { event: "clone" });
   return 0;
@@ -1249,16 +1931,16 @@ function cmdTail(args) {
   if (parsed.positional.length)
     throw new SidecarError("usage: sidecar tail [-f|--follow]");
   const filePath = sidecarLogPath();
-  if (!fs.existsSync(filePath)) {
+  if (!fs2.existsSync(filePath)) {
     if (parsed.flags.has("-f") || parsed.flags.has("--follow")) {
       followLog(filePath, 0);
       return 0;
     }
     return 0;
   }
-  const stat = fs.statSync(filePath);
+  const stat = fs2.statSync(filePath);
   if (stat.size > 0) {
-    process.stdout.write(fs.readFileSync(filePath, "utf8"));
+    process.stdout.write(fs2.readFileSync(filePath, "utf8"));
   }
   if (parsed.flags.has("-f") || parsed.flags.has("--follow")) {
     followLog(filePath, stat.size);
@@ -1266,6 +1948,9 @@ function cmdTail(args) {
   return 0;
 }
 function cmdDaemon(args) {
+  if (isProjectLocalPath(currentExecutablePath())) {
+    throw new SidecarError("daemon commands must run from a globally installed sidecar, not a project-local dependency");
+  }
   const [action, ...rest] = args;
   if (action === "status") {
     if (rest.length)
@@ -1287,13 +1972,28 @@ function cmdDaemon(args) {
       throw new SidecarError("usage: sidecar daemon restart");
     return cmdDaemonRestart();
   }
+  if (action === "autoupdate") {
+    return cmdDaemonAutoUpdate(rest);
+  }
   if (action === "run") {
     return cmdDaemonRun(rest);
   }
   if (!action || action.startsWith("-")) {
     return cmdDaemonRun(args);
   }
-  throw new SidecarError("usage: sidecar daemon status|enable|disable|restart|run [--once] [--interval seconds]");
+  throw new SidecarError("usage: sidecar daemon status|enable|disable|restart|autoupdate on|off|run [--once] [--interval seconds]");
+}
+function cmdDaemonAutoUpdate(args) {
+  const [value, ...rest] = args;
+  if (rest.length || value !== "on" && value !== "off") {
+    throw new SidecarError("usage: sidecar daemon autoupdate on|off");
+  }
+  if (!shouldUseGlobalRegistry()) {
+    throw new SidecarError("daemon is only available from a globally installed sidecar");
+  }
+  writeSettings({ ...readSettings(), autoUpdate: value === "on" });
+  console.log(`autoupdate: ${value}`);
+  return 0;
 }
 function cmdDaemonStatus() {
   if (!shouldUseGlobalRegistry()) {
@@ -1302,6 +2002,7 @@ function cmdDaemonStatus() {
   const settings = readSettings();
   const service = daemonServiceStatus();
   console.log(`daemon:   ${settings.daemonEnabled ? "enabled" : "disabled"}`);
+  console.log(`update:   ${settings.autoUpdate ? "auto" : "manual"}`);
   console.log(`service:  ${daemonServiceLabel(service)}`);
   if (service.path)
     console.log(`agent:    ${service.path}`);
@@ -1359,28 +2060,54 @@ function cmdDaemonRestart() {
   console.log(`settings: ${settingsPath()}`);
   return 0;
 }
-function cmdDaemonRun(args) {
+async function cmdDaemonRun(args) {
   const parsed = parseOptions(args, {
     boolean: new Set(["--once"]),
-    value: new Set(["--interval"])
+    value: new Set(["--interval", "--debounce"])
   });
   if (parsed.positional.length)
     throw new SidecarError("usage: sidecar daemon run [--once] [--interval seconds]");
   if (!shouldUseGlobalRegistry()) {
     throw new SidecarError("daemon is only available from a globally installed sidecar");
   }
-  const intervalSeconds = Number(getValue(parsed, "--interval", "300"));
+  const intervalSeconds = Number(getValue(parsed, "--interval", "600"));
   if (!Number.isFinite(intervalSeconds) || intervalSeconds <= 0) {
     throw new SidecarError("--interval must be > 0");
   }
-  logSidecarEvent("daemon-start", { intervalSeconds, once: parsed.flags.has("--once") });
-  console.log(`sidecar daemon polling every ${intervalSeconds}s`);
-  while (true) {
-    runDaemonCycle();
-    if (parsed.flags.has("--once"))
-      return 0;
-    sleep(intervalSeconds * 1000);
+  const debounceSeconds = Number(getValue(parsed, "--debounce", "60"));
+  if (!Number.isFinite(debounceSeconds) || debounceSeconds < 0) {
+    throw new SidecarError("--debounce must be >= 0");
   }
+  const { runDaemonLoop: runDaemonLoop2 } = await Promise.resolve().then(() => (init_daemon(), exports_daemon));
+  return runDaemonLoop2({
+    once: parsed.flags.has("--once"),
+    intervalSeconds,
+    debounceSeconds
+  });
+}
+async function cmdUpdate(args) {
+  if (args.length)
+    throw new SidecarError("usage: sidecar update");
+  if (isProjectLocalPath(currentExecutablePath())) {
+    throw new SidecarError("update must run from a globally installed sidecar; update local installs with your package manager");
+  }
+  console.log(`checking npm for ${PACKAGE_NAME} updates...`);
+  const { checkAndInstallUpdate: checkAndInstallUpdate2 } = await Promise.resolve().then(() => (init_daemon(), exports_daemon));
+  const result = await checkAndInstallUpdate2();
+  logSidecarEvent("manual-update", { ...result });
+  if (result.status === "current") {
+    console.log(`sidecar v${result.current} is up to date`);
+    return 0;
+  }
+  if (result.status !== "updated") {
+    throw new SidecarError(result.message ?? `update ${result.status}`);
+  }
+  console.log(`updated sidecar v${result.current} -> v${result.latest}`);
+  const service = installDaemonService();
+  console.log(`service:  ${daemonServiceLabel(service)}`);
+  if (service.message)
+    console.log(`detail:   ${service.message}`);
+  return 0;
 }
 function cmdRegisterInstall(args) {
   if (args.length)
@@ -1419,6 +2146,7 @@ function cmdSync(args) {
   if (parsed.positional.length)
     throw new SidecarError("usage: sidecar sync [--no-snapshot] [-m message]");
   const [root, config] = loadProject();
+  removeLegacyGitHooks(root);
   syncProject(root, config, {
     snapshot: !parsed.flags.has("--no-snapshot"),
     message: getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined
@@ -1427,18 +2155,27 @@ function cmdSync(args) {
   return 0;
 }
 function syncProject(root, config, options) {
-  const sidecarPath = ensureSidecarCheckout(root, config);
-  const inbox = expandInbox(config, sidecarPath);
-  ensureCommitIdentity(sidecarPath);
-  fetch(sidecarPath, true, false);
-  ensureInboxBranch(sidecarPath, config, inbox);
-  if (options.snapshot) {
-    snapshot(sidecarPath, root, inbox, options.message);
+  const releaseLock = acquireSyncLock(root);
+  if (!releaseLock) {
+    console.log("another sidecar sync is already running; skipping");
+    return;
   }
-  syncBranchBeforePush(sidecarPath, inbox);
-  pushBranch(sidecarPath, inbox);
-  mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: true });
-  refreshInboxFromMain(sidecarPath, config, inbox);
+  try {
+    const sidecarPath = ensureSidecarCheckout(root, config);
+    const inbox = expandInbox(config, sidecarPath);
+    ensureCommitIdentity(sidecarPath);
+    fetch(sidecarPath, true, false);
+    ensureInboxBranch(sidecarPath, config, inbox);
+    if (options.snapshot) {
+      snapshot(sidecarPath, root, inbox, options.message);
+    }
+    syncBranchBeforePush(sidecarPath, inbox);
+    pushBranch(sidecarPath, inbox);
+    mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: true });
+    refreshInboxFromMain(sidecarPath, config, inbox);
+  } finally {
+    releaseLock();
+  }
 }
 function cmdMerge(args) {
   const parsed = parseOptions(args, {
@@ -1501,13 +2238,13 @@ function mergeInboxBranches(sidecarPath, config, options) {
 }
 function cloneOrUpdate(root, config, bootstrapMain) {
   const sidecarPath = resolveSidecarPath(root, config);
-  if (fs.existsSync(sidecarPath) && !hasGitMetadata(sidecarPath)) {
-    if (fs.readdirSync(sidecarPath).length) {
+  if (fs2.existsSync(sidecarPath) && !hasGitMetadata(sidecarPath)) {
+    if (fs2.readdirSync(sidecarPath).length) {
       throw new SidecarError(`${sidecarPath} exists and is not an empty Git repo`);
     }
-    fs.rmdirSync(sidecarPath);
+    fs2.rmdirSync(sidecarPath);
   }
-  if (!fs.existsSync(sidecarPath)) {
+  if (!fs2.existsSync(sidecarPath)) {
     gitRaw(["clone", config.remote, sidecarPath]);
   } else if (hasGitMetadata(sidecarPath)) {
     const existing = git(sidecarPath, ["remote", "get-url", "origin"], { check: false });
@@ -1543,7 +2280,7 @@ function bootstrapMainBranch(repo, config) {
     return;
   }
   git(repo, ["switch", "--orphan", config.branch]);
-  fs.writeFileSync(path.join(repo, "README.md"), `# Sidecar
+  fs2.writeFileSync(path2.join(repo, "README.md"), `# Sidecar
 
 Canonical sidecar state for this repository.
 `, "utf8");
@@ -1618,12 +2355,12 @@ function snapshot(repo, mainRoot, inbox, message = "sidecar snapshot") {
 function scrubSidecarTree(root) {
   let changed = 0;
   for (const filePath of walkFiles(root)) {
-    const relative = path.relative(root, filePath).split(path.sep);
+    const relative = path2.relative(root, filePath).split(path2.sep);
     if (relative.includes(".git"))
       continue;
     let data;
     try {
-      data = fs.readFileSync(filePath);
+      data = fs2.readFileSync(filePath);
     } catch {
       continue;
     }
@@ -1637,7 +2374,7 @@ function scrubSidecarTree(root) {
     }
     const redacted = redactText(text);
     if (redacted !== text) {
-      fs.writeFileSync(filePath, redacted, "utf8");
+      fs2.writeFileSync(filePath, redacted, "utf8");
       changed += 1;
     }
   }
@@ -1706,9 +2443,9 @@ function forkConflicts(repo, remoteBranch) {
         continue;
       const oid = stages[stage] ?? "";
       const outPath = forkPath(conflictPath, label, oid);
-      const fullOut = path.join(repo, outPath);
-      fs.mkdirSync(path.dirname(fullOut), { recursive: true });
-      fs.writeFileSync(fullOut, blob);
+      const fullOut = path2.join(repo, outPath);
+      fs2.mkdirSync(path2.dirname(fullOut), { recursive: true });
+      fs2.writeFileSync(fullOut, blob);
       versions.push({
         stage,
         label,
@@ -1718,15 +2455,15 @@ function forkConflicts(repo, remoteBranch) {
       });
     }
     git(repo, ["rm", "-f", "--ignore-unmatch", "--", conflictPath], { check: false });
-    const original = path.join(repo, conflictPath);
-    if (fs.existsSync(original) && fs.statSync(original).isFile())
-      fs.unlinkSync(original);
+    const original = path2.join(repo, conflictPath);
+    if (fs2.existsSync(original) && fs2.statSync(original).isFile())
+      fs2.unlinkSync(original);
     manifest.paths.push({ path: conflictPath, versions });
   }
-  const manifestDir = path.join(repo, ".sidecar-conflicts");
-  fs.mkdirSync(manifestDir, { recursive: true });
-  const manifestPath = path.join(manifestDir, `${timestamp}-${manifestLabel}.json`);
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}
+  const manifestDir = path2.join(repo, ".sidecar-conflicts");
+  fs2.mkdirSync(manifestDir, { recursive: true });
+  const manifestPath = path2.join(manifestDir, `${timestamp}-${manifestLabel}.json`);
+  fs2.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}
 `, "utf8");
   git(repo, ["add", "-A"]);
   if (hasUnmergedPaths(repo)) {
@@ -1734,11 +2471,11 @@ function forkConflicts(repo, remoteBranch) {
   }
 }
 function forkPath(conflictPath, label, oid) {
-  const parsed = path.parse(conflictPath);
+  const parsed = path2.parse(conflictPath);
   const shortOid = oid ? oid.slice(0, 7) : "missing";
   const safeLabel = fileLabel(label);
   const forkName = parsed.ext ? `${parsed.name}.conflict.${safeLabel}.${shortOid}${parsed.ext}` : `${parsed.name}.conflict.${safeLabel}.${shortOid}`;
-  return path.join(parsed.dir, forkName);
+  return path2.join(parsed.dir, forkName);
 }
 function fileLabel(value) {
   return slug(value).replaceAll("/", "-");
@@ -1793,14 +2530,14 @@ function expandInbox(config, repo) {
 }
 function checkoutRandom(repo) {
   const gitDirectory = gitDir(repo);
-  const idPath = path.join(gitDirectory, "sidecar-id");
-  if (fs.existsSync(idPath)) {
-    const existing = slug(fs.readFileSync(idPath, "utf8"));
+  const idPath = path2.join(gitDirectory, "sidecar-id");
+  if (fs2.existsSync(idPath)) {
+    const existing = slug(fs2.readFileSync(idPath, "utf8"));
     if (existing)
       return existing;
   }
   const id = crypto.randomBytes(6).toString("hex");
-  fs.writeFileSync(idPath, `${id}
+  fs2.writeFileSync(idPath, `${id}
 `, { encoding: "utf8", mode: 384 });
   return id;
 }
@@ -1821,59 +2558,67 @@ function slug(value) {
 }
 function sidecarStateDir() {
   if (process.env[STATE_DIR_ENV])
-    return path.resolve(process.env[STATE_DIR_ENV]);
+    return path2.resolve(process.env[STATE_DIR_ENV]);
   if (process.platform === "darwin")
-    return path.join(os.homedir(), "Library", "Application Support", "sidecar");
+    return path2.join(os.homedir(), "Library", "Application Support", "sidecar");
   if (process.platform === "win32") {
-    return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "sidecar");
+    return path2.join(process.env.APPDATA || path2.join(os.homedir(), "AppData", "Roaming"), "sidecar");
   }
-  return path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "sidecar");
+  return path2.join(process.env.XDG_STATE_HOME || path2.join(os.homedir(), ".local", "state"), "sidecar");
 }
 function instancesPath() {
-  return path.join(sidecarStateDir(), "instances.json");
+  return path2.join(sidecarStateDir(), "instances.json");
 }
 function sidecarLogPath() {
-  return path.join(sidecarStateDir(), "sidecar.log");
+  return path2.join(sidecarStateDir(), "sidecar.log");
 }
 function settingsPath() {
-  return path.join(sidecarStateDir(), "settings.json");
+  return path2.join(sidecarStateDir(), "settings.json");
 }
 function daemonLaunchAgentPath() {
   if (process.platform !== "darwin")
     return;
-  return path.join(os.homedir(), "Library", "LaunchAgents", `${DAEMON_LABEL}.plist`);
+  return path2.join(os.homedir(), "Library", "LaunchAgents", `${DAEMON_LABEL}.plist`);
 }
 function readSettings() {
   const filePath = settingsPath();
-  if (!fs.existsSync(filePath))
-    return { daemonEnabled: true };
+  if (!fs2.existsSync(filePath))
+    return { ...DEFAULT_SETTINGS };
   try {
-    const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const raw = JSON.parse(fs2.readFileSync(filePath, "utf8"));
     if (!raw || typeof raw !== "object")
-      return { daemonEnabled: true };
+      return { ...DEFAULT_SETTINGS };
     const record = raw;
     return {
-      daemonEnabled: typeof record.daemonEnabled === "boolean" ? record.daemonEnabled : true
+      daemonEnabled: typeof record.daemonEnabled === "boolean" ? record.daemonEnabled : true,
+      autoUpdate: typeof record.autoUpdate === "boolean" ? record.autoUpdate : true,
+      lastUpdateCheckAt: typeof record.lastUpdateCheckAt === "string" ? record.lastUpdateCheckAt : undefined
     };
   } catch (error) {
     logSidecarEvent("failure", {
       command: "daemon",
       message: `could not read ${filePath}: ${error instanceof Error ? error.message : String(error)}`
     });
-    return { daemonEnabled: true };
+    return { ...DEFAULT_SETTINGS };
   }
 }
 function writeSettings(settings) {
   ensureStateDir();
-  fs.writeFileSync(settingsPath(), `${JSON.stringify({ daemonEnabled: settings.daemonEnabled }, null, 2)}
+  const record = {
+    daemonEnabled: settings.daemonEnabled,
+    autoUpdate: settings.autoUpdate
+  };
+  if (settings.lastUpdateCheckAt)
+    record.lastUpdateCheckAt = settings.lastUpdateCheckAt;
+  fs2.writeFileSync(settingsPath(), `${JSON.stringify(record, null, 2)}
 `, "utf8");
 }
 function readInstances() {
   const filePath = instancesPath();
-  if (!fs.existsSync(filePath))
+  if (!fs2.existsSync(filePath))
     return [];
   try {
-    const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const raw = JSON.parse(fs2.readFileSync(filePath, "utf8"));
     if (!Array.isArray(raw))
       return [];
     return raw.filter(isSidecarInstance);
@@ -1887,7 +2632,7 @@ function readInstances() {
 }
 function writeInstances(instances) {
   ensureStateDir();
-  fs.writeFileSync(instancesPath(), `${JSON.stringify(instances, null, 2)}
+  fs2.writeFileSync(instancesPath(), `${JSON.stringify(instances, null, 2)}
 `, "utf8");
 }
 function registerCurrentInstance(root, config, options) {
@@ -1899,7 +2644,7 @@ function registerCurrentInstance(root, config, options) {
   const timestamp = nowIso();
   const instance = {
     root,
-    configPath: path.join(root, ".sidecar"),
+    configPath: path2.join(root, ".sidecar"),
     sidecarPath,
     remote: config.remote,
     branch: config.branch,
@@ -1920,163 +2665,177 @@ function registerCurrentInstance(root, config, options) {
 function listInstanceStatuses() {
   return readInstances().map((instance) => instanceStatus(instance));
 }
-function runDaemonCycle() {
-  const settings = readSettings();
-  if (!settings.daemonEnabled) {
-    logSidecarEvent("daemon-skip", { reason: "daemon-disabled" });
-    return 0;
+function daemonServicePath() {
+  if (process.platform === "darwin")
+    return daemonLaunchAgentPath();
+  if (process.platform === "linux") {
+    const configDir = process.env.XDG_CONFIG_HOME || path2.join(os.homedir(), ".config");
+    return path2.join(configDir, "systemd", "user", `${DAEMON_LABEL}.service`);
   }
-  let synced = 0;
-  let cloned = 0;
-  for (const instance of readInstances()) {
-    const status = instanceStatus(instance);
-    if (status.config !== "ok") {
-      logSidecarEvent("daemon-skip", {
-        root: instance.root,
-        reason: `config-${status.config}`
-      });
-      continue;
-    }
-    let config;
-    try {
-      config = readConfig(instance.configPath);
-    } catch (error) {
-      logSidecarEvent("failure", {
-        command: "daemon",
-        root: instance.root,
-        message: error instanceof Error ? error.message : String(error)
-      });
-      continue;
-    }
-    if (status.checkout !== "present") {
-      try {
-        logSidecarEvent("daemon-clone-start", { root: instance.root, sidecarPath: instance.sidecarPath });
-        cloneOrUpdate(instance.root, config, true);
-        registerCurrentInstance(instance.root, config, { event: "daemon-clone" });
-        cloned += 1;
-      } catch (error) {
-        logSidecarEvent("failure", {
-          command: "daemon",
-          root: instance.root,
-          message: error instanceof Error ? error.message : String(error)
-        });
-      }
-      continue;
-    }
-    let remoteChanged = false;
-    try {
-      remoteChanged = hasRemoteReconcileWork(instance.sidecarPath, config);
-    } catch (error) {
-      logSidecarEvent("failure", {
-        command: "daemon",
-        root: instance.root,
-        message: error instanceof Error ? error.message : String(error)
-      });
-      continue;
-    }
-    if (status.dirty !== "yes" && !remoteChanged)
-      continue;
-    try {
-      logSidecarEvent("daemon-sync-start", {
-        root: instance.root,
-        sidecarPath: instance.sidecarPath,
-        dirty: status.dirty === "yes",
-        remoteChanged
-      });
-      syncProject(instance.root, config, { snapshot: true, message: "sidecar auto sync" });
-      registerCurrentInstance(instance.root, config, { event: "daemon-sync", lastSyncAt: nowIso() });
-      synced += 1;
-    } catch (error) {
-      logSidecarEvent("failure", {
-        command: "daemon",
-        root: instance.root,
-        message: error instanceof Error ? error.message : String(error)
-      });
-    }
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || path2.join(os.homedir(), "AppData", "Roaming");
+    return path2.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "sidecar-daemon.vbs");
   }
-  logSidecarEvent("daemon-cycle", { synced, cloned });
-  return synced;
+  return;
 }
-function hasRemoteReconcileWork(sidecarPath, config) {
-  fetch(sidecarPath, true);
-  const inbox = expandInbox(config, sidecarPath);
-  if (remoteRefExists(sidecarPath, inbox)) {
-    if (!branchExists(sidecarPath, inbox))
-      return true;
-    if (!isAncestor(sidecarPath, `origin/${inbox}`, inbox))
-      return true;
+function daemonPidPath() {
+  return path2.join(sidecarStateDir(), "daemon.pid");
+}
+function isDaemonRunning() {
+  let pid;
+  try {
+    pid = Number(fs2.readFileSync(daemonPidPath(), "utf8").trim());
+  } catch {
+    return false;
   }
-  if (remoteRefExists(sidecarPath, config.branch)) {
-    if (!branchExists(sidecarPath, config.branch))
-      return true;
-    if (!isAncestor(sidecarPath, `origin/${config.branch}`, config.branch))
-      return true;
+  if (!Number.isInteger(pid) || pid <= 0)
+    return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
   }
-  const mergeBase = branchExists(sidecarPath, config.branch) ? config.branch : remoteRefExists(sidecarPath, config.branch) ? `origin/${config.branch}` : "HEAD";
-  return pendingInboxBranches(sidecarPath, config).some((remoteBranch) => !isAncestor(sidecarPath, remoteBranch, mergeBase));
+}
+function daemonServiceFileContents(invocation) {
+  if (process.platform === "darwin")
+    return daemonPlist(invocation);
+  if (process.platform === "linux")
+    return daemonSystemdUnit(invocation);
+  return daemonWindowsStartupScript(invocation);
 }
 function daemonServiceStatus() {
   if (process.env[SKIP_SERVICE_ENV] === "1") {
     return { available: false, installed: false, running: false, message: "skipped" };
   }
-  const plistPath = daemonLaunchAgentPath();
-  if (!plistPath)
+  const servicePath = daemonServicePath();
+  if (!servicePath)
     return { available: false, installed: false, running: false, message: "unsupported platform" };
-  if (!fs.existsSync(plistPath)) {
-    return { available: true, installed: false, running: false, path: plistPath };
-  }
-  const result = spawnSync("launchctl", ["print", `${launchctlDomain()}/${DAEMON_LABEL}`], {
-    encoding: "utf8"
-  });
-  const running = result.status === 0 && /\bstate = running\b/.test(result.stdout);
+  const message = process.platform === "linux" && !findExecutableOnPath("systemctl") ? "systemd unavailable; run `sidecar daemon run` manually" : undefined;
   return {
     available: true,
-    installed: true,
-    running,
-    path: plistPath,
-    message: running || result.status === 0 ? undefined : launchctlMessage(result)
+    installed: fs2.existsSync(servicePath),
+    running: isDaemonRunning(),
+    path: servicePath,
+    message
   };
 }
 function installDaemonService() {
   if (process.env[SKIP_SERVICE_ENV] === "1") {
     return { available: false, installed: false, running: false, message: "skipped" };
   }
-  const plistPath = daemonLaunchAgentPath();
-  if (!plistPath)
+  const servicePath = daemonServicePath();
+  if (!servicePath)
     return { available: false, installed: false, running: false, message: "unsupported platform" };
   if (typeof process.getuid === "function" && process.getuid() === 0) {
-    return { available: false, installed: false, running: false, path: plistPath, message: "root install skipped" };
+    return { available: false, installed: false, running: false, path: servicePath, message: "root install skipped" };
   }
-  const stateDir = sidecarStateDir();
-  fs.mkdirSync(stateDir, { recursive: true });
-  fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+  fs2.mkdirSync(sidecarStateDir(), { recursive: true });
+  fs2.mkdirSync(path2.dirname(servicePath), { recursive: true });
   const invocation = currentExecutableInvocation();
-  fs.writeFileSync(plistPath, daemonPlist(invocation), "utf8");
-  const domain = launchctlDomain();
-  spawnSync("launchctl", ["bootout", domain, plistPath], { stdio: "ignore" });
-  const bootstrap = spawnSync("launchctl", ["bootstrap", domain, plistPath], { encoding: "utf8" });
-  if (bootstrap.status !== 0) {
-    return {
-      available: true,
-      installed: true,
-      running: false,
-      path: plistPath,
-      message: bootstrap.stderr.trim() || bootstrap.stdout.trim() || "launchctl bootstrap failed"
-    };
+  fs2.writeFileSync(servicePath, daemonServiceFileContents(invocation), "utf8");
+  if (process.platform === "darwin") {
+    const domain = launchctlDomain();
+    spawnSync("launchctl", ["bootout", domain, servicePath], { stdio: "ignore" });
+    const bootstrap = spawnSync("launchctl", ["bootstrap", domain, servicePath], { encoding: "utf8" });
+    if (bootstrap.status !== 0) {
+      return {
+        available: true,
+        installed: true,
+        running: false,
+        path: servicePath,
+        message: bootstrap.stderr.trim() || bootstrap.stdout.trim() || "launchctl bootstrap failed"
+      };
+    }
+    spawnSync("launchctl", ["enable", `${domain}/${DAEMON_LABEL}`], { stdio: "ignore" });
+    spawnSync("launchctl", ["kickstart", "-k", `${domain}/${DAEMON_LABEL}`], { stdio: "ignore" });
+    return daemonServiceStatus();
   }
-  spawnSync("launchctl", ["enable", `${domain}/${DAEMON_LABEL}`], { stdio: "ignore" });
-  spawnSync("launchctl", ["kickstart", "-k", `${domain}/${DAEMON_LABEL}`], { stdio: "ignore" });
+  if (process.platform === "linux") {
+    if (!findExecutableOnPath("systemctl")) {
+      return {
+        available: true,
+        installed: true,
+        running: isDaemonRunning(),
+        path: servicePath,
+        message: "systemd unavailable; run `sidecar daemon run` manually"
+      };
+    }
+    spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
+    const enable = spawnSync("systemctl", ["--user", "enable", "--now", `${DAEMON_LABEL}.service`], {
+      encoding: "utf8"
+    });
+    spawnSync("systemctl", ["--user", "restart", `${DAEMON_LABEL}.service`], { stdio: "ignore" });
+    if (enable.status !== 0) {
+      return {
+        available: true,
+        installed: true,
+        running: isDaemonRunning(),
+        path: servicePath,
+        message: enable.stderr.trim() || enable.stdout.trim() || "systemctl enable failed"
+      };
+    }
+    return daemonServiceStatus();
+  }
+  stopDaemonProcess();
+  startDetachedDaemon(invocation);
   return daemonServiceStatus();
 }
 function stopDaemonService() {
   if (process.env[SKIP_SERVICE_ENV] === "1") {
     return { available: false, installed: false, running: false, message: "skipped" };
   }
-  const plistPath = daemonLaunchAgentPath();
-  if (!plistPath)
+  const servicePath = daemonServicePath();
+  if (!servicePath)
     return { available: false, installed: false, running: false, message: "unsupported platform" };
-  spawnSync("launchctl", ["bootout", launchctlDomain(), plistPath], { stdio: "ignore" });
-  return { available: true, installed: fs.existsSync(plistPath), running: false, path: plistPath };
+  if (process.platform === "darwin") {
+    spawnSync("launchctl", ["bootout", launchctlDomain(), servicePath], { stdio: "ignore" });
+  } else if (process.platform === "linux" && findExecutableOnPath("systemctl")) {
+    spawnSync("systemctl", ["--user", "disable", "--now", `${DAEMON_LABEL}.service`], { stdio: "ignore" });
+  } else if (process.platform === "win32" && fs2.existsSync(servicePath)) {
+    fs2.rmSync(servicePath, { force: true });
+  }
+  stopDaemonProcess();
+  return { available: true, installed: fs2.existsSync(servicePath), running: false, path: servicePath };
+}
+function stopDaemonProcess() {
+  let pid;
+  try {
+    pid = Number(fs2.readFileSync(daemonPidPath(), "utf8").trim());
+  } catch {
+    return;
+  }
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid)
+    return;
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {}
+}
+function startDetachedDaemon(invocation = currentExecutableInvocation()) {
+  const child = spawn2(invocation[0], invocation.slice(1), {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: { ...process.env, [SKIP_LOCAL_EXEC_ENV2]: "1", [GLOBAL_EXEC_ENV2]: "1" }
+  });
+  child.unref();
+}
+function ensureDaemonServiceFile() {
+  if (process.env[SKIP_SERVICE_ENV] === "1")
+    return;
+  const servicePath = daemonServicePath();
+  if (!servicePath || fs2.existsSync(servicePath))
+    return;
+  try {
+    fs2.mkdirSync(path2.dirname(servicePath), { recursive: true });
+    fs2.writeFileSync(servicePath, daemonServiceFileContents(currentExecutableInvocation()), "utf8");
+    logSidecarEvent("daemon-service-heal", { path: servicePath });
+  } catch (error) {
+    logSidecarEvent("failure", {
+      command: "daemon",
+      message: `could not restore service file: ${error instanceof Error ? error.message : String(error)}`
+    });
+  }
 }
 function daemonServiceLabel(service) {
   if (!service.available)
@@ -2085,30 +2844,22 @@ function daemonServiceLabel(service) {
     return "uninstalled";
   return service.running ? "running" : "stopped";
 }
-function launchctlMessage(result) {
-  const stderr = typeof result.stderr === "string" ? result.stderr.trim() : "";
-  const stdout = typeof result.stdout === "string" ? result.stdout.trim() : "";
-  return stderr || stdout || undefined;
-}
 function launchctlDomain() {
   const uid = typeof process.getuid === "function" ? process.getuid() : os.userInfo().uid;
   return `gui/${uid}`;
 }
 function currentExecutableInvocation() {
-  let executable = process.argv[1] || fileURLToPath(import.meta.url);
-  try {
-    executable = fs.realpathSync(executable);
-  } catch {
-    executable = path.resolve(executable);
-  }
-  return [process.execPath, executable, "daemon", "run"];
+  return [process.execPath, currentExecutablePath(), "daemon", "run"];
+}
+function currentExecutablePath() {
+  return realpathOr2(process.argv[1] || fileURLToPath2(import.meta.url));
 }
 function currentExecutableStamp(programArguments) {
   const executable = programArguments[1];
   if (!executable)
     return "unknown";
   try {
-    const stat = fs.statSync(executable);
+    const stat = fs2.statSync(executable);
     return `${executable}:${stat.size}:${Math.trunc(stat.mtimeMs)}`;
   } catch {
     return executable;
@@ -2120,13 +2871,37 @@ function daemonPlist(programArguments) {
     ProgramArguments: programArguments,
     RunAtLoad: true,
     KeepAlive: true,
-    StandardOutPath: path.join(sidecarStateDir(), "daemon.out.log"),
-    StandardErrorPath: path.join(sidecarStateDir(), "daemon.err.log"),
+    StandardOutPath: path2.join(sidecarStateDir(), "daemon.out.log"),
+    StandardErrorPath: path2.join(sidecarStateDir(), "daemon.err.log"),
     EnvironmentVariables: {
       PATH: process.env.PATH || "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin",
       SIDECAR_DAEMON_EXECUTABLE: currentExecutableStamp(programArguments)
     }
   });
+}
+function daemonSystemdUnit(programArguments) {
+  const execStart = programArguments.map((part) => `"${part.replaceAll('"', "\\\"")}"`).join(" ");
+  return [
+    "[Unit]",
+    "Description=sidecar background sync daemon",
+    "",
+    "[Service]",
+    `ExecStart=${execStart}`,
+    "Restart=always",
+    "RestartSec=10",
+    `Environment="PATH=${process.env.PATH || "/usr/local/bin:/usr/bin:/bin"}"`,
+    `Environment="SIDECAR_DAEMON_EXECUTABLE=${currentExecutableStamp(programArguments)}"`,
+    "",
+    "[Install]",
+    "WantedBy=default.target",
+    ""
+  ].join(`
+`);
+}
+function daemonWindowsStartupScript(programArguments) {
+  const command = programArguments.map((part) => `""${part}""`).join(" ");
+  return `CreateObject("WScript.Shell").Run "${command}", 0, False\r
+`;
 }
 function plist(value) {
   const body = Object.entries(value).map(([key, item]) => `  <key>${escapeXml(key)}</key>
@@ -2167,12 +2942,18 @@ function escapeXml(value) {
 function logSidecarEvent(event, fields = {}) {
   try {
     ensureStateDir();
+    const logPath = sidecarLogPath();
+    try {
+      if (fs2.statSync(logPath).size > LOG_ROTATE_BYTES) {
+        fs2.renameSync(logPath, `${logPath}.1`);
+      }
+    } catch {}
     const record = {
       timestamp: nowIso(),
       event,
       ...fields
     };
-    fs.appendFileSync(sidecarLogPath(), `${JSON.stringify(record)}
+    fs2.appendFileSync(sidecarLogPath(), `${JSON.stringify(record)}
 `, "utf8");
   } catch {}
 }
@@ -2182,7 +2963,7 @@ function followLog(filePath, startOffset) {
     sleep(1000);
     let stat;
     try {
-      stat = fs.statSync(filePath);
+      stat = fs2.statSync(filePath);
     } catch {
       offset = 0;
       continue;
@@ -2191,22 +2972,22 @@ function followLog(filePath, startOffset) {
       offset = 0;
     if (stat.size <= offset)
       continue;
-    const fd = fs.openSync(filePath, "r");
+    const fd = fs2.openSync(filePath, "r");
     try {
       const length = stat.size - offset;
       const buffer = Buffer.alloc(length);
-      const bytesRead = fs.readSync(fd, buffer, 0, length, offset);
+      const bytesRead = fs2.readSync(fd, buffer, 0, length, offset);
       if (bytesRead > 0) {
         process.stdout.write(buffer.subarray(0, bytesRead).toString("utf8"));
         offset += bytesRead;
       }
     } finally {
-      fs.closeSync(fd);
+      fs2.closeSync(fd);
     }
   }
 }
 function ensureStateDir() {
-  fs.mkdirSync(sidecarStateDir(), { recursive: true });
+  fs2.mkdirSync(sidecarStateDir(), { recursive: true });
 }
 function isSidecarInstance(value) {
   if (!value || typeof value !== "object")
@@ -2216,7 +2997,7 @@ function isSidecarInstance(value) {
 }
 function instanceStatus(instance) {
   let config = "ok";
-  if (!fs.existsSync(instance.configPath)) {
+  if (!fs2.existsSync(instance.configPath)) {
     config = "missing";
   } else {
     try {
@@ -2245,25 +3026,64 @@ function instanceStatus(instance) {
   };
 }
 function shouldUseGlobalRegistry() {
-  return process.env[GLOBAL_EXEC_ENV] === "1" || !findDependencyRoot(process.cwd());
+  return process.env[GLOBAL_EXEC_ENV2] === "1" || !findDependencyRoot(process.cwd());
+}
+function isProjectLocalPath(executable) {
+  const depRoot = findDependencyRoot(path2.dirname(executable));
+  if (!depRoot)
+    return false;
+  if (realpathOr2(depRoot) === realpathOr2(bunGlobalRoot()))
+    return false;
+  return isInsidePath2(executable, path2.join(depRoot, "node_modules"));
+}
+function bunGlobalRoot() {
+  return path2.join(process.env.BUN_INSTALL || path2.join(os.homedir(), ".bun"), "install", "global");
+}
+function realpathOr2(filePath) {
+  try {
+    return fs2.realpathSync(filePath);
+  } catch {
+    return path2.resolve(filePath);
+  }
+}
+function isInsidePath2(child, parent) {
+  const relative = path2.relative(parent, child);
+  return Boolean(relative) && !relative.startsWith("..") && !path2.isAbsolute(relative);
+}
+function packageVersion() {
+  let current = path2.dirname(fileURLToPath2(import.meta.url));
+  while (true) {
+    const manifestPath = path2.join(current, "package.json");
+    if (fs2.existsSync(manifestPath)) {
+      try {
+        const manifest = JSON.parse(fs2.readFileSync(manifestPath, "utf8"));
+        if (manifest.name === PACKAGE_NAME && manifest.version)
+          return manifest.version;
+      } catch {}
+    }
+    const parent = path2.dirname(current);
+    if (parent === current)
+      return "0.0.0";
+    current = parent;
+  }
 }
 function findDependencyRoot(start) {
-  let current = path.resolve(start);
+  let current = path2.resolve(start);
   while (true) {
     if (projectDependsOnSidecar(current))
       return current;
-    const parent = path.dirname(current);
+    const parent = path2.dirname(current);
     if (parent === current)
       return;
     current = parent;
   }
 }
 function projectDependsOnSidecar(projectRoot) {
-  const manifestPath = path.join(projectRoot, "package.json");
-  if (!fs.existsSync(manifestPath))
+  const manifestPath = path2.join(projectRoot, "package.json");
+  if (!fs2.existsSync(manifestPath))
     return false;
   try {
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    const manifest = JSON.parse(fs2.readFileSync(manifestPath, "utf8"));
     return Boolean(manifest.dependencies?.[PACKAGE_NAME] || manifest.devDependencies?.[PACKAGE_NAME] || manifest.optionalDependencies?.[PACKAGE_NAME] || manifest.peerDependencies?.[PACKAGE_NAME]);
   } catch {
     return false;
@@ -2273,31 +3093,50 @@ function promptRemote() {
   if (!process.stdin.isTTY) {
     throw new SidecarError("remote URL is required when no .sidecar config exists");
   }
-  fs.writeSync(1, "sidecar remote URL: ");
-  const chunks = [];
-  const buffer = Buffer.alloc(1);
-  while (true) {
-    const bytesRead = fs.readSync(0, buffer, 0, 1, null);
-    if (bytesRead === 0)
-      break;
-    const char = buffer.toString("utf8", 0, bytesRead);
-    if (char === `
-` || char === "\r")
-      break;
-    chunks.push(char);
-  }
-  const remote = chunks.join("").trim();
+  const remote = promptLine("sidecar remote URL: ");
   if (!remote)
     throw new SidecarError("remote URL is required");
   return remote;
 }
+function promptYesNo(question) {
+  if (!process.stdin.isTTY)
+    return true;
+  const answer = promptLine(question).toLowerCase();
+  return answer === "" || answer === "y" || answer === "yes";
+}
+function promptLine(prompt) {
+  fs2.writeSync(1, prompt);
+  const fd = fs2.openSync("/dev/tty", "r");
+  try {
+    const chunks = [];
+    const buffer = Buffer.alloc(1);
+    while (true) {
+      const bytesRead = fs2.readSync(fd, buffer, 0, 1, null);
+      if (bytesRead === 0)
+        break;
+      const char = buffer.toString("utf8", 0, bytesRead);
+      if (char === `
+` || char === "\r")
+        break;
+      chunks.push(char);
+    }
+    return chunks.join("").trim();
+  } finally {
+    fs2.closeSync(fd);
+  }
+}
 function addSidecarDevDependency(root) {
-  const manifestPath = path.join(root, "package.json");
-  if (!fs.existsSync(manifestPath))
+  const manifestPath = path2.join(root, "package.json");
+  if (!fs2.existsSync(manifestPath))
     return;
+  try {
+    const existing = JSON.parse(fs2.readFileSync(manifestPath, "utf8"));
+    if (existing?.name === PACKAGE_NAME)
+      return;
+  } catch {}
   let manifest;
   try {
-    const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    const parsed = JSON.parse(fs2.readFileSync(manifestPath, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new SidecarError(`${manifestPath} must contain a JSON object`);
     }
@@ -2307,7 +3146,7 @@ function addSidecarDevDependency(root) {
       throw error;
     throw new SidecarError(`could not read ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  const spec = dependencySpec(manifest.devDependencies) ?? dependencySpec(manifest.dependencies) ?? dependencySpec(manifest.optionalDependencies) ?? dependencySpec(manifest.peerDependencies) ?? PACKAGE_SPEC;
+  const spec = dependencySpec(manifest.devDependencies) ?? dependencySpec(manifest.dependencies) ?? dependencySpec(manifest.optionalDependencies) ?? dependencySpec(manifest.peerDependencies) ?? `^${packageVersion()}`;
   manifest.devDependencies = {
     ...objectValue(manifest.devDependencies),
     [PACKAGE_NAME]: spec
@@ -2315,7 +3154,7 @@ function addSidecarDevDependency(root) {
   removeDependency(manifest.dependencies);
   removeDependency(manifest.optionalDependencies);
   removeDependency(manifest.peerDependencies);
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}
+  fs2.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}
 `, "utf8");
   console.log(`added devDependency ${PACKAGE_NAME}`);
 }
@@ -2334,7 +3173,7 @@ function objectValue(value) {
 }
 function loadProject() {
   const root = findConfigRoot(process.cwd());
-  return [root, readConfig(path.join(root, ".sidecar"))];
+  return [root, readConfig(path2.join(root, ".sidecar"))];
 }
 function findConfigRoot(start) {
   const root = findConfigRootOptional(start);
@@ -2343,11 +3182,11 @@ function findConfigRoot(start) {
   throw new SidecarError("could not find .sidecar");
 }
 function findConfigRootOptional(start) {
-  let current = path.resolve(start);
+  let current = path2.resolve(start);
   while (true) {
-    if (fs.existsSync(path.join(current, ".sidecar")))
+    if (fs2.existsSync(path2.join(current, ".sidecar")))
       return current;
-    const parent = path.dirname(current);
+    const parent = path2.dirname(current);
     if (parent === current)
       return;
     current = parent;
@@ -2358,6 +3197,12 @@ function gitToplevel(cwd) {
   if (result.status !== 0)
     throw new SidecarError("not inside a Git repository");
   return result.stdout.trim();
+}
+function gitCommonDir(root) {
+  const result = gitRaw(["-C", root, "rev-parse", "--git-common-dir"], { check: false });
+  if (result.status !== 0)
+    throw new SidecarError("not inside a Git repository");
+  return path2.resolve(root, result.stdout.trim());
 }
 function requireSidecarCheckout(root, config) {
   const sidecarPath = resolveSidecarPath(root, config);
@@ -2383,12 +3228,12 @@ function writeConfig(configPath, config) {
     ""
   ].join(`
 `);
-  fs.writeFileSync(configPath, text, "utf8");
+  fs2.writeFileSync(configPath, text, "utf8");
 }
 function readConfig(configPath) {
   let values;
   try {
-    const parsed = parse(fs.readFileSync(configPath, "utf8"));
+    const parsed = parse(fs2.readFileSync(configPath, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new SidecarError(`${configPath} must contain a TOML table`);
     }
@@ -2412,22 +3257,159 @@ function readConfig(configPath) {
   validateInboxTemplate(config.inbox);
   return config;
 }
-function ensureGitignoreEntry(gitignorePath, sidecarPath) {
+function removeLegacyGitHooks(root) {
+  let removed = false;
+  try {
+    const commonDir = gitCommonDir(root);
+    const hooksDir = path2.join(commonDir, "hooks");
+    for (const name of LEGACY_HOOK_NAMES) {
+      const hookPath = path2.join(hooksDir, name);
+      if (!fs2.existsSync(hookPath))
+        continue;
+      const lines = fs2.readFileSync(hookPath, "utf8").split(`
+`);
+      const kept = lines.filter((line) => !line.includes(LEGACY_HOOK_MARKER));
+      if (kept.length === lines.length)
+        continue;
+      if (kept.every((line) => !line.trim() || line.trim() === "#!/bin/sh")) {
+        fs2.rmSync(hookPath);
+      } else {
+        fs2.writeFileSync(hookPath, `${kept.join(`
+`).replace(/\n*$/, `
+`)}`, "utf8");
+      }
+      removed = true;
+    }
+    const helperPath = path2.join(hooksDir, LEGACY_HOOK_HELPER);
+    if (fs2.existsSync(helperPath)) {
+      fs2.rmSync(helperPath);
+      removed = true;
+    }
+    fs2.rmSync(path2.join(commonDir, LEGACY_SYNC_STAMP_FILE), { force: true });
+  } catch {}
+  if (removed)
+    logSidecarEvent("legacy-hooks-removed", { root });
+  return removed;
+}
+function acquireSyncLock(root) {
+  const lockDir = path2.join(gitCommonDir(root), "sidecar-sync-lock");
+  for (let attempt = 0;attempt < 2; attempt++) {
+    try {
+      fs2.mkdirSync(lockDir);
+      fs2.writeFileSync(path2.join(lockDir, "pid"), String(process.pid), "utf8");
+      return () => fs2.rmSync(lockDir, { recursive: true, force: true });
+    } catch (error) {
+      if (error.code !== "EEXIST")
+        throw error;
+      if (!syncLockIsStale(lockDir))
+        return;
+      fs2.rmSync(lockDir, { recursive: true, force: true });
+    }
+  }
+  return;
+}
+function syncLockIsStale(lockDir) {
+  let pid;
+  try {
+    pid = Number(fs2.readFileSync(path2.join(lockDir, "pid"), "utf8").trim());
+  } catch {
+    try {
+      return Date.now() - fs2.statSync(lockDir).mtimeMs > 600000;
+    } catch {
+      return true;
+    }
+  }
+  if (!Number.isInteger(pid) || pid <= 0)
+    return true;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return error.code !== "EPERM";
+  }
+}
+function ensureSidecarIgnored(root, sidecarPath) {
+  const entry = ignoreEntryForSidecarPath(root, sidecarPath);
+  if (!entry)
+    return;
+  ensureIgnoreEntry(path2.join(root, ".gitignore"), entry);
+  removeIgnoreEntry(path2.join(gitCommonDir(root), "info", "exclude"), entry);
+  return entry;
+}
+function ensureIgnoreEntry(ignorePath, sidecarPath) {
   const stripped = sidecarPath.replace(/^\/+|\/+$/g, "");
   const entry = `/${stripped}/`;
-  const lines = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, "utf8").split(/\r?\n/) : [];
+  const lines = fs2.existsSync(ignorePath) ? fs2.readFileSync(ignorePath, "utf8").split(/\r?\n/) : [];
   if (!lines.includes(entry)) {
     lines.push(entry);
-    fs.writeFileSync(gitignorePath, `${lines.join(`
+    fs2.writeFileSync(ignorePath, `${lines.join(`
 `).replace(/\s+$/g, "")}
 `, "utf8");
   }
 }
-function gitignoreEntryForSidecarPath(root, sidecarPath) {
-  const resolvedRoot = path.resolve(root);
-  const resolvedSidecarPath = path.resolve(root, sidecarPath);
-  const relative = path.relative(resolvedRoot, resolvedSidecarPath);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative))
+function removeIgnoreEntry(ignorePath, sidecarPath) {
+  if (!fs2.existsSync(ignorePath))
+    return;
+  const stripped = sidecarPath.replace(/^\/+|\/+$/g, "");
+  const entry = `/${stripped}/`;
+  const lines = fs2.readFileSync(ignorePath, "utf8").split(/\r?\n/);
+  const kept = lines.filter((line) => line !== entry);
+  if (kept.length === lines.length)
+    return;
+  if (kept.every((line) => !line.trim())) {
+    fs2.rmSync(ignorePath);
+  } else {
+    fs2.writeFileSync(ignorePath, `${kept.join(`
+`).replace(/\s+$/g, "")}
+`, "utf8");
+  }
+}
+function hasZedInclusion(root, sidecarPath) {
+  const settingsPath2 = path2.join(root, ".zed", "settings.json");
+  if (!fs2.existsSync(settingsPath2))
+    return false;
+  try {
+    const parsed = JSON.parse(fs2.readFileSync(settingsPath2, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return false;
+    const inclusions = parsed.file_scan_inclusions;
+    return Array.isArray(inclusions) && inclusions.includes(zedInclusionGlob(sidecarPath));
+  } catch {
+    return false;
+  }
+}
+function zedInclusionGlob(sidecarPath) {
+  return `${sidecarPath.replace(/^\/+|\/+$/g, "")}/**`;
+}
+function ensureZedInclusion(root, sidecarPath) {
+  const glob = zedInclusionGlob(sidecarPath);
+  const settingsPath2 = path2.join(root, ".zed", "settings.json");
+  let settings = {};
+  if (fs2.existsSync(settingsPath2)) {
+    try {
+      const parsed = JSON.parse(fs2.readFileSync(settingsPath2, "utf8"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        return false;
+      settings = parsed;
+    } catch {
+      return false;
+    }
+  }
+  const inclusions = Array.isArray(settings.file_scan_inclusions) ? settings.file_scan_inclusions : [".env*"];
+  if (!inclusions.includes(glob)) {
+    inclusions.push(glob);
+    settings.file_scan_inclusions = inclusions;
+    fs2.mkdirSync(path2.dirname(settingsPath2), { recursive: true });
+    fs2.writeFileSync(settingsPath2, `${JSON.stringify(settings, null, 2)}
+`, "utf8");
+  }
+  return true;
+}
+function ignoreEntryForSidecarPath(root, sidecarPath) {
+  const resolvedRoot = path2.resolve(root);
+  const resolvedSidecarPath = path2.resolve(root, sidecarPath);
+  const relative = path2.relative(resolvedRoot, resolvedSidecarPath);
+  if (!relative || relative.startsWith("..") || path2.isAbsolute(relative))
     return;
   return relative;
 }
@@ -2476,7 +3458,7 @@ function gitBytes(repo, args, options = {}) {
   const check = options.check ?? true;
   const result = spawnSync("git", ["-C", repo, ...args], {
     encoding: "buffer",
-    maxBuffer: 100 * 1024 * 1024
+    maxBuffer: 104857600
   });
   const status = result.status ?? 1;
   const stdout = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout ?? "");
@@ -2490,7 +3472,7 @@ function gitRaw(args, options = {}) {
   const check = options.check ?? true;
   const result = spawnSync("git", args, {
     encoding: "utf8",
-    maxBuffer: 100 * 1024 * 1024
+    maxBuffer: 104857600
   });
   const status = result.status ?? 1;
   const stdout = result.stdout ?? "";
@@ -2537,23 +3519,23 @@ function getValue(parsed, name, fallback) {
   return parsed.values.get(name) ?? fallback;
 }
 function resolveSidecarPath(root, config) {
-  return path.resolve(root, config.path);
+  return path2.resolve(root, config.path);
 }
 function hasGitMetadata(repo) {
-  return fs.existsSync(path.join(repo, ".git"));
+  return fs2.existsSync(path2.join(repo, ".git"));
 }
 function isDirty(repo) {
   return Boolean(git(repo, ["status", "--porcelain"]).stdout.trim());
 }
 function gitDir(repo) {
   const result = git(repo, ["rev-parse", "--git-dir"]).stdout.trim();
-  return path.isAbsolute(result) ? result : path.resolve(repo, result);
+  return path2.isAbsolute(result) ? result : path2.resolve(repo, result);
 }
 function* walkEntries(root) {
-  if (!fs.existsSync(root))
+  if (!fs2.existsSync(root))
     return;
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    const entryPath = path.join(root, entry.name);
+  for (const entry of fs2.readdirSync(root, { withFileTypes: true })) {
+    const entryPath = path2.join(root, entry.name);
     yield entryPath;
     if (entry.isDirectory() && !entry.isSymbolicLink())
       yield* walkEntries(entryPath);
@@ -2562,7 +3544,7 @@ function* walkEntries(root) {
 function* walkFiles(root) {
   for (const entryPath of walkEntries(root)) {
     try {
-      const stat = fs.lstatSync(entryPath);
+      const stat = fs2.lstatSync(entryPath);
       if (!stat.isSymbolicLink() && stat.isFile())
         yield entryPath;
     } catch {
@@ -2614,65 +3596,88 @@ function nowIso() {
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
+var DEFAULT_PATH = "sidecar", DEFAULT_BRANCH = "main", DEFAULT_INBOX = "sidecar-inbox/{user}/{random}", PACKAGE_NAME = "@projectors/sidecar", PACKAGE_SPEC = "@projectors/sidecar", GLOBAL_EXEC_ENV2 = "SIDECAR_GLOBAL_EXEC", SKIP_LOCAL_EXEC_ENV2 = "SIDECAR_SKIP_LOCAL_EXEC", STATE_DIR_ENV = "SIDECAR_STATE_DIR", SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE", DAEMON_LABEL = "com.anteprojector.sidecar", SidecarError, DEFAULT_SETTINGS, LOG_ROTATE_BYTES = 5242880, LEGACY_HOOK_NAMES, LEGACY_HOOK_HELPER = "sidecar-sync-hook", LEGACY_HOOK_MARKER = "sidecar-sync", LEGACY_SYNC_STAMP_FILE = "sidecar-last-sync";
+var init_cli = __esm(() => {
+  init_dist();
+  init_redaction();
+  SidecarError = class SidecarError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = "SidecarError";
+    }
+  };
+  DEFAULT_SETTINGS = { daemonEnabled: true, autoUpdate: true };
+  LEGACY_HOOK_NAMES = ["post-commit", "pre-push"];
+});
 
 // src/bin.ts
-var SKIP_LOCAL_EXEC_ENV = "SIDECAR_SKIP_LOCAL_EXEC";
-var GLOBAL_EXEC_ENV2 = "SIDECAR_GLOBAL_EXEC";
-var PACKAGE_NAME2 = "@anteprojector/sidecar";
-if (!process.env[SKIP_LOCAL_EXEC_ENV]) {
-  const localExecutable = findLocalExecutable(process.cwd(), fileURLToPath2(import.meta.url));
+init_cli();
+import fs3 from "node:fs";
+import path3 from "node:path";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
+var SKIP_LOCAL_EXEC_ENV3 = "SIDECAR_SKIP_LOCAL_EXEC";
+var GLOBAL_EXEC_ENV3 = "SIDECAR_GLOBAL_EXEC";
+var PACKAGE_NAME2 = "@projectors/sidecar";
+var GLOBAL_ONLY_COMMANDS = new Set(["daemon", "register-install", "update"]);
+if (!process.env[SKIP_LOCAL_EXEC_ENV3]) {
+  const localExecutable = findLocalExecutable(process.cwd(), fileURLToPath3(import.meta.url));
   if (localExecutable) {
-    const result = spawnSync2(process.execPath, [localExecutable, ...process.argv.slice(2)], {
-      stdio: "inherit",
-      env: {
-        ...process.env,
-        [SKIP_LOCAL_EXEC_ENV]: "1",
-        [GLOBAL_EXEC_ENV2]: "1"
+    if (GLOBAL_ONLY_COMMANDS.has(process.argv[2])) {
+      process.env[GLOBAL_EXEC_ENV3] = "1";
+    } else {
+      const result = spawnSync2(process.execPath, [localExecutable, ...process.argv.slice(2)], {
+        stdio: "inherit",
+        env: {
+          ...process.env,
+          [SKIP_LOCAL_EXEC_ENV3]: "1",
+          [GLOBAL_EXEC_ENV3]: "1"
+        }
+      });
+      if (result.signal) {
+        process.kill(process.pid, result.signal);
       }
-    });
-    if (result.signal) {
-      process.kill(process.pid, result.signal);
+      process.exit(result.status ?? 1);
     }
-    process.exit(result.status ?? 1);
   }
 }
-process.exit(main());
+process.exit(await main());
 function findLocalExecutable(start, self) {
-  let current = path2.resolve(start);
+  let current = path3.resolve(start);
   while (true) {
     if (projectDependsOnSidecar2(current)) {
-      const candidate = path2.join(current, "node_modules", "@anteprojector", "sidecar", "dist", "cli.js");
-      if (isFile(candidate) && !sameFile(candidate, self)) {
+      const candidate = path3.join(current, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+      if (isFile2(candidate) && !sameFile(candidate, self)) {
         return candidate;
       }
     }
-    const parent = path2.dirname(current);
+    const parent = path3.dirname(current);
     if (parent === current)
       return;
     current = parent;
   }
 }
 function projectDependsOnSidecar2(projectRoot) {
-  const manifestPath = path2.join(projectRoot, "package.json");
-  if (!isFile(manifestPath))
+  const manifestPath = path3.join(projectRoot, "package.json");
+  if (!isFile2(manifestPath))
     return false;
   try {
-    const manifest = JSON.parse(fs2.readFileSync(manifestPath, "utf8"));
+    const manifest = JSON.parse(fs3.readFileSync(manifestPath, "utf8"));
     return Boolean(manifest.dependencies?.[PACKAGE_NAME2] || manifest.devDependencies?.[PACKAGE_NAME2] || manifest.optionalDependencies?.[PACKAGE_NAME2] || manifest.peerDependencies?.[PACKAGE_NAME2]);
   } catch {
     return false;
   }
 }
-function isFile(filePath) {
+function isFile2(filePath) {
   try {
-    return fs2.statSync(filePath).isFile();
+    return fs3.statSync(filePath).isFile();
   } catch {
     return false;
   }
 }
 function sameFile(first, second) {
   try {
-    return fs2.realpathSync(first) === fs2.realpathSync(second);
+    return fs3.realpathSync(first) === fs3.realpathSync(second);
   } catch {
     return false;
   }

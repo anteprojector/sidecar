@@ -1,3 +1,4 @@
-/sidecar/
 node_modules/
 coverage/
+
+/sidecar/

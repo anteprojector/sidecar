@@ -20,8 +20,13 @@ import {
   snapshot,
   type SidecarConfig,
   writeConfig,
-  ensureGitignoreEntry,
-  gitignoreEntryForSidecarPath,
+  acquireSyncLock,
+  ensureIgnoreEntry,
+  ensureZedInclusion,
+  hasZedInclusion,
+  ignoreEntryForSidecarPath,
+  removeIgnoreEntry,
+  removeLegacyGitHooks,
 } from "../src/cli.js";
 import { redactText } from "../src/redaction.js";
 
@@ -74,21 +79,130 @@ describe("config", () => {
     expect(config.path).toBe("meta\\data");
   });
 
-  test("gitignore entry is root anchored", () => {
+  test("ignore entry is root anchored and idempotent", () => {
+    const root = tempDir();
+    const excludePath = path.join(root, "exclude");
+
+    ensureIgnoreEntry(excludePath, "sidecar");
+    ensureIgnoreEntry(excludePath, "sidecar");
+
+    expect(fs.readFileSync(excludePath, "utf8")).toBe("/sidecar/\n");
+  });
+
+  test("removes migrated gitignore entries and deletes emptied files", () => {
     const root = tempDir();
     const gitignorePath = path.join(root, ".gitignore");
 
-    ensureGitignoreEntry(gitignorePath, "sidecar");
+    fs.writeFileSync(gitignorePath, "node_modules/\n/sidecar/\n", "utf8");
+    removeIgnoreEntry(gitignorePath, "sidecar");
+    expect(fs.readFileSync(gitignorePath, "utf8")).toBe("node_modules/\n");
 
-    expect(fs.readFileSync(gitignorePath, "utf8")).toBe("/sidecar/\n");
+    fs.writeFileSync(gitignorePath, "/sidecar/\n", "utf8");
+    removeIgnoreEntry(gitignorePath, "sidecar");
+    expect(fs.existsSync(gitignorePath)).toBe(false);
+
+    removeIgnoreEntry(gitignorePath, "sidecar");
+    expect(fs.existsSync(gitignorePath)).toBe(false);
   });
 
-  test("does not produce gitignore entries for sidecar paths outside the repo", () => {
+  test("zed inclusion creates settings with the default inclusion preserved", () => {
+    const root = tempDir();
+    const settingsPath = path.join(root, ".zed", "settings.json");
+
+    expect(hasZedInclusion(root, "sidecar")).toBe(false);
+    expect(ensureZedInclusion(root, "sidecar")).toBe(true);
+    expect(ensureZedInclusion(root, "sidecar")).toBe(true);
+    expect(hasZedInclusion(root, "sidecar")).toBe(true);
+
+    expect(JSON.parse(fs.readFileSync(settingsPath, "utf8"))).toEqual({
+      file_scan_inclusions: [".env*", "sidecar/**"],
+    });
+  });
+
+  test("zed inclusion merges into existing settings and skips unparseable ones", () => {
+    const root = tempDir();
+    const settingsPath = path.join(root, ".zed", "settings.json");
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, '{\n  "theme": "One Dark",\n  "file_scan_inclusions": ["docs/**"]\n}\n', "utf8");
+
+    expect(ensureZedInclusion(root, "sidecar")).toBe(true);
+    expect(JSON.parse(fs.readFileSync(settingsPath, "utf8"))).toEqual({
+      theme: "One Dark",
+      file_scan_inclusions: ["docs/**", "sidecar/**"],
+    });
+
+    const jsonc = '{\n  // comment\n  "theme": "One Dark"\n}\n';
+    fs.writeFileSync(settingsPath, jsonc, "utf8");
+    expect(ensureZedInclusion(root, "sidecar")).toBe(false);
+    expect(fs.readFileSync(settingsPath, "utf8")).toBe(jsonc);
+  });
+
+  test("does not produce ignore entries for sidecar paths outside the repo", () => {
     const root = tempDir();
 
-    expect(gitignoreEntryForSidecarPath(root, "sidecar")).toBe("sidecar");
-    expect(gitignoreEntryForSidecarPath(root, path.join(root, "sidecar"))).toBe("sidecar");
-    expect(gitignoreEntryForSidecarPath(root, "../external-sidecar")).toBeUndefined();
+    expect(ignoreEntryForSidecarPath(root, "sidecar")).toBe("sidecar");
+    expect(ignoreEntryForSidecarPath(root, path.join(root, "sidecar"))).toBe("sidecar");
+    expect(ignoreEntryForSidecarPath(root, "../external-sidecar")).toBeUndefined();
+  });
+});
+
+describe("legacy git hooks", () => {
+  test("removal deletes sidecar-owned hooks but preserves foreign hook content", () => {
+    process.env.SIDECAR_STATE_DIR = tempDir();
+    const repo = initRepo();
+    const hooksDir = path.join(repo, ".git", "hooks");
+    fs.mkdirSync(hooksDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(hooksDir, "post-commit"),
+      '#!/bin/sh\n"$(dirname -- "$0")/sidecar-sync-hook" post-commit "$@" # sidecar-sync\n',
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(hooksDir, "pre-push"),
+      '#!/bin/sh\necho existing\n"$(dirname -- "$0")/sidecar-sync-hook" pre-push "$@" # sidecar-sync\n',
+      "utf8",
+    );
+    fs.writeFileSync(path.join(hooksDir, "sidecar-sync-hook"), "#!/bin/sh\nexit 0\n", "utf8");
+    fs.writeFileSync(path.join(repo, ".git", "sidecar-last-sync"), "0", "utf8");
+
+    expect(removeLegacyGitHooks(repo)).toBe(true);
+
+    expect(fs.existsSync(path.join(hooksDir, "post-commit"))).toBe(false);
+    expect(fs.existsSync(path.join(hooksDir, "sidecar-sync-hook"))).toBe(false);
+    expect(fs.existsSync(path.join(repo, ".git", "sidecar-last-sync"))).toBe(false);
+    const prePush = fs.readFileSync(path.join(hooksDir, "pre-push"), "utf8");
+    expect(prePush).toContain("echo existing");
+    expect(prePush).not.toContain("sidecar-sync");
+  });
+
+  test("removal leaves unrelated hooks alone and reports nothing removed", () => {
+    const repo = initRepo();
+    const hooksDir = path.join(repo, ".git", "hooks");
+    fs.mkdirSync(hooksDir, { recursive: true });
+    fs.writeFileSync(path.join(hooksDir, "pre-push"), "#!/bin/sh\necho existing\n", "utf8");
+
+    expect(removeLegacyGitHooks(repo)).toBe(false);
+
+    expect(fs.readFileSync(path.join(hooksDir, "pre-push"), "utf8")).toContain("echo existing");
+  });
+});
+
+describe("sync lock", () => {
+  test("is exclusive while held, released after, and stolen from dead holders", () => {
+    const repo = initRepo();
+
+    const release = acquireSyncLock(repo);
+    expect(release).toBeDefined();
+    expect(acquireSyncLock(repo)).toBeUndefined();
+    release!();
+
+    const second = acquireSyncLock(repo);
+    expect(second).toBeDefined();
+    // Simulate a crashed holder: overwrite the pid with one that cannot be running.
+    fs.writeFileSync(path.join(repo, ".git", "sidecar-sync-lock", "pid"), "999999999", "utf8");
+    const stolen = acquireSyncLock(repo);
+    expect(stolen).toBeDefined();
+    stolen!();
   });
 });
 

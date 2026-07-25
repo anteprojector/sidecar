@@ -12,18 +12,18 @@ const cliPath = path.resolve("dist/cli.js");
 
 afterEach(() => {
   for (const root of tempRoots.splice(0)) {
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });
 
 describe("sidecar CLI integration", () => {
   test("global executable delegates to a project-local sidecar dependency", () => {
     const project = tempDir();
-    const localBin = path.join(project, "node_modules", "@anteprojector", "sidecar", "dist", "cli.js");
+    const localBin = path.join(project, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
     fs.mkdirSync(path.dirname(localBin), { recursive: true });
     fs.writeFileSync(
       path.join(project, "package.json"),
-      JSON.stringify({ dependencies: { "@anteprojector/sidecar": "0.1.0" } }),
+      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.1.0" } }),
       "utf8",
     );
     fs.writeFileSync(
@@ -52,6 +52,8 @@ describe("sidecar CLI integration", () => {
       'inbox = "sidecar-inbox/{user}/{random}"',
     );
     expect(fs.readFileSync(path.join(main, ".gitignore"), "utf8")).toContain("/sidecar/");
+    expect(git(main, ["status", "--porcelain"]).stdout).not.toMatch(/^\?\? sidecar\//m);
+    expect(fs.readFileSync(path.join(main, ".zed", "settings.json"), "utf8")).toContain("sidecar/**");
     expect(fs.existsSync(path.join(main, "sidecar", ".git"))).toBe(true);
     expect(fs.existsSync(path.join(main, "package.json"))).toBe(false);
     expect(gitRaw(["--git-dir", remote, "rev-parse", "--verify", "refs/heads/main"]).status).toBe(0);
@@ -72,10 +74,11 @@ describe("sidecar CLI integration", () => {
 
     const output = runSidecar(["init", remote, "--no-clone"], main, { SIDECAR_STATE_DIR: stateDir });
 
-    expect(output).toContain("added devDependency @anteprojector/sidecar");
+    expect(output).toContain("added devDependency @projectors/sidecar");
     const manifest = JSON.parse(fs.readFileSync(path.join(main, "package.json"), "utf8"));
     expect(manifest.dependencies).toEqual({ leftpad: "1.0.0" });
-    expect(manifest.devDependencies["@anteprojector/sidecar"]).toBe("github:anteprojector/sidecar");
+    const ownVersion = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8")).version;
+    expect(manifest.devDependencies["@projectors/sidecar"]).toBe(`^${ownVersion}`);
     const instances = JSON.parse(fs.readFileSync(path.join(stateDir, "instances.json"), "utf8"));
     expect(instances).toHaveLength(1);
   });
@@ -90,6 +93,159 @@ describe("sidecar CLI integration", () => {
     expect(output).toContain(`using ${path.join(fs.realpathSync(main), ".sidecar")}`);
     expect(output).toContain("sidecar checkout ready");
     expect(fs.existsSync(path.join(main, "sidecar", ".git"))).toBe(true);
+  });
+
+  test("init migrates an interim .git/info/exclude entry back to .gitignore", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    const excludePath = path.join(main, ".git", "info", "exclude");
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    fs.writeFileSync(excludePath, "# comment\n/sidecar/\n", "utf8");
+
+    runSidecar(["init", remote, "--no-clone"], main);
+
+    expect(fs.readFileSync(path.join(main, ".gitignore"), "utf8")).toContain("/sidecar/");
+    expect(fs.readFileSync(excludePath, "utf8")).not.toContain("/sidecar/");
+  });
+
+  test("init does not install git hooks and sync removes hooks left by old versions", () => {
+    const { main } = initSidecarProject();
+    const hooksDir = path.join(main, ".git", "hooks");
+    expect(fs.existsSync(path.join(hooksDir, "post-commit"))).toBe(false);
+    expect(fs.existsSync(path.join(hooksDir, "pre-push"))).toBe(false);
+    expect(fs.existsSync(path.join(hooksDir, "sidecar-sync-hook"))).toBe(false);
+
+    // Simulate hooks written by an earlier sidecar version.
+    fs.mkdirSync(hooksDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(hooksDir, "post-commit"),
+      '#!/bin/sh\n"$(dirname -- "$0")/sidecar-sync-hook" post-commit "$@" # sidecar-sync\n',
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(hooksDir, "pre-push"),
+      '#!/bin/sh\necho custom\n"$(dirname -- "$0")/sidecar-sync-hook" pre-push "$@" # sidecar-sync\n',
+      "utf8",
+    );
+    fs.writeFileSync(path.join(hooksDir, "sidecar-sync-hook"), "#!/bin/sh\nexit 0\n", "utf8");
+
+    runSidecar(["sync"], main);
+
+    expect(fs.existsSync(path.join(hooksDir, "post-commit"))).toBe(false);
+    const prePush = fs.readFileSync(path.join(hooksDir, "pre-push"), "utf8");
+    expect(prePush).toContain("echo custom");
+    expect(prePush).not.toContain("sidecar-sync");
+    expect(fs.existsSync(path.join(hooksDir, "sidecar-sync-hook"))).toBe(false);
+  });
+
+  test("global executable runs daemon commands itself instead of delegating locally", () => {
+    const project = tempDir();
+    const localBin = path.join(project, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+    fs.mkdirSync(path.dirname(localBin), { recursive: true });
+    fs.writeFileSync(
+      path.join(project, "package.json"),
+      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.1.0" } }),
+      "utf8",
+    );
+    fs.writeFileSync(localBin, "console.log(JSON.stringify({ local: true }))\n", "utf8");
+
+    const result = spawnSync(process.execPath, [cliPath, "daemon", "status"], {
+      cwd: project,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        SIDECAR_STATE_DIR: path.join(project, ".sidecar-test-state"),
+        SIDECAR_SKIP_SERVICE: "1",
+      },
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain("local");
+    expect(result.stdout).toContain("daemon:");
+  });
+
+  test("daemon commands refuse to run from a project-local executable", () => {
+    const project = tempDir();
+    const localBin = path.join(project, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+    fs.mkdirSync(path.dirname(localBin), { recursive: true });
+    fs.writeFileSync(
+      path.join(project, "package.json"),
+      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.1.0" } }),
+      "utf8",
+    );
+    fs.copyFileSync(cliPath, localBin);
+
+    const result = spawnSync(process.execPath, [localBin, "daemon", "status"], {
+      cwd: project,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        SIDECAR_STATE_DIR: path.join(project, ".sidecar-test-state"),
+        SIDECAR_SKIP_SERVICE: "1",
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("globally installed sidecar");
+  });
+
+  test("--version prints the package version", () => {
+    const manifest = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8"));
+
+    const result = spawnSync(process.execPath, [cliPath, "--version"], { encoding: "utf8" });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe(manifest.version);
+  });
+
+  test("clone --if-missing clones once and leaves an existing checkout untouched", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    runSidecar(["init", remote, "--no-clone"], main);
+
+    runSidecar(["clone", "--if-missing"], main);
+    expect(fs.existsSync(path.join(main, "sidecar", ".git"))).toBe(true);
+
+    const marker = path.join(main, "sidecar", "marker.txt");
+    fs.writeFileSync(marker, "keep\n", "utf8");
+    const output = runSidecar(["clone", "--if-missing"], main);
+
+    expect(output).not.toContain("sidecar checkout ready");
+    expect(fs.existsSync(marker)).toBe(true);
+  });
+
+  test("postinstall clones a missing sidecar checkout for local installs", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    runSidecar(["init", remote, "--no-clone"], main);
+
+    const result = spawnSync(process.execPath, [path.resolve("scripts", "postinstall.js")], {
+      cwd: main,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        INIT_CWD: main,
+        GIT_TERMINAL_PROMPT: "0",
+        SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state"),
+      },
+    });
+
+    expect(result.status).toBe(0);
+    expect(fs.existsSync(path.join(main, "sidecar", ".git"))).toBe(true);
+    expect(fs.existsSync(path.join(main, ".git", "hooks", "post-commit"))).toBe(false);
+    expect(fs.existsSync(path.join(main, ".git", "hooks", "sidecar-sync-hook"))).toBe(false);
+  });
+
+  test("clone does not create editor settings", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    runSidecar(["init", remote, "--no-clone"], main);
+    fs.rmSync(path.join(main, ".zed"), { recursive: true });
+
+    runSidecar(["clone"], main);
+
+    expect(git(main, ["status", "--porcelain"]).stdout).not.toMatch(/^\?\? sidecar\//m);
+    expect(fs.existsSync(path.join(main, ".zed"))).toBe(false);
   });
 
   test("init without a remote requires an interactive prompt when config is missing", () => {
@@ -150,28 +306,77 @@ describe("sidecar CLI integration", () => {
     const main = initMainRepo();
     const remote = initBareRemote();
     const stateDir = tempDir();
+    const pathWithoutSidecar = tempDir();
+    fs.symlinkSync(findExecutable("git"), path.join(pathWithoutSidecar, "git"));
     fs.writeFileSync(
       path.join(main, "package.json"),
-      JSON.stringify({ dependencies: { "@anteprojector/sidecar": "0.1.0" } }),
+      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.1.0" } }),
       "utf8",
     );
 
-    runSidecar(["init", remote], main, { SIDECAR_STATE_DIR: stateDir, SIDECAR_SKIP_LOCAL_EXEC: "1" });
+    runSidecar(["init", remote], main, {
+      PATH: pathWithoutSidecar,
+      SIDECAR_STATE_DIR: stateDir,
+      SIDECAR_SKIP_LOCAL_EXEC: "1",
+    });
 
     expect(fs.existsSync(path.join(stateDir, "instances.json"))).toBe(false);
     expect(fs.existsSync(path.join(stateDir, "sidecar.log"))).toBe(false);
+  });
+
+  test("local init registers the repo through an existing global sidecar", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    const stateDir = tempDir();
+    fs.writeFileSync(
+      path.join(main, "package.json"),
+      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.2.0" } }),
+      "utf8",
+    );
+
+    const binDir = tempDir();
+    const fakeGlobal = path.join(binDir, process.platform === "win32" ? "sidecar.cmd" : "sidecar");
+    fs.writeFileSync(
+      fakeGlobal,
+      [
+        "#!/usr/bin/env node",
+        'const { spawnSync } = require("node:child_process");',
+        `const result = spawnSync(process.execPath, [${JSON.stringify(cliPath)}, ...process.argv.slice(2)], {`,
+        '  stdio: "inherit",',
+        '  env: { ...process.env, SIDECAR_GLOBAL_EXEC: "1", SIDECAR_SKIP_LOCAL_EXEC: "1" },',
+        "});",
+        "process.exit(result.status ?? 1);",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    fs.chmodSync(fakeGlobal, 0o755);
+
+    runSidecar(["init", remote, "--no-clone"], main, {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
+      SIDECAR_STATE_DIR: stateDir,
+      SIDECAR_SKIP_LOCAL_EXEC: "1",
+    });
+
+    const instances = JSON.parse(fs.readFileSync(path.join(stateDir, "instances.json"), "utf8"));
+    expect(instances).toHaveLength(1);
+    expect(fs.realpathSync(instances[0].root)).toBe(fs.realpathSync(main));
+    expect(fs.readFileSync(path.join(stateDir, "sidecar.log"), "utf8")).toContain('"event":"install-register"');
   });
 
   test("postinstall registers a configured repo when a global sidecar exists", () => {
     const main = initMainRepo();
     const remote = initBareRemote();
     const stateDir = tempDir();
+    const pathWithoutSidecar = tempDir();
+    fs.symlinkSync(findExecutable("git"), path.join(pathWithoutSidecar, "git"));
     fs.writeFileSync(
       path.join(main, "package.json"),
-      JSON.stringify({ dependencies: { "@anteprojector/sidecar": "0.1.0" } }),
+      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.1.0" } }),
       "utf8",
     );
     runSidecar(["init", remote, "--no-clone"], main, {
+      PATH: pathWithoutSidecar,
       SIDECAR_STATE_DIR: stateDir,
       SIDECAR_SKIP_LOCAL_EXEC: "1",
     });
@@ -233,6 +438,7 @@ describe("sidecar CLI integration", () => {
     expect(disabled).toContain("daemon:   disabled");
     expect(JSON.parse(fs.readFileSync(path.join(stateDir, "settings.json"), "utf8"))).toEqual({
       daemonEnabled: false,
+      autoUpdate: true,
     });
 
     const disabledStatus = runSidecar(["daemon", "status"], project, {
@@ -248,6 +454,7 @@ describe("sidecar CLI integration", () => {
     expect(enabled).toContain("daemon:   enabled");
     expect(JSON.parse(fs.readFileSync(path.join(stateDir, "settings.json"), "utf8"))).toEqual({
       daemonEnabled: true,
+      autoUpdate: true,
     });
 
     const log = fs.readFileSync(path.join(stateDir, "sidecar.log"), "utf8");
@@ -268,8 +475,87 @@ describe("sidecar CLI integration", () => {
     expect(output).toContain("service:  unavailable");
     expect(JSON.parse(fs.readFileSync(path.join(stateDir, "settings.json"), "utf8"))).toEqual({
       daemonEnabled: true,
+      autoUpdate: true,
     });
     expect(fs.readFileSync(path.join(stateDir, "sidecar.log"), "utf8")).toContain('"event":"daemon-restart"');
+  });
+
+  test("update installs the newer registry version and reports it", () => {
+    const project = tempDir();
+    const stateDir = tempDir();
+    const binDir = tempDir();
+    const marker = path.join(tempDir(), "npm-calls.log");
+    fs.writeFileSync(
+      path.join(binDir, "npm"),
+      `#!/bin/sh\necho "$@" >> "${marker}"\nif [ "$1" = "view" ]; then echo "9.9.9"; fi\nexit 0\n`,
+      "utf8",
+    );
+    fs.chmodSync(path.join(binDir, "npm"), 0o755);
+
+    const output = runSidecar(["update"], project, {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
+      SIDECAR_STATE_DIR: stateDir,
+      SIDECAR_SKIP_SERVICE: "1",
+    });
+
+    expect(output).toContain("updated sidecar");
+    expect(output).toContain("-> v9.9.9");
+    const calls = fs.readFileSync(marker, "utf8");
+    expect(calls).toContain("view @projectors/sidecar version");
+    expect(calls).toContain("install -g @projectors/sidecar@9.9.9");
+    expect(fs.readFileSync(path.join(stateDir, "sidecar.log"), "utf8")).toContain('"event":"manual-update"');
+  });
+
+  test("update reports up to date when the registry matches", () => {
+    const project = tempDir();
+    const stateDir = tempDir();
+    const binDir = tempDir();
+    const ownVersion = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8")).version;
+    fs.writeFileSync(
+      path.join(binDir, "npm"),
+      `#!/bin/sh\nif [ "$1" = "view" ]; then echo "${ownVersion}"; fi\nexit 0\n`,
+      "utf8",
+    );
+    fs.chmodSync(path.join(binDir, "npm"), 0o755);
+
+    const output = runSidecar(["update"], project, {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
+      SIDECAR_STATE_DIR: stateDir,
+      SIDECAR_SKIP_SERVICE: "1",
+    });
+
+    expect(output).toContain(`sidecar v${ownVersion} is up to date`);
+  });
+
+  test("daemon autoupdate can be toggled off and on", () => {
+    const project = tempDir();
+    const stateDir = tempDir();
+
+    const off = runSidecar(["daemon", "autoupdate", "off"], project, {
+      SIDECAR_STATE_DIR: stateDir,
+      SIDECAR_SKIP_SERVICE: "1",
+    });
+    expect(off).toContain("autoupdate: off");
+    expect(JSON.parse(fs.readFileSync(path.join(stateDir, "settings.json"), "utf8"))).toEqual({
+      daemonEnabled: true,
+      autoUpdate: false,
+    });
+
+    const status = runSidecar(["daemon", "status"], project, {
+      SIDECAR_STATE_DIR: stateDir,
+      SIDECAR_SKIP_SERVICE: "1",
+    });
+    expect(status).toContain("update:   manual");
+
+    const on = runSidecar(["daemon", "autoupdate", "on"], project, {
+      SIDECAR_STATE_DIR: stateDir,
+      SIDECAR_SKIP_SERVICE: "1",
+    });
+    expect(on).toContain("autoupdate: on");
+    expect(JSON.parse(fs.readFileSync(path.join(stateDir, "settings.json"), "utf8"))).toEqual({
+      daemonEnabled: true,
+      autoUpdate: true,
+    });
   });
 
   test("tail prints the sidecar log", () => {
@@ -345,7 +631,7 @@ describe("sidecar CLI integration", () => {
     expect(fs.readFileSync(path.join(sidecar, "notes", "remote-main.md"), "utf8")).toBe("remote main\n");
     const log = fs.readFileSync(path.join(main, ".sidecar-test-state", "sidecar.log"), "utf8");
     expect(log).toContain('"event":"daemon-sync-start"');
-    expect(log).toContain('"remoteChanged":true');
+    expect(log).toContain('"event":"daemon-sync"');
   });
 
   test("daemon run --once merges remote inbox changes for clean registered instances", () => {
@@ -365,7 +651,7 @@ describe("sidecar CLI integration", () => {
     expect(git(sidecar, ["status", "--porcelain"]).stdout.trim()).toBe("");
     const log = fs.readFileSync(path.join(main, ".sidecar-test-state", "sidecar.log"), "utf8");
     expect(log).toContain('"event":"daemon-sync-start"');
-    expect(log).toContain('"remoteChanged":true');
+    expect(log).toContain('"event":"daemon-sync"');
   });
 
   test("daemon run --once clones registered instances with missing checkouts", () => {
@@ -378,10 +664,157 @@ describe("sidecar CLI integration", () => {
     expect(output).toContain("sidecar daemon polling");
     expect(fs.existsSync(path.join(main, "sidecar", ".git"))).toBe(true);
     const log = fs.readFileSync(path.join(main, ".sidecar-test-state", "sidecar.log"), "utf8");
-    expect(log).toContain('"event":"daemon-clone-start"');
-    expect(log).toContain('"event":"daemon-clone"');
-    expect(log).toContain('"cloned":1');
+    expect(log).toContain('"event":"daemon-sync-start"');
+    expect(log).toContain('"event":"daemon-sync"');
+    expect(log).toContain('"synced":1');
   });
+
+  test("daemon run --once delegates syncing to a project-local sidecar install", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    runSidecar(["init", remote, "--no-clone"], main);
+
+    // Adding the dependency and a fake local CLI afterwards simulates a repo
+    // whose local sidecar version must own its own sync.
+    fs.writeFileSync(
+      path.join(main, "package.json"),
+      JSON.stringify({ devDependencies: { "@projectors/sidecar": "0.2.0" } }),
+      "utf8",
+    );
+    const localCli = path.join(main, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+    fs.mkdirSync(path.dirname(localCli), { recursive: true });
+    fs.writeFileSync(
+      localCli,
+      'require("node:fs").writeFileSync(__filename + ".marker", JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));\n',
+      "utf8",
+    );
+
+    runSidecar(["daemon", "run", "--once"], main);
+
+    const marker = JSON.parse(fs.readFileSync(`${localCli}.marker`, "utf8"));
+    expect(marker.argv).toEqual(["sync"]);
+    expect(fs.realpathSync(marker.cwd)).toBe(fs.realpathSync(main));
+    const log = fs.readFileSync(path.join(main, ".sidecar-test-state", "sidecar.log"), "utf8");
+    expect(log).toContain('"event":"daemon-sync"');
+    expect(log).toContain('"local":true');
+  });
+
+  test(
+    "daemon watches registered sidecars and syncs after the debounce",
+    async () => {
+      const { main, remote, sidecar } = initSidecarProject();
+      const stateDir = path.join(main, ".sidecar-test-state");
+      const logPath = path.join(stateDir, "sidecar.log");
+      const daemon = spawn(
+        process.execPath,
+        [cliPath, "daemon", "run", "--interval", "3600", "--debounce", "1"],
+        {
+          cwd: main,
+          env: {
+            ...process.env,
+            GIT_TERMINAL_PROMPT: "0",
+            SIDECAR_STATE_DIR: stateDir,
+            SIDECAR_SKIP_SERVICE: "1",
+            SIDECAR_SKIP_UPDATE: "1",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+
+      try {
+        await waitFor(
+          () => fs.existsSync(logPath) && fs.readFileSync(logPath, "utf8").includes('"event":"daemon-watch"'),
+          30000,
+        );
+        // Wait out the post-sync echo grace so the write is seen as new work.
+        await new Promise((resolve) => setTimeout(resolve, 6000));
+        fs.writeFileSync(path.join(sidecar, "watched.md"), "watched\n", "utf8");
+        await waitFor(
+          () => gitRaw(["--git-dir", remote, "cat-file", "-e", "main:watched.md"], { check: false }).status === 0,
+          30000,
+        );
+      } finally {
+        daemon.kill("SIGTERM");
+        await new Promise<void>((resolve) => {
+          daemon.once("close", () => resolve());
+        });
+        // The daemon spawns syncs as children; killing it does not kill an
+        // in-flight sync, so wait for the lock to clear before cleanup.
+        await waitFor(() => !fs.existsSync(path.join(main, ".git", "sidecar-sync-lock")), 15000);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    },
+    60000,
+  );
+
+  test(
+    "daemon exits when its install is updated in place so the service restarts it",
+    async () => {
+      // Run the daemon from a disposable copy of the package so the manifest
+      // can be rewritten underneath it, like `npm install -g` does.
+      const pkgRoot = path.join(tempDir(), "pkg");
+      fs.mkdirSync(path.join(pkgRoot, "dist"), { recursive: true });
+      const manifestPath = path.join(pkgRoot, "package.json");
+      fs.writeFileSync(
+        manifestPath,
+        JSON.stringify({ name: "@projectors/sidecar", version: "9.9.9", type: "module" }),
+        "utf8",
+      );
+      fs.copyFileSync(cliPath, path.join(pkgRoot, "dist", "cli.js"));
+
+      const stateDir = tempDir();
+      const logPath = path.join(stateDir, "sidecar.log");
+      const pathWithoutSidecar = tempDir();
+      fs.symlinkSync(findExecutable("git"), path.join(pathWithoutSidecar, "git"));
+
+      const daemon = spawn(
+        process.execPath,
+        [path.join(pkgRoot, "dist", "cli.js"), "daemon", "run", "--interval", "1"],
+        {
+          cwd: pkgRoot,
+          env: {
+            ...process.env,
+            PATH: pathWithoutSidecar,
+            SIDECAR_STATE_DIR: stateDir,
+            SIDECAR_SKIP_SERVICE: "1",
+            SIDECAR_SKIP_UPDATE: "1",
+            SIDECAR_SKIP_LOCAL_EXEC: "1",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      const exited = new Promise<number | null>((resolve) => {
+        daemon.once("close", (code) => resolve(code));
+      });
+
+      try {
+        await waitFor(
+          () => fs.existsSync(logPath) && fs.readFileSync(logPath, "utf8").includes('"event":"daemon-start"'),
+          15000,
+        );
+        fs.writeFileSync(
+          manifestPath,
+          JSON.stringify({ name: "@projectors/sidecar", version: "9.9.10", type: "module" }),
+          "utf8",
+        );
+
+        const code = await Promise.race([
+          exited,
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("daemon did not exit")), 15000)),
+        ]);
+
+        expect(code).toBe(0);
+        const log = fs.readFileSync(logPath, "utf8");
+        expect(log).toContain('"event":"daemon-stale"');
+        expect(log).toContain('"reason":"in-place-update"');
+        expect(log).toContain('"installed":"9.9.10"');
+      } finally {
+        daemon.kill("SIGTERM");
+        await exited;
+      }
+    },
+    40000,
+  );
 
   test("daemon run --once skips dirty instances when daemon is disabled", () => {
     const { main, sidecar } = initSidecarProject();
@@ -401,7 +834,7 @@ describe("sidecar CLI integration", () => {
     const stateDir = tempDir();
     fs.writeFileSync(
       path.join(project, "package.json"),
-      JSON.stringify({ dependencies: { "@anteprojector/sidecar": "0.1.0" } }),
+      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.1.0" } }),
       "utf8",
     );
 
@@ -558,6 +991,14 @@ function tempDir(): string {
   return root;
 }
 
+function findExecutable(name: string): string {
+  for (const entry of (process.env.PATH || "").split(path.delimiter)) {
+    const candidate = path.join(entry, name);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error(`missing executable ${name}`);
+}
+
 function runSidecar(args: string[], cwd: string, env: Record<string, string> = {}): string {
   const result = spawnSync(process.execPath, [cliPath, ...args], {
     cwd,
@@ -579,8 +1020,8 @@ function runSidecar(args: string[], cwd: string, env: Record<string, string> = {
   return result.stdout;
 }
 
-async function waitFor(predicate: () => boolean): Promise<void> {
-  const deadline = Date.now() + 5000;
+async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
