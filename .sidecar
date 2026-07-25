@@ -1,0 +1,5 @@
+version = 1
+remote = "https://github.com/anteprojector/sidecar-sidecar.git"
+path = "sidecar"
+branch = "main"
+inbox = "sidecar-inbox/{user}/{random}"
