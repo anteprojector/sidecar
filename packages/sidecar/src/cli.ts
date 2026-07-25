@@ -19,6 +19,10 @@ const PACKAGE_SPEC = "@projectors/sidecar";
 const GLOBAL_EXEC_ENV = "SIDECAR_GLOBAL_EXEC";
 const SKIP_LOCAL_EXEC_ENV = "SIDECAR_SKIP_LOCAL_EXEC";
 const STATE_DIR_ENV = "SIDECAR_STATE_DIR";
+// An env var rather than a flag so the daemon can request soft syncs from
+// older pinned project-local CLIs, which ignore it instead of rejecting an
+// unknown option.
+export const SOFT_SYNC_ENV = "SIDECAR_SYNC_SOFT";
 const SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE";
 const DAEMON_LABEL = "com.anteprojector.sidecar";
 
@@ -149,6 +153,8 @@ function run(argv: string[]): number | Promise<number> {
       return cmdSync(rest);
     case "merge":
       return cmdMerge(rest);
+    case "redact":
+      return cmdRedact();
     default:
       throw new SidecarError(`unknown command ${JSON.stringify(command)}`);
   }
@@ -166,8 +172,9 @@ commands:
   update
   tail [-f|--follow] [-n|--lines count]
   snapshot [--push] [-m message]
-  sync [--no-snapshot] [-m message]
-  merge [--fork-files] [--no-push]`);
+  sync [--no-snapshot] [--soft] [-m message]
+  merge [--fork-files] [--no-push]
+  redact (git clean filter: stdin -> redacted stdout)`);
 }
 
 function cmdInit(args: string[]): number {
@@ -180,9 +187,20 @@ function cmdInit(args: string[]): number {
   }
 
   const remote = parsed.positional[0];
-  const existingRoot = remote ? undefined : findConfigRootOptional(process.cwd());
+  let existingRoot = remote ? undefined : findConfigRootOptional(process.cwd());
   const root = existingRoot ?? gitToplevel(process.cwd());
   const configPath = path.join(root, ".sidecar");
+  if (remote && fs.existsSync(configPath)) {
+    const existing = readConfig(configPath);
+    const unchanged =
+      existing.remote === remote &&
+      existing.path === getValue(parsed, "--path", DEFAULT_PATH) &&
+      existing.branch === getValue(parsed, "--branch", DEFAULT_BRANCH) &&
+      existing.inbox === getValue(parsed, "--inbox", DEFAULT_INBOX);
+    if (unchanged || !promptOverwriteConfig(configPath, existing.remote, remote)) {
+      existingRoot = root;
+    }
+  }
   const config = existingRoot
     ? readConfig(configPath)
     : {
@@ -193,6 +211,7 @@ function cmdInit(args: string[]): number {
         inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
       };
   if (!existingRoot) {
+    validateRemote(config.remote);
     validateBranch(config.branch);
     validateInboxTemplate(config.inbox);
     writeConfig(configPath, config);
@@ -222,10 +241,39 @@ function cmdInit(args: string[]): number {
     cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   }
   registerCurrentInstance(root, config, { event: "init" });
-  addSidecarDevDependency(root);
   const globalSidecar = ensureGlobalSidecar();
-  if (globalSidecar) registerInstallWithGlobalSidecar(globalSidecar, root);
+  if (globalSidecar) {
+    registerInstallWithGlobalSidecar(globalSidecar, root);
+    ensureDaemonSetup(globalSidecar);
+  }
   return 0;
+}
+
+// Package managers don't reliably run the postinstall that enables the daemon
+// (pnpm and bun block lifecycle scripts by default), so init is the
+// guaranteed path: every init makes sure the background service is set up,
+// unless the user has explicitly disabled the daemon.
+function ensureDaemonSetup(globalSidecar: string): void {
+  if (process.env[SKIP_SERVICE_ENV] === "1") return;
+  if (!readSettings().daemonEnabled) return;
+  const service = daemonServiceStatus();
+  if (!service.available || (service.installed && service.running)) return;
+
+  const result = spawnSync(globalSidecar, ["daemon", "enable"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      [SKIP_LOCAL_EXEC_ENV]: "1",
+      [GLOBAL_EXEC_ENV]: "1",
+    },
+  });
+  if (result.status !== 0) {
+    console.log(
+      `could not enable the sync daemon: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}; run \`sidecar daemon enable\` manually`,
+    );
+    return;
+  }
+  console.log("enabled the sidecar daemon for background sync");
 }
 
 function ensureGlobalSidecar(): string | undefined {
@@ -768,56 +816,58 @@ function cmdSnapshot(args: string[]): number {
 
   const [root, config] = loadProject();
   const sidecarPath = requireSidecarCheckout(root, config);
-  const inbox = expandInbox(config, sidecarPath);
-  ensureCommitIdentity(sidecarPath);
-  ensureInboxBranch(sidecarPath, config, inbox);
-  const committed = snapshot(sidecarPath, root, inbox, getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined);
-  if (committed && parsed.flags.has("--push")) {
-    syncBranchBeforePush(sidecarPath, inbox);
-    pushBranch(sidecarPath, inbox);
-  }
+  // Snapshotting while a daemon sync is mid-merge would commit on whatever
+  // branch the merge has checked out, so take the same lock syncs use.
+  withSyncLock(root, "throw", () => {
+    const inbox = expandInbox(config, sidecarPath);
+    ensureCommitIdentity(sidecarPath);
+    ensureInboxBranch(sidecarPath, config, inbox);
+    const committed = snapshot(sidecarPath, root, inbox, getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined);
+    if (committed && parsed.flags.has("--push")) {
+      syncBranchBeforePush(sidecarPath, inbox);
+      pushBranch(sidecarPath, inbox);
+    }
+  });
   return 0;
 }
 
 function cmdSync(args: string[]): number {
   const parsed = parseOptions(args, {
-    boolean: new Set(["--no-snapshot"]),
+    boolean: new Set(["--no-snapshot", "--soft"]),
     value: new Set(["-m", "--message"]),
   });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar sync [--no-snapshot] [-m message]");
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar sync [--no-snapshot] [--soft] [-m message]");
 
   const [root, config] = loadProject();
   removeLegacyGitHooks(root);
-  syncProject(root, config, {
-    snapshot: !parsed.flags.has("--no-snapshot"),
-    message: getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined,
+  // A soft sync is a request, not a demand: the daemon issues them, and one
+  // that loses the lock to a running sync can no-op because the interval or
+  // watcher will simply request again. A manual sync must never pretend.
+  const soft = parsed.flags.has("--soft") || process.env[SOFT_SYNC_ENV] === "1";
+  const synced = withSyncLock(root, soft ? "skip" : "throw", () => {
+    syncProject(root, config, {
+      snapshot: !parsed.flags.has("--no-snapshot"),
+      message: getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined,
+    });
   });
-  registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
+  if (synced) registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
   return 0;
 }
 
+/** Runs inside the repo's sync lock — callers hold it via withSyncLock. */
 function syncProject(root: string, config: SidecarConfig, options: { snapshot: boolean; message?: string }): void {
-  const releaseLock = acquireSyncLock(root);
-  if (!releaseLock) {
-    console.log("another sidecar sync is already running; skipping");
-    return;
+  const sidecarPath = ensureSidecarCheckout(root, config);
+  const inbox = expandInbox(config, sidecarPath);
+  ensureCommitIdentity(sidecarPath);
+  fetch(sidecarPath, true, false);
+  ensureInboxBranch(sidecarPath, config, inbox);
+  if (options.snapshot) {
+    snapshot(sidecarPath, root, inbox, options.message);
   }
-  try {
-    const sidecarPath = ensureSidecarCheckout(root, config);
-    const inbox = expandInbox(config, sidecarPath);
-    ensureCommitIdentity(sidecarPath);
-    fetch(sidecarPath, true, false);
-    ensureInboxBranch(sidecarPath, config, inbox);
-    if (options.snapshot) {
-      snapshot(sidecarPath, root, inbox, options.message);
-    }
-    syncBranchBeforePush(sidecarPath, inbox);
-    pushBranch(sidecarPath, inbox);
-    mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: true });
-    refreshInboxFromMain(sidecarPath, config, inbox);
-  } finally {
-    releaseLock();
-  }
+  syncBranchBeforePush(sidecarPath, inbox);
+  pushBranch(sidecarPath, inbox);
+  mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: true });
+  refreshInboxFromMain(sidecarPath, config, inbox);
 }
 
 function cmdMerge(args: string[]): number {
@@ -852,50 +902,105 @@ export function mergeInboxBranches(
 ): number {
   ensureClean(sidecarPath);
   ensureCommitIdentity(sidecarPath);
-  fetch(sidecarPath, false);
-  ensureMainBranch(sidecarPath, config);
 
-  const inboxBranches = pendingInboxBranches(sidecarPath, config).filter(
-    (remoteBranch) => !isAncestor(sidecarPath, remoteBranch, "HEAD"),
-  );
-  if (!inboxBranches.length) {
-    console.log("no inbox branches to merge");
-    return 0;
+  // Merging switches branches, which rewrites working-tree files from
+  // committed (redacted) blobs. The user's checkout keeps the unredacted
+  // originals, so the branch dance happens in a throwaway linked worktree
+  // and the checkout never leaves the inbox branch.
+  // No commits means no worktree to protect; a checkout already on the main
+  // branch would block the worktree from switching to it, and its files are
+  // committed blobs anyway.
+  const current = git(sidecarPath, ["branch", "--show-current"]).stdout.trim();
+  if (!hasAnyCommit(sidecarPath) || current === config.branch) {
+    return mergeInboxBranchesAt(sidecarPath, config, options);
   }
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-merge-"));
+  const worktree = path.join(scratch, "checkout");
+  try {
+    git(sidecarPath, ["worktree", "add", "--detach", worktree]);
+    return mergeInboxBranchesAt(worktree, config, options);
+  } finally {
+    git(sidecarPath, ["worktree", "remove", "--force", worktree], { check: false });
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
 
-  const merged: string[] = [];
-  for (const remoteBranch of inboxBranches) {
-    console.log(`merging ${remoteBranch}`);
-    const result = git(
-      sidecarPath,
-      ["merge", "--no-ff", "-m", `Merge ${remoteBranch}`, remoteBranch],
-      { check: false },
+function mergeInboxBranchesAt(
+  sidecarPath: string,
+  config: SidecarConfig,
+  options: { forkFiles: boolean; push: boolean },
+): number {
+  // Two machines can merge and push concurrently; the loser's push of the
+  // main branch is rejected. Each attempt refetches, lets ensureMainBranch
+  // reconcile with whatever the winner pushed, and re-merges what's still
+  // pending, so a lost race heals instead of wedging every later sync.
+  const maxAttempts = 3;
+  for (let attempt = 1; ; attempt += 1) {
+    fetch(sidecarPath, false);
+    ensureMainBranch(sidecarPath, config);
+
+    const inboxBranches = pendingInboxBranches(sidecarPath, config).filter(
+      (remoteBranch) => !isAncestor(sidecarPath, remoteBranch, "HEAD"),
     );
-    if (result.status === 0) {
+    if (!inboxBranches.length && attempt === 1) {
+      console.log("no inbox branches to merge");
+      return 0;
+    }
+
+    const merged: string[] = [];
+    for (const remoteBranch of inboxBranches) {
+      console.log(`merging ${remoteBranch}`);
+      const result = git(
+        sidecarPath,
+        ["merge", "--no-ff", "-m", `Merge ${remoteBranch}`, remoteBranch],
+        { check: false },
+      );
+      if (result.status === 0) {
+        merged.push(remoteBranch);
+        continue;
+      }
+
+      if (!hasUnmergedPaths(sidecarPath)) {
+        throw new SidecarError(result.stderr.trim() || `merge failed for ${remoteBranch}`);
+      }
+
+      if (!options.forkFiles) {
+        git(sidecarPath, ["merge", "--abort"], { check: false });
+        throw new SidecarError(`merge conflict in ${remoteBranch}; rerun with --fork-files`);
+      }
+
+      forkConflicts(sidecarPath, remoteBranch);
+      git(sidecarPath, ["commit", "-m", `Merge ${remoteBranch} with forked conflict files`]);
       merged.push(remoteBranch);
-      continue;
     }
 
-    if (!hasUnmergedPaths(sidecarPath)) {
-      throw new SidecarError(result.stderr.trim() || `merge failed for ${remoteBranch}`);
+    if (options.push) {
+      const push = git(
+        sidecarPath,
+        ["push", "-u", "origin", `HEAD:refs/heads/${config.branch}`],
+        { check: false },
+      );
+      if (push.status !== 0) {
+        if (attempt >= maxAttempts) {
+          throw new SidecarError(push.stderr.trim() || `could not push ${config.branch}`);
+        }
+        console.log(`push of ${config.branch} was rejected; refetching and retrying`);
+        continue;
+      }
+      console.log(`pushed ${config.branch}`);
     }
 
-    if (!options.forkFiles) {
-      git(sidecarPath, ["merge", "--abort"], { check: false });
-      throw new SidecarError(`merge conflict in ${remoteBranch}; rerun with --fork-files`);
-    }
-
-    forkConflicts(sidecarPath, remoteBranch);
-    git(sidecarPath, ["commit", "-m", `Merge ${remoteBranch} with forked conflict files`]);
-    merged.push(remoteBranch);
+    console.log(`merged ${merged.length} inbox branch(es)`);
+    return merged.length;
   }
+}
 
-  if (options.push) {
-    pushBranch(sidecarPath, config.branch);
-  }
-
-  console.log(`merged ${merged.length} inbox branch(es)`);
-  return merged.length;
+// Invoked by git as the sidecar checkout's clean filter: one file's content
+// on stdin, redacted content on stdout. Binary and non-UTF-8 input passes
+// through untouched.
+function cmdRedact(): number {
+  process.stdout.write(redactBuffer(fs.readFileSync(0)));
+  return 0;
 }
 
 export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain: boolean): void {
@@ -908,7 +1013,7 @@ export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain
   }
 
   if (!fs.existsSync(sidecarPath)) {
-    gitRaw(["clone", config.remote, sidecarPath]);
+    gitRaw(["clone", "--", config.remote, sidecarPath]);
   } else if (hasGitMetadata(sidecarPath)) {
     const existing = git(sidecarPath, ["remote", "get-url", "origin"], { check: false });
     if (existing.status !== 0) {
@@ -922,6 +1027,7 @@ export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain
   }
 
   ensureCommitIdentity(sidecarPath);
+  ensureRedactionFilter(sidecarPath);
   if (bootstrapMain) bootstrapMainBranch(sidecarPath, config);
 
   const inbox = expandInbox(config, sidecarPath);
@@ -973,9 +1079,17 @@ export function ensureMainBranch(repo: string, config: SidecarConfig): void {
     return;
   }
 
-  if (remoteRefExists(repo, config.branch)) {
-    git(repo, ["merge", "--ff-only", `origin/${config.branch}`]);
+  if (!remoteRefExists(repo, config.branch)) return;
+  const remoteBranch = `origin/${config.branch}`;
+  if (isAncestor(repo, remoteBranch, "HEAD")) return;
+  if (isAncestor(repo, "HEAD", remoteBranch)) {
+    git(repo, ["merge", "--ff-only", remoteBranch]);
+    return;
   }
+  // Diverged: another machine won a push race. Local commits beyond the
+  // remote are only sidecar-generated inbox merges, so the remote side wins
+  // and any still-pending inbox branches get re-merged on top of it.
+  git(repo, ["reset", "--hard", remoteBranch]);
 }
 
 export function ensureInboxBranch(repo: string, config: SidecarConfig, inbox: string): void {
@@ -1012,7 +1126,7 @@ export function ensureInboxBranch(repo: string, config: SidecarConfig, inbox: st
 }
 
 export function snapshot(repo: string, mainRoot: string, inbox: string, message = "sidecar snapshot"): boolean {
-  scrubSidecarTree(repo);
+  ensureRedactionFilter(repo);
   git(repo, ["add", "-A"]);
   if (git(repo, ["diff", "--cached", "--quiet"], { check: false }).status === 0) {
     console.log("no sidecar changes to snapshot");
@@ -1034,38 +1148,57 @@ export function snapshot(repo: string, mainRoot: string, inbox: string, message 
   return true;
 }
 
-export function scrubSidecarTree(root: string): number {
-  let changed = 0;
-  for (const filePath of walkFiles(root)) {
-    const relative = path.relative(root, filePath).split(path.sep);
-    if (relative.includes(".git")) continue;
+const REDACTION_FILTER_NAME = "sidecar-redact";
 
-    let data: Buffer;
-    try {
-      data = fs.readFileSync(filePath);
-    } catch {
-      continue;
-    }
-    if (data.includes(0)) continue;
+// Redaction happens in a git clean filter, so secrets never reach committed
+// blobs while the working tree keeps the user's original text. `required`
+// makes staging fail closed if the filter command can't run.
+export function ensureRedactionFilter(repo: string): void {
+  const command = `${filterCommandQuote(process.execPath)} ${filterCommandQuote(redactCliPath())} redact`;
+  git(repo, ["config", `filter.${REDACTION_FILTER_NAME}.clean`, command]);
+  // `required` applies to both directions, so checkout needs an identity
+  // smudge command to succeed.
+  git(repo, ["config", `filter.${REDACTION_FILTER_NAME}.smudge`, "cat"]);
+  git(repo, ["config", `filter.${REDACTION_FILTER_NAME}.required`, "true"]);
 
-    let text: string;
-    try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(data);
-    } catch {
-      continue;
-    }
-
-    const redacted = redactText(text);
-    if (redacted !== text) {
-      fs.writeFileSync(filePath, redacted, "utf8");
-      changed += 1;
-    }
+  const attributesPath = path.join(gitDir(repo), "info", "attributes");
+  const line = `* filter=${REDACTION_FILTER_NAME}`;
+  let existing = "";
+  try {
+    existing = fs.readFileSync(attributesPath, "utf8");
+  } catch {
+    // Missing attributes file: created below.
   }
+  if (existing.split(/\r?\n/).includes(line)) return;
+  fs.mkdirSync(path.dirname(attributesPath), { recursive: true });
+  const prefix = existing && !existing.endsWith("\n") ? `${existing}\n` : existing;
+  fs.writeFileSync(attributesPath, `${prefix}${line}\n`, "utf8");
+}
 
-  if (changed) {
-    console.log(`redacted sensitive text in ${changed} sidecar file(s)`);
+// The filter must be runnable by plain git, outside this process: point it at
+// the built CLI bundle (when running from TypeScript sources, e.g. tests, the
+// sibling dist build).
+function redactCliPath(): string {
+  const self = fileURLToPath(import.meta.url);
+  return self.endsWith(".ts") ? path.join(path.dirname(self), "..", "dist", "cli.js") : self;
+}
+
+// Git runs filter commands through sh; double quotes keep paths with spaces
+// intact.
+function filterCommandQuote(value: string): string {
+  return `"${value.replace(/([\\"$`])/g, "\\$1")}"`;
+}
+
+export function redactBuffer(data: Buffer): Buffer {
+  if (data.includes(0)) return data;
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(data);
+  } catch {
+    return data;
   }
-  return changed;
+  const redacted = redactText(text);
+  return redacted === text ? data : Buffer.from(redacted, "utf8");
 }
 
 export function syncBranchBeforePush(repo: string, branch: string): void {
@@ -1274,6 +1407,24 @@ export function validateBranch(branch: string): void {
   if (result.status !== 0) throw new SidecarError(`invalid branch name ${JSON.stringify(branch)}`);
 }
 
+// .sidecar is committed and shared, so a cloned repo's remote value reaches
+// git clone from an untrusted source. Restrict it to transports that only
+// talk to a remote: a remote helper like "ext::sh -c ..." executes commands,
+// and a leading dash would be parsed as an option.
+export function validateRemote(remote: string): void {
+  const allowedScheme = /^(https?|ssh|git|file):\/\//i;
+  const scpLike = /^[A-Za-z0-9._~-]+@[A-Za-z0-9._-]+:/;
+  const ok =
+    remote.length > 0 &&
+    !remote.startsWith("-") &&
+    (allowedScheme.test(remote) || scpLike.test(remote) || path.isAbsolute(remote));
+  if (!ok) {
+    throw new SidecarError(
+      `unsupported sidecar remote ${JSON.stringify(remote)}; use an https://, ssh://, git://, or file:// URL, user@host:path, or an absolute path`,
+    );
+  }
+}
+
 export function validateInboxTemplate(template: string): void {
   const prefix = inboxBranchPrefix(template);
   if (template.includes("{") && !prefix.endsWith("/")) {
@@ -1440,23 +1591,37 @@ export function daemonPidPath(): string {
   return path.join(sidecarStateDir(), "daemon.pid");
 }
 
-export function isDaemonRunning(): boolean {
-  let pid: number;
+export function readDaemonPid(): number | undefined {
   try {
-    pid = Number(fs.readFileSync(daemonPidPath(), "utf8").trim());
+    const pid = Number(fs.readFileSync(daemonPidPath(), "utf8").trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
   } catch {
-    return false;
-  }
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    return undefined;
   }
 }
 
-function daemonServiceFileContents(invocation: string[]): string {
+// A pid file survives crashes and reboots, and the OS can hand the recorded
+// pid to an unrelated process. Before trusting or signaling it, confirm the
+// process actually looks like a sidecar daemon.
+export function pidIsSidecarDaemon(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") return false;
+  }
+  if (process.platform === "win32") return true;
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
+  if (result.status !== 0) return false;
+  const command = (result.stdout ?? "").trim();
+  return command.includes("daemon") && /sidecar|cli\.js/.test(command);
+}
+
+export function isDaemonRunning(): boolean {
+  const pid = readDaemonPid();
+  return pid !== undefined && pidIsSidecarDaemon(pid);
+}
+
+export function daemonServiceFileContents(invocation: string[]): string {
   if (process.platform === "darwin") return daemonPlist(invocation);
   if (process.platform === "linux") return daemonSystemdUnit(invocation);
   return daemonWindowsStartupScript(invocation);
@@ -1565,13 +1730,12 @@ function stopDaemonService(): DaemonServiceStatus {
 }
 
 function stopDaemonProcess(): void {
-  let pid: number;
-  try {
-    pid = Number(fs.readFileSync(daemonPidPath(), "utf8").trim());
-  } catch {
+  const pid = readDaemonPid();
+  if (!pid || pid === process.pid) return;
+  if (!pidIsSidecarDaemon(pid)) {
+    fs.rmSync(daemonPidPath(), { force: true });
     return;
   }
-  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return;
   try {
     process.kill(pid, "SIGTERM");
   } catch {
@@ -1738,7 +1902,9 @@ export function logSidecarEvent(event: string, fields: Record<string, unknown> =
       event,
       ...fields,
     };
-    fs.appendFileSync(sidecarLogPath(), `${JSON.stringify(record)}\n`, "utf8");
+    // Logged fields can carry secrets from the outside world — git error
+    // output quotes remote URLs, which may embed access tokens.
+    fs.appendFileSync(sidecarLogPath(), `${redactText(JSON.stringify(record))}\n`, "utf8");
   } catch {
     // Logging must never make the primary sidecar command fail.
   }
@@ -1966,8 +2132,21 @@ function ghGitProtocol(gh: string): string {
   return result.stdout.trim() || "https";
 }
 
+function promptOverwriteConfig(configPath: string, existingRemote: string, newRemote: string): boolean {
+  if (!process.stdin.isTTY) {
+    throw new SidecarError(
+      `${configPath} already exists (remote ${existingRemote}); delete it to reinitialize with ${newRemote}`,
+    );
+  }
+  console.log(`${configPath} already exists (remote ${existingRemote})`);
+  const answer = promptLine("overwrite it with the new settings? [y/N] ").toLowerCase();
+  return answer === "y" || answer === "yes";
+}
+
+// Non-interactive runs (CI, scripts) must not opt into anything by default;
+// a missing terminal answers "no".
 function promptYesNo(question: string): boolean {
-  if (!process.stdin.isTTY) return true;
+  if (!process.stdin.isTTY) return false;
   const answer = promptLine(question).toLowerCase();
   return answer === "" || answer === "y" || answer === "yes";
 }
@@ -1990,72 +2169,6 @@ function promptLine(prompt: string): string {
   } finally {
     fs.closeSync(fd);
   }
-}
-
-function addSidecarDevDependency(root: string): void {
-  const manifestPath = path.join(root, "package.json");
-  if (!fs.existsSync(manifestPath)) return;
-  try {
-    // Running init inside the sidecar package repo itself must not add a
-    // self-dependency that would shadow the dev build via local delegation.
-    // Two shapes to catch: the package itself, and the monorepo root that
-    // carries it as the packages/sidecar workspace.
-    const existing = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { name?: string };
-    if (existing?.name === PACKAGE_NAME) return;
-    const workspacePath = path.join(root, "packages", "sidecar", "package.json");
-    if (fs.existsSync(workspacePath)) {
-      const workspace = JSON.parse(fs.readFileSync(workspacePath, "utf8")) as { name?: string };
-      if (workspace?.name === PACKAGE_NAME) return;
-    }
-  } catch {
-    // Unreadable manifests fail with a clear error just below.
-  }
-
-  let manifest: Record<string, unknown>;
-  try {
-    const parsed = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new SidecarError(`${manifestPath} must contain a JSON object`);
-    }
-    manifest = parsed as Record<string, unknown>;
-  } catch (error) {
-    if (error instanceof SidecarError) throw error;
-    throw new SidecarError(`could not read ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  const spec =
-    dependencySpec(manifest.devDependencies) ??
-    dependencySpec(manifest.dependencies) ??
-    dependencySpec(manifest.optionalDependencies) ??
-    dependencySpec(manifest.peerDependencies) ??
-    `^${packageVersion()}`;
-
-  manifest.devDependencies = {
-    ...objectValue(manifest.devDependencies),
-    [PACKAGE_NAME]: spec,
-  };
-  removeDependency(manifest.dependencies);
-  removeDependency(manifest.optionalDependencies);
-  removeDependency(manifest.peerDependencies);
-
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  console.log(`added devDependency ${PACKAGE_NAME}`);
-}
-
-function dependencySpec(value: unknown): string | undefined {
-  const dependencies = objectValue(value);
-  const spec = dependencies[PACKAGE_NAME];
-  return typeof spec === "string" && spec ? spec : undefined;
-}
-
-function removeDependency(value: unknown): void {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    delete (value as Record<string, unknown>)[PACKAGE_NAME];
-  }
-}
-
-function objectValue(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 export function loadProject(): [string, SidecarConfig] {
@@ -2142,6 +2255,7 @@ export function readConfig(configPath: string): SidecarConfig {
     branch: stringConfigValue(configPath, values, "branch", DEFAULT_BRANCH),
     inbox: stringConfigValue(configPath, values, "inbox", DEFAULT_INBOX),
   };
+  validateRemote(config.remote);
   validateBranch(config.branch);
   validateInboxTemplate(config.inbox);
   return config;
@@ -2200,6 +2314,33 @@ export function acquireSyncLock(root: string): (() => void) | undefined {
     }
   }
   return undefined;
+}
+
+// Syncs and snapshots serialize against each other rather than silently
+// skipping: a concurrent holder (usually the daemon) is a hard error, so the
+// command either did its work or clearly told you it didn't. In particular it
+// never stamps lastSyncAt without syncing.
+export function acquireSyncLockOrThrow(root: string): () => void {
+  const release = acquireSyncLock(root);
+  if (release) return release;
+  throw new SidecarError("another sidecar sync is already running; try again once it finishes");
+}
+
+// The one place that decides what a busy lock means: "throw" for commands the
+// user demanded, "skip" for soft requests that can no-op because their trigger
+// will fire again. Returns whether the work ran.
+export function withSyncLock(root: string, onBusy: "throw" | "skip", fn: () => void): boolean {
+  const releaseLock = onBusy === "skip" ? acquireSyncLock(root) : acquireSyncLockOrThrow(root);
+  if (!releaseLock) {
+    console.log("another sidecar sync is already running; skipping this soft sync");
+    return false;
+  }
+  try {
+    fn();
+    return true;
+  } finally {
+    releaseLock();
+  }
 }
 
 function syncLockIsStale(lockDir: string): boolean {
@@ -2446,26 +2587,6 @@ function isDirty(repo: string): boolean {
 function gitDir(repo: string): string {
   const result = git(repo, ["rev-parse", "--git-dir"]).stdout.trim();
   return path.isAbsolute(result) ? result : path.resolve(repo, result);
-}
-
-function* walkEntries(root: string): Generator<string> {
-  if (!fs.existsSync(root)) return;
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    const entryPath = path.join(root, entry.name);
-    yield entryPath;
-    if (entry.isDirectory() && !entry.isSymbolicLink()) yield* walkEntries(entryPath);
-  }
-}
-
-function* walkFiles(root: string): Generator<string> {
-  for (const entryPath of walkEntries(root)) {
-    try {
-      const stat = fs.lstatSync(entryPath);
-      if (!stat.isSymbolicLink() && stat.isFile()) yield entryPath;
-    } catch {
-      continue;
-    }
-  }
 }
 
 function stringConfigValue(

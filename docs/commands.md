@@ -48,13 +48,16 @@ prompt defaults to no.
 Shows checkout, daemon health, last sync time, and pending inbox branches.
 See [Reading `sidecar status`](#reading-sidecar-status) below.
 
-### `sidecar sync [--no-snapshot] [-m|--message <text>]`
+### `sidecar sync [--no-snapshot] [--soft] [-m|--message <text>]`
 
 Snapshot local changes, push the inbox branch, merge all inbox branches into
 the canonical branch, and push it. `--no-snapshot` syncs without committing
 local edits; `-m` sets the snapshot commit message. If another sync (usually
-the daemon's) holds the repo's sync lock, `sync` waits for it to finish and
-then runs.
+the daemon's) holds the repo's sync lock, `sync` fails immediately with
+"another sidecar sync is already running" — rerun it once that sync finishes.
+`--soft` makes it a request instead: when the lock is held it silently
+no-ops and exits 0. That's what the daemon uses, since its next trigger
+retries anyway.
 
 ### `sidecar snapshot [--push] [-m|--message <text>]`
 

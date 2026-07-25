@@ -53,7 +53,8 @@ describe("sidecar CLI integration", () => {
     );
     expect(fs.readFileSync(path.join(main, ".gitignore"), "utf8")).toContain("/sidecar/");
     expect(git(main, ["status", "--porcelain"]).stdout).not.toMatch(/^\?\? sidecar\//m);
-    expect(fs.readFileSync(path.join(main, ".zed", "settings.json"), "utf8")).toContain("sidecar/**");
+    // Non-interactive runs must not opt into editor settings.
+    expect(fs.existsSync(path.join(main, ".zed"))).toBe(false);
     expect(fs.existsSync(path.join(main, "sidecar", ".git"))).toBe(true);
     expect(fs.existsSync(path.join(main, "package.json"))).toBe(false);
     expect(gitRaw(["--git-dir", remote, "rev-parse", "--verify", "refs/heads/main"]).status).toBe(0);
@@ -62,23 +63,17 @@ describe("sidecar CLI integration", () => {
     expect(inbox).toMatch(/^sidecar-inbox\/.+\/[a-f0-9]{12}$/);
   });
 
-  test("init adds sidecar as a dev dependency when package.json exists", () => {
+  test("init leaves an existing package.json untouched", () => {
     const main = initMainRepo();
     const remote = initBareRemote();
     const stateDir = tempDir();
-    fs.writeFileSync(
-      path.join(main, "package.json"),
-      JSON.stringify({ name: "app", dependencies: { leftpad: "1.0.0" } }, null, 2),
-      "utf8",
-    );
+    const manifestBefore = JSON.stringify({ name: "app", dependencies: { leftpad: "1.0.0" } }, null, 2);
+    fs.writeFileSync(path.join(main, "package.json"), manifestBefore, "utf8");
 
     const output = runSidecar(["init", remote, "--no-clone"], main, { SIDECAR_STATE_DIR: stateDir });
 
-    expect(output).toContain("added devDependency @projectors/sidecar");
-    const manifest = JSON.parse(fs.readFileSync(path.join(main, "package.json"), "utf8"));
-    expect(manifest.dependencies).toEqual({ leftpad: "1.0.0" });
-    const ownVersion = JSON.parse(fs.readFileSync(path.resolve("package.json"), "utf8")).version;
-    expect(manifest.devDependencies["@projectors/sidecar"]).toBe(`^${ownVersion}`);
+    expect(output).not.toContain("devDependency");
+    expect(fs.readFileSync(path.join(main, "package.json"), "utf8")).toBe(manifestBefore);
     const instances = JSON.parse(fs.readFileSync(path.join(stateDir, "instances.json"), "utf8"));
     expect(instances).toHaveLength(1);
   });
@@ -93,6 +88,38 @@ describe("sidecar CLI integration", () => {
     expect(output).toContain(`using ${path.join(fs.realpathSync(main), ".sidecar")}`);
     expect(output).toContain("sidecar checkout ready");
     expect(fs.existsSync(path.join(main, "sidecar", ".git"))).toBe(true);
+  });
+
+  test("init with an unchanged remote reuses the existing config", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    runSidecar(["init", remote, "--no-clone"], main);
+
+    const output = runSidecar(["init", remote, "--no-clone"], main);
+
+    expect(output).toContain(`using ${path.join(fs.realpathSync(main), ".sidecar")}`);
+  });
+
+  test("init with a different remote refuses to overwrite the config non-interactively", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    const otherRemote = initBareRemote();
+    runSidecar(["init", remote, "--no-clone"], main);
+    const configBefore = fs.readFileSync(path.join(main, ".sidecar"), "utf8");
+
+    const result = spawnSync(process.execPath, [cliPath, "init", otherRemote, "--no-clone"], {
+      cwd: main,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state"),
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("already exists");
+    expect(fs.readFileSync(path.join(main, ".sidecar"), "utf8")).toBe(configBefore);
   });
 
   test("init migrates an interim .git/info/exclude entry back to .gitignore", () => {
@@ -240,7 +267,7 @@ describe("sidecar CLI integration", () => {
     const main = initMainRepo();
     const remote = initBareRemote();
     runSidecar(["init", remote, "--no-clone"], main);
-    fs.rmSync(path.join(main, ".zed"), { recursive: true });
+    fs.rmSync(path.join(main, ".zed"), { recursive: true, force: true });
 
     runSidecar(["clone"], main);
 
@@ -857,21 +884,20 @@ describe("sidecar CLI integration", () => {
   test("sync snapshots, pushes the inbox branch, and merges it into main", () => {
     const { main, remote, sidecar } = initSidecarProject();
     const inbox = git(sidecar, ["branch", "--show-current"]).stdout.trim();
-    fs.writeFileSync(
-      path.join(sidecar, "notes.md"),
-      "OPENAI_API_KEY=sk-test1234567890abcdef\nemail alice@example.com\n",
-      "utf8",
-    );
+    const original = "OPENAI_API_KEY=sk-test1234567890abcdef\nemail alice@example.com\n";
+    fs.writeFileSync(path.join(sidecar, "notes.md"), original, "utf8");
 
     const output = runSidecar(["sync"], main);
 
-    expect(output).toContain("redacted sensitive text");
     expect(output).toContain(`pushed ${inbox}`);
     const pushed = gitRaw(["--git-dir", remote, "show", `${inbox}:notes.md`]).stdout;
     expect(pushed).toContain("OPENAI_API_KEY=<API_KEY>");
     expect(pushed).toContain("<EMAIL>");
     expect(pushed).not.toContain("sk-test");
     expect(pushed).not.toContain("alice@example.com");
+    // The clean filter redacts committed blobs only; the local file keeps
+    // the user's original text.
+    expect(fs.readFileSync(path.join(sidecar, "notes.md"), "utf8")).toBe(original);
 
     const merged = gitRaw(["--git-dir", remote, "show", "main:notes.md"]).stdout;
     expect(merged).toBe(pushed);
@@ -931,6 +957,165 @@ describe("sidecar CLI integration", () => {
     const secondMerge = runSidecar(["merge", "--fork-files"], main);
 
     expect(secondMerge).toContain("no inbox branches to merge");
+  });
+
+  test("status reports checkout, daemon, sync, and pending inbox state", () => {
+    const { main, remote, sidecar } = initSidecarProject();
+
+    const before = runSidecar(["status"], main);
+    expect(before).toMatch(/main repo:\s+\S/);
+    expect(before).toMatch(/sidecar path:\s+\S/);
+    expect(before).toMatch(/remote:\s+\S/);
+    expect(before).toMatch(/inbox branch:\s+sidecar-inbox\//);
+    expect(before).toMatch(/checkout:\s+present/);
+    expect(before).toMatch(/dirty:\s+no/);
+    expect(before).toMatch(/daemon:\s+\S/);
+    expect(before).toMatch(/pending inbox:\s+none/);
+
+    runSidecar(["sync"], main);
+    fs.writeFileSync(path.join(sidecar, "pending.md"), "pending\n", "utf8");
+    const producer = cloneRemoteMain(remote);
+    git(producer, ["switch", "-c", "sidecar-inbox/test/pending"]);
+    fs.writeFileSync(path.join(producer, "note.md"), "note\n", "utf8");
+    git(producer, ["add", "."]);
+    git(producer, ["commit", "-m", "Pending inbox work"]);
+    git(producer, ["push", "origin", "HEAD:refs/heads/sidecar-inbox/test/pending"]);
+
+    const after = runSidecar(["status"], main);
+    expect(after).toMatch(/dirty:\s+yes/);
+    expect(after).toMatch(/last sync:\s+just now/);
+    expect(after).toMatch(/pending inbox:\s+1/);
+    expect(after).toContain("sidecar-inbox/test/pending");
+  });
+
+  test("status shows a missing checkout without last sync", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    runSidecar(["init", remote, "--no-clone"], main);
+
+    const output = runSidecar(["status"], main);
+
+    expect(output).toMatch(/checkout:\s+missing/);
+    expect(output).toMatch(/last sync:\s+never/);
+  });
+
+  test("two writers on the same inbox branch reconcile instead of diverging", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    runSidecar(["init", remote, "--inbox", "sidecar-inbox/shared"], main);
+    const sidecar = path.join(main, "sidecar");
+    runSidecar(["sync"], main);
+
+    const other = cloneRemoteMain(remote);
+    git(other, ["fetch", "origin"]);
+    git(other, ["switch", "-c", "sidecar-inbox/shared", "origin/sidecar-inbox/shared"]);
+    fs.writeFileSync(path.join(other, "other.md"), "other\n", "utf8");
+    git(other, ["add", "."]);
+    git(other, ["commit", "-m", "Other machine work"]);
+    git(other, ["push", "origin", "HEAD:refs/heads/sidecar-inbox/shared"]);
+
+    fs.writeFileSync(path.join(sidecar, "local.md"), "local\n", "utf8");
+    const output = runSidecar(["sync"], main);
+
+    expect(output).toContain("pushed sidecar-inbox/shared");
+    expect(gitRaw(["--git-dir", remote, "show", "main:local.md"]).stdout).toBe("local\n");
+    expect(gitRaw(["--git-dir", remote, "show", "main:other.md"]).stdout).toBe("other\n");
+    expect(fs.readFileSync(path.join(sidecar, "other.md"), "utf8")).toBe("other\n");
+  });
+
+  test("set-install-source runs globally even inside a repo that depends on sidecar", () => {
+    const project = tempDir();
+    const stateDir = tempDir();
+    const localBin = path.join(project, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+    fs.mkdirSync(path.dirname(localBin), { recursive: true });
+    fs.writeFileSync(
+      path.join(project, "package.json"),
+      JSON.stringify({ devDependencies: { "@projectors/sidecar": "0.1.0" } }),
+      "utf8",
+    );
+    fs.writeFileSync(localBin, "console.log('delegated to local')\n", "utf8");
+
+    const output = runSidecar(["set-install-source", "curl"], project, { SIDECAR_STATE_DIR: stateDir });
+
+    expect(output).toContain("install source: curl");
+    expect(output).not.toContain("delegated to local");
+    expect(JSON.parse(fs.readFileSync(path.join(stateDir, "settings.json"), "utf8")).installSource).toBe("curl");
+  });
+
+  test("sync errors while another sync holds the lock and does not stamp last sync", () => {
+    const { main, remote, sidecar } = initSidecarProject();
+    const stateDir = path.join(main, ".sidecar-test-state");
+    runSidecar(["sync"], main);
+    const lastSyncBefore = JSON.parse(fs.readFileSync(path.join(stateDir, "instances.json"), "utf8"))[0].lastSyncAt;
+    expect(lastSyncBefore).toBeTruthy();
+    const lockDir = path.join(main, ".git", "sidecar-sync-lock");
+    fs.mkdirSync(lockDir);
+    fs.writeFileSync(path.join(lockDir, "pid"), String(process.pid), "utf8");
+    fs.writeFileSync(path.join(sidecar, "held.md"), "held\n", "utf8");
+
+    const result = spawnSync(process.execPath, [cliPath, "sync"], {
+      cwd: main,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        SIDECAR_STATE_DIR: stateDir,
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("another sidecar sync is already running");
+    expect(gitRaw(["--git-dir", remote, "cat-file", "-e", "main:held.md"], { check: false }).status).not.toBe(0);
+    const lastSyncAfter = JSON.parse(fs.readFileSync(path.join(stateDir, "instances.json"), "utf8"))[0].lastSyncAt;
+    expect(lastSyncAfter).toBe(lastSyncBefore);
+
+    fs.rmSync(lockDir, { recursive: true, force: true });
+    runSidecar(["sync"], main);
+    expect(gitRaw(["--git-dir", remote, "show", "main:held.md"]).stdout).toBe("held\n");
+  });
+
+  test("a soft sync silently no-ops while another sync holds the lock", () => {
+    const { main, remote, sidecar } = initSidecarProject();
+    const stateDir = path.join(main, ".sidecar-test-state");
+    const lockDir = path.join(main, ".git", "sidecar-sync-lock");
+    fs.mkdirSync(lockDir);
+    fs.writeFileSync(path.join(lockDir, "pid"), String(process.pid), "utf8");
+    fs.writeFileSync(path.join(sidecar, "soft.md"), "soft\n", "utf8");
+
+    // Same soft request the daemon makes, via flag and via env var.
+    const flagged = runSidecar(["sync", "--soft"], main);
+    expect(flagged).toContain("skipping this soft sync");
+    const viaEnv = runSidecar(["sync"], main, { SIDECAR_SYNC_SOFT: "1" });
+    expect(viaEnv).toContain("skipping this soft sync");
+
+    expect(gitRaw(["--git-dir", remote, "cat-file", "-e", "main:soft.md"], { check: false }).status).not.toBe(0);
+    expect(JSON.parse(fs.readFileSync(path.join(stateDir, "instances.json"), "utf8"))[0].lastSyncAt).toBeUndefined();
+
+    fs.rmSync(lockDir, { recursive: true, force: true });
+    expect(runSidecar(["sync", "--soft"], main)).toContain("pushed");
+    expect(gitRaw(["--git-dir", remote, "show", "main:soft.md"]).stdout).toBe("soft\n");
+  });
+
+  test("snapshot errors while another sync holds the lock", () => {
+    const { main, sidecar } = initSidecarProject();
+    const lockDir = path.join(main, ".git", "sidecar-sync-lock");
+    fs.mkdirSync(lockDir);
+    fs.writeFileSync(path.join(lockDir, "pid"), String(process.pid), "utf8");
+    fs.writeFileSync(path.join(sidecar, "held.md"), "held\n", "utf8");
+
+    const result = spawnSync(process.execPath, [cliPath, "snapshot"], {
+      cwd: main,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state"),
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("another sidecar sync is already running");
+    expect(git(sidecar, ["status", "--porcelain"]).stdout).toContain("held.md");
   });
 });
 

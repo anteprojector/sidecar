@@ -30,9 +30,12 @@ resolve a conflict: when two machines edited the same file, `sync` keeps every
 version as separate forked files instead of blocking. (A manual `sidecar
 merge` stops on conflict unless you pass `--fork-files`.)
 
-A per-repo lock serializes manual `sidecar sync` (and `sidecar snapshot`)
-against daemon-triggered syncs: if one is already running, the manual command
-prints that it is waiting, runs as soon as the lock frees, and gives up with
-an error only after ten minutes — the point at which the lock is presumed
-stale and gets stolen. `last sync` in `sidecar status` is only stamped by a
+A per-repo lock serializes syncs, and the two kinds of sync react differently
+to finding it held. A manual `sidecar sync` (or `sidecar snapshot`) is a
+demand: it fails immediately with "another sidecar sync is already running" —
+rerun it once the other sync finishes. A daemon-triggered sync is a soft
+request (`sidecar sync --soft`): it silently no-ops, because the watcher or
+the next interval will simply request again. A lock left behind by a crashed
+sync is detected by pid (or, failing that, by a ten-minute age limit) and
+stolen automatically. `last sync` in `sidecar status` is only stamped by a
 sync that actually ran.

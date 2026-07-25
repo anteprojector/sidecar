@@ -42,8 +42,7 @@ while a background daemon keeps every clone in sync.
 
 ## Quickstart
 
-Requires Node.js 20+ and git, on macOS or Linux. (Windows isn't supported
-yet.)
+Requires Node.js 20+ and git, on macOS or Linux. (Windows is coming soon.)
 
 ```sh
 npm install -g @projectors/sidecar
@@ -65,6 +64,7 @@ The daemon takes it from here. `sidecar status` shows what's happening;
 - [Editor search visibility](docs/editors.md) — making gitignored files searchable
 - [Global vs local installs](docs/install.md) — pinning sidecar per-repo
 - [All commands](docs/commands.md)
+- [Uninstall & troubleshooting](docs/uninstall.md) — removing the daemon, service, and state
 
 ## Inspiration
 

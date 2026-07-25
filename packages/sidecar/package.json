@@ -1,6 +1,6 @@
 {
   "name": "@projectors/sidecar",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "A Git-backed sidecar inbox for repo-local development metadata.",
   "license": "MIT",
   "repository": {

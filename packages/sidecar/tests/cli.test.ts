@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,20 +8,28 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   DEFAULT_INBOX,
   checkoutRandom,
+  ensureMainBranch,
   expandInbox,
+  fetch,
   fileLabel,
   forkConflicts,
   forkPath,
   git,
   gitRaw,
+  mergeInboxBranches,
+  pidIsSidecarDaemon,
   readConfig,
   isAncestor,
   pendingInboxBranches,
-  scrubSidecarTree,
+  validateRemote,
+  ensureRedactionFilter,
   snapshot,
   type SidecarConfig,
   writeConfig,
   acquireSyncLock,
+  acquireSyncLockOrThrow,
+  daemonServiceFileContents,
+  daemonServicePath,
   ensureIgnoreEntry,
   ensureZedInclusion,
   hasZedInclusion,
@@ -209,6 +218,55 @@ describe("sync lock", () => {
     expect(stolen).toBeDefined();
     stolen!();
   });
+
+  test("throwing acquisition errors while held and succeeds once released", () => {
+    const repo = initRepo();
+
+    const release = acquireSyncLock(repo);
+    expect(release).toBeDefined();
+    expect(() => acquireSyncLockOrThrow(repo)).toThrow(/already running/);
+    release!();
+
+    const acquired = acquireSyncLockOrThrow(repo);
+    expect(acquireSyncLock(repo)).toBeUndefined();
+    acquired();
+    expect(acquireSyncLock(repo)).toBeDefined();
+  });
+});
+
+describe("daemon service definition", () => {
+  const invocation = [process.execPath, path.join(os.tmpdir(), "sidecar", "dist", "cli.js"), "daemon", "run"];
+
+  test("targets a per-user service location", () => {
+    const servicePath = daemonServicePath();
+    expect(servicePath).toBeTruthy();
+    if (process.platform === "darwin" || process.platform === "linux") {
+      expect(servicePath).toContain("com.anteprojector.sidecar");
+    } else if (process.platform === "win32") {
+      expect(servicePath).toContain("Startup");
+    }
+  });
+
+  test("embeds the daemon invocation and a restart policy", () => {
+    const contents = daemonServiceFileContents(invocation);
+    if (process.platform === "darwin") {
+      expect(contents).toContain("<key>Label</key>");
+      expect(contents).toContain("<string>com.anteprojector.sidecar</string>");
+      expect(contents).toContain(`<string>${invocation[1]}</string>`);
+      expect(contents).toContain("<string>daemon</string>");
+      expect(contents).toContain("<string>run</string>");
+      expect(contents).toContain("<key>KeepAlive</key>");
+      expect(contents).toContain("SIDECAR_DAEMON_EXECUTABLE");
+    } else if (process.platform === "linux") {
+      expect(contents).toContain("Description=sidecar background sync daemon");
+      expect(contents).toContain('"daemon" "run"');
+      expect(contents).toContain("Restart=always");
+      expect(contents).toContain("WantedBy=default.target");
+      expect(contents).toContain("SIDECAR_DAEMON_EXECUTABLE");
+    } else {
+      expect(contents).toContain("daemon");
+    }
+  });
 });
 
 describe("inbox identity", () => {
@@ -346,28 +404,81 @@ describe("redaction", () => {
 
   test("redacts valid credit-card-looking numbers", () => {
     expect(redactText("card: 4111 1111 1111 1111")).toBe("card: <CREDITCARD>");
+    expect(redactText("card 4111111111111111")).toBe("card <CREDITCARD>");
   });
 
-  test("redacts text files in the sidecar tree before staging", () => {
-    const repo = initRepo();
-    fs.writeFileSync(path.join(repo, "notes.md"), "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n", "utf8");
-
-    const changed = scrubSidecarTree(repo);
-
-    expect(changed).toBe(1);
-    expect(fs.readFileSync(path.join(repo, "notes.md"), "utf8")).toBe("GITHUB_TOKEN=<TOKEN>\n");
+  test("does not treat bare digit runs as phone numbers or card numbers", () => {
+    const input = ["released 1234567890 units", "order 79927398713"].join("\n");
+    expect(redactText(input)).toBe(input);
   });
 
-  test("does not redact through symlinks", () => {
+  test("redacts quoted values containing spaces and the other quote char", () => {
+    const redacted = redactText(
+      ['password = "my secret phrase"', `"api_key": "it's-a-secret"`].join("\n"),
+    );
+
+    expect(redacted).toContain('password = "<SECRET>"');
+    expect(redacted).toContain('"api_key": "<API_KEY>"');
+    expect(redacted).not.toContain("secret phrase");
+    expect(redacted).not.toContain("it's-a-secret");
+  });
+
+  test("redacts PEM private key blocks", () => {
+    const pem = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "MIIEowIBAAKCAQEA7bq1",
+      "-----END RSA PRIVATE KEY-----",
+    ].join("\n");
+
+    expect(redactText(`before\n${pem}\nafter`)).toBe("before\n<PRIVATEKEY>\nafter");
+  });
+
+  test("redacts basic authorization headers and URL credentials", () => {
+    const redacted = redactText(
+      ["Authorization: Basic dXNlcjpwYXNz", "db: postgres://app:supersecret@db.internal/prod"].join("\n"),
+    );
+
+    expect(redacted).toContain("Authorization: Basic <TOKEN>");
+    expect(redacted).toContain("postgres://app:<SECRET>@db.internal/prod");
+    expect(redacted).not.toContain("dXNlcjpwYXNz");
+    expect(redacted).not.toContain("supersecret");
+  });
+
+  test("commits redacted content while leaving the working tree untouched", () => {
     const repo = initRepo();
-    const external = path.join(tempDir(), "external.txt");
-    fs.writeFileSync(external, "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n", "utf8");
-    fs.symlinkSync(external, path.join(repo, "linked.txt"));
+    const secret = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n";
+    fs.writeFileSync(path.join(repo, "notes.md"), secret, "utf8");
 
-    const changed = scrubSidecarTree(repo);
+    snapshot(repo, repo, "sidecar-inbox/test/random");
 
-    expect(changed).toBe(0);
-    expect(fs.readFileSync(external, "utf8")).toBe("GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n");
+    expect(fs.readFileSync(path.join(repo, "notes.md"), "utf8")).toBe(secret);
+    expect(git(repo, ["show", "HEAD:notes.md"]).stdout).toBe("GITHUB_TOKEN=<TOKEN>\n");
+    expect(git(repo, ["status", "--porcelain"]).stdout.trim()).toBe("");
+  });
+
+  test("clean filter passes binary files through untouched", () => {
+    const repo = initRepo();
+    const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]);
+    fs.writeFileSync(path.join(repo, "image.png"), binary);
+
+    snapshot(repo, repo, "sidecar-inbox/test/random");
+
+    const expectedBlob = crypto
+      .createHash("sha1")
+      .update(`blob ${binary.length}\0`)
+      .update(binary)
+      .digest("hex");
+    expect(git(repo, ["rev-parse", "HEAD:image.png"]).stdout.trim()).toBe(expectedBlob);
+  });
+
+  test("configures the redaction filter idempotently", () => {
+    const repo = initRepo();
+    ensureRedactionFilter(repo);
+    ensureRedactionFilter(repo);
+
+    const attributes = fs.readFileSync(path.join(repo, ".git", "info", "attributes"), "utf8");
+    expect(attributes.match(/filter=sidecar-redact/g)).toHaveLength(1);
+    expect(git(repo, ["config", "filter.sidecar-redact.required"]).stdout.trim()).toBe("true");
   });
 });
 
@@ -410,6 +521,123 @@ describe("merge ancestry", () => {
     const unmerged = pendingInboxBranches(repo, config).filter((branch) => !isAncestor(repo, branch, "HEAD"));
 
     expect(unmerged).toEqual([]);
+  });
+});
+
+describe("remote validation", () => {
+  test("accepts standard git transports", () => {
+    const remotes = [
+      "https://github.com/org/repo.git",
+      "http://internal.host/repo.git",
+      "ssh://git@host/repo.git",
+      "git://host/repo.git",
+      "git@github.com:org/repo.git",
+      "file:///tmp/repo",
+      path.join(os.tmpdir(), "repo"),
+    ];
+    for (const remote of remotes) {
+      expect(() => validateRemote(remote)).not.toThrow();
+    }
+  });
+
+  test("rejects remote helpers and option-shaped values", () => {
+    const remotes = [
+      "ext::sh -c whoami",
+      "fd::17",
+      "--upload-pack=/tmp/evil",
+      "-origin",
+      "relative/path",
+      "",
+    ];
+    for (const remote of remotes) {
+      expect(() => validateRemote(remote)).toThrow(/unsupported sidecar remote/);
+    }
+  });
+
+  test("readConfig rejects a malicious committed remote", () => {
+    const configPath = path.join(tempDir(), ".sidecar");
+    fs.writeFileSync(configPath, 'remote = "ext::sh -c whoami"\n', "utf8");
+    expect(() => readConfig(configPath)).toThrow(/unsupported sidecar remote/);
+  });
+});
+
+describe("main branch reconciliation", () => {
+  const config: SidecarConfig = {
+    remote: "x",
+    version: 1,
+    path: "sidecar",
+    branch: "main",
+    inbox: DEFAULT_INBOX,
+  };
+
+  test("resets a diverged main to the remote side", () => {
+    const { winner, loser } = divergedClones();
+
+    fetch(loser, true);
+    ensureMainBranch(loser, config);
+
+    expect(git(loser, ["rev-parse", "HEAD"]).stdout.trim()).toBe(
+      git(loser, ["rev-parse", "origin/main"]).stdout.trim(),
+    );
+    expect(git(winner, ["rev-parse", "origin/main"]).stdout.trim()).toBe(
+      git(loser, ["rev-parse", "origin/main"]).stdout.trim(),
+    );
+  });
+
+  test("merge recovers after losing a push race", () => {
+    const { loser } = divergedClones();
+    git(loser, ["switch", "-c", "sidecar-inbox/test/r1"]);
+    fs.writeFileSync(path.join(loser, "inbox.md"), "inbox\n", "utf8");
+    git(loser, ["add", "."]);
+    git(loser, ["commit", "-m", "inbox"]);
+    git(loser, ["push", "-u", "origin", "sidecar-inbox/test/r1"]);
+    git(loser, ["switch", "main"]);
+
+    const merged = mergeInboxBranches(loser, config, { forkFiles: true, push: true });
+
+    expect(merged).toBe(1);
+    const remoteMain = git(loser, ["rev-parse", "origin/main"]).stdout.trim();
+    expect(git(loser, ["rev-parse", "HEAD"]).stdout.trim()).toBe(remoteMain);
+    // The pushed main contains both the winner's commit and the inbox merge.
+    expect(git(loser, ["log", "origin/main", "--pretty=%s"]).stdout).toContain("winner");
+    expect(isAncestor(loser, "origin/sidecar-inbox/test/r1", "origin/main")).toBe(true);
+  });
+
+  // A pushes after B last fetched, so B's main and origin/main diverge —
+  // the state a lost push race leaves behind.
+  function divergedClones(): { winner: string; loser: string } {
+    const remote = tempDir();
+    gitRaw(["init", "--bare", "-b", "main", remote]);
+
+    const winner = initRepo();
+    git(winner, ["remote", "add", "origin", remote]);
+    fs.writeFileSync(path.join(winner, "notes.md"), "base\n", "utf8");
+    git(winner, ["add", "."]);
+    git(winner, ["commit", "-m", "base"]);
+    git(winner, ["push", "-u", "origin", "main"]);
+
+    const loser = tempDir();
+    gitRaw(["clone", remote, loser]);
+    git(loser, ["config", "user.name", "Test User"]);
+    git(loser, ["config", "user.email", "test@example.com"]);
+
+    fs.writeFileSync(path.join(winner, "notes.md"), "winner\n", "utf8");
+    git(winner, ["commit", "-am", "winner"]);
+    git(winner, ["push"]);
+
+    fs.writeFileSync(path.join(loser, "local.md"), "lost race\n", "utf8");
+    git(loser, ["add", "."]);
+    git(loser, ["commit", "-m", "lost race"]);
+
+    return { winner, loser };
+  }
+});
+
+describe("daemon pid identification", () => {
+  test("rejects dead pids and live non-daemon processes", () => {
+    expect(pidIsSidecarDaemon(999_999)).toBe(false);
+    // The vitest worker is alive but is not a sidecar daemon.
+    expect(pidIsSidecarDaemon(process.pid)).toBe(false);
   });
 });
 

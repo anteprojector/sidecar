@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   PACKAGE_NAME,
+  SOFT_SYNC_ENV,
   bunGlobalRoot,
   compareVersions,
   daemonPidPath,
@@ -14,6 +15,7 @@ import {
   globalSidecarVersion,
   logSidecarEvent,
   packageVersion,
+  pidIsSidecarDaemon,
   projectDependsOnSidecar,
   readInstances,
   readSettings,
@@ -204,35 +206,59 @@ function pruneInstance(root: string): void {
 async function syncInstance(state: DaemonState, root: string, trigger: string): Promise<boolean> {
   if (state.syncing.has(root)) return false;
   state.syncing.add(root);
+  let succeeded = false;
   try {
     const localCli = localSidecarCliPath(root);
     const cli = localCli ?? currentCliPath();
     logSidecarEvent("daemon-sync-start", { root, trigger, local: Boolean(localCli) });
     const result = await runChild(process.execPath, [cli, "sync"], {
       cwd: root,
-      env: { ...process.env, [SKIP_LOCAL_EXEC_ENV]: "1", [GLOBAL_EXEC_ENV]: "1" },
+      // Daemon syncs are soft: one that finds a manual sync mid-flight can
+      // no-op without it counting as a failure — the next trigger retries.
+      env: { ...process.env, [SKIP_LOCAL_EXEC_ENV]: "1", [GLOBAL_EXEC_ENV]: "1", [SOFT_SYNC_ENV]: "1" },
       timeoutMs: SYNC_TIMEOUT_MS,
     });
     if (result.status === 0) {
       state.failures.delete(root);
       state.skipUntilCycle.delete(root);
       logSidecarEvent("daemon-sync", { root, trigger, local: Boolean(localCli) });
-      return true;
+      succeeded = true;
+    } else {
+      const failures = (state.failures.get(root) ?? 0) + 1;
+      state.failures.set(root, failures);
+      state.skipUntilCycle.set(root, state.cycleCount + Math.min(2 ** (failures - 1), MAX_BACKOFF_CYCLES));
+      logSidecarEvent("failure", {
+        command: "daemon",
+        root,
+        trigger,
+        message: result.timedOut ? "sync timed out" : result.output.trim().slice(-500) || `sync exited ${result.status}`,
+      });
     }
-    const failures = (state.failures.get(root) ?? 0) + 1;
-    state.failures.set(root, failures);
-    state.skipUntilCycle.set(root, state.cycleCount + Math.min(2 ** (failures - 1), MAX_BACKOFF_CYCLES));
-    logSidecarEvent("failure", {
-      command: "daemon",
-      root,
-      trigger,
-      message: result.timedOut ? "sync timed out" : result.output.trim().slice(-500) || `sync exited ${result.status}`,
-    });
-    return false;
   } finally {
     state.syncing.delete(root);
     state.lastSyncEndAt.set(root, Date.now());
   }
+  if (succeeded) await followUpTrailingSync(state, root);
+  else state.trailingPending.delete(root);
+  return succeeded;
+}
+
+// Watch events that arrived during a sync are either edits the sync missed or
+// the echo of its own writes. A dirty checkout disambiguates: echo is always
+// committed state, a missed save is not. Skipping the clean case is what stops
+// every watch sync from scheduling another one forever.
+async function followUpTrailingSync(state: DaemonState, root: string): Promise<void> {
+  if (!state.trailingPending.delete(root)) return;
+  if (await checkoutIsDirty(root)) {
+    void syncInstance(state, root, "watch-followup");
+  }
+}
+
+async function checkoutIsDirty(root: string): Promise<boolean> {
+  const sidecarPath = readInstances().find((instance) => instance.root === root)?.sidecarPath;
+  if (!sidecarPath || !fs.existsSync(sidecarPath)) return false;
+  const result = await runChild("git", ["-C", sidecarPath, "status", "--porcelain"], { timeoutMs: 30_000 });
+  return result.status === 0 && Boolean(result.stdout.trim());
 }
 
 function localSidecarCliPath(root: string): string | undefined {
@@ -330,7 +356,13 @@ async function refreshWatchers(state: DaemonState): Promise<void> {
 // quiet window; changes during the window collapse into one trailing sync at
 // its close, after which the next change leads again.
 function scheduleWatchSync(state: DaemonState, root: string): void {
-  if (state.syncing.has(root)) return;
+  if (state.syncing.has(root)) {
+    // A save landing mid-sync must not wait for the next interval; mark it
+    // pending and let the sync's completion decide whether it was real work
+    // or just our own write echo.
+    state.trailingPending.add(root);
+    return;
+  }
   if (Date.now() - (state.lastSyncEndAt.get(root) ?? 0) < SYNC_ECHO_GRACE_MS) return;
   if (state.pendingTimers.has(root)) {
     state.trailingPending.add(root);
@@ -340,7 +372,12 @@ function scheduleWatchSync(state: DaemonState, root: string): void {
   const timer = setTimeout(() => {
     state.pendingTimers.delete(root);
     if (state.trailingPending.delete(root)) {
-      void syncInstance(state, root, "watch-trailing");
+      if (state.syncing.has(root)) {
+        // The running sync's completion handler owns the follow-up.
+        state.trailingPending.add(root);
+      } else {
+        void syncInstance(state, root, "watch-trailing");
+      }
     }
   }, state.options.debounceSeconds * 1000);
   state.pendingTimers.set(root, timer);
@@ -512,16 +549,27 @@ function restartAfterUpdate(): void {
 
 async function acquireDaemonPid(): Promise<void> {
   const pidPath = daemonPidPath();
+  fs.mkdirSync(path.dirname(pidPath), { recursive: true });
   while (true) {
+    // Exclusive create is the lock: two daemons starting together race the
+    // old read-then-write here, and both used to win.
+    try {
+      fs.writeFileSync(pidPath, `${process.pid}\n`, { encoding: "utf8", flag: "wx" });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
     const holder = readPid(pidPath);
-    if (holder && holder !== process.pid && pidAlive(holder)) {
+    if (holder === process.pid) return;
+    if (holder && pidIsSidecarDaemon(holder)) {
       logSidecarEvent("daemon-wait", { holder });
       await delay(30_000);
       continue;
     }
-    fs.mkdirSync(path.dirname(pidPath), { recursive: true });
-    fs.writeFileSync(pidPath, `${process.pid}\n`, "utf8");
-    return;
+    // Stale pid file (crash, reboot, or the pid reused by another process):
+    // heal it and take over.
+    logSidecarEvent("daemon-pid-heal", { holder: holder ?? null });
+    fs.rmSync(pidPath, { force: true });
   }
 }
 
@@ -549,15 +597,6 @@ function readPid(pidPath: string): number | undefined {
     return Number.isInteger(pid) && pid > 0 ? pid : undefined;
   } catch {
     return undefined;
-  }
-}
-
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 

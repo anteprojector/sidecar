@@ -1053,7 +1053,7 @@ var init_color = __esm(() => {
 
 // src/redaction.ts
 function redactText(input) {
-  let output = input.replace(AUTHORIZATION_HEADER_REGEX, (_match, prefix) => `${prefix}<TOKEN>`).replace(BARE_BEARER_TOKEN_REGEX, (_match, prefix) => `${prefix}<TOKEN>`).replace(QUOTED_KEY_SECRET_REGEX, (match, keyQuote, key, separator, valueQuote, _value) => isSensitiveKey(key) ? `${keyQuote}${key}${keyQuote}${separator}${valueQuote}${placeholderForKey(key)}${valueQuote}` : match).replace(ASSIGNMENT_SECRET_REGEX, (match, key, separator, quote) => isSensitiveKey(key) ? `${key}${separator}${quote}${placeholderForKey(key)}${quote}` : match);
+  let output = input.replace(PEM_PRIVATE_KEY_REGEX, "<PRIVATEKEY>").replace(AUTHORIZATION_HEADER_REGEX, (_match, prefix) => `${prefix}<TOKEN>`).replace(BARE_BEARER_TOKEN_REGEX, (_match, prefix) => `${prefix}<TOKEN>`).replace(URL_CREDENTIALS_REGEX, (_match, prefix) => `${prefix}:<SECRET>@`).replace(QUOTED_KEY_SECRET_REGEX, (match, keyQuote, key, separator, valueQuote, _value) => isSensitiveKey(key) ? `${keyQuote}${key}${keyQuote}${separator}${valueQuote}${placeholderForKey(key)}${valueQuote}` : match).replace(QUOTED_ASSIGNMENT_SECRET_REGEX, (match, key, separator, quote) => isSensitiveKey(key) ? `${key}${separator}${quote}${placeholderForKey(key)}${quote}` : match).replace(BARE_ASSIGNMENT_SECRET_REGEX, (match, key, separator) => isSensitiveKey(key) ? `${key}${separator}${placeholderForKey(key)}` : match);
   for (const [pattern, replacement] of TOKEN_PATTERNS) {
     output = output.replace(pattern, replacement);
   }
@@ -1111,6 +1111,8 @@ function isLikelyCreditCard(value) {
   const digits = value.replace(/\D/g, "");
   if (digits.length < 13 || digits.length > 19)
     return false;
+  if (!/[ -]/.test(value) && digits.length !== 15 && digits.length !== 16)
+    return false;
   let sum = 0;
   let doubleDigit = false;
   for (let index = digits.length - 1;index >= 0; index -= 1) {
@@ -1125,12 +1127,15 @@ function isLikelyCreditCard(value) {
   }
   return sum % 10 === 0;
 }
-var KEY_NAME_PATTERN, QUOTED_KEY_SECRET_REGEX, ASSIGNMENT_SECRET_REGEX, AUTHORIZATION_HEADER_REGEX, BARE_BEARER_TOKEN_REGEX, TOKEN_PATTERNS, EMAIL_REGEX, PHONE_REGEX, SSN_REGEX, CREDIT_CARD_CANDIDATE_REGEX;
+var KEY_NAME_PATTERN, quotedValuePattern = (quoteGroup) => String.raw`(?:\\.|(?!` + `\\${quoteGroup}` + String.raw`)[^\r\n])+`, QUOTED_KEY_SECRET_REGEX, QUOTED_ASSIGNMENT_SECRET_REGEX, BARE_ASSIGNMENT_SECRET_REGEX, AUTHORIZATION_HEADER_REGEX, PEM_PRIVATE_KEY_REGEX, URL_CREDENTIALS_REGEX, BARE_BEARER_TOKEN_REGEX, TOKEN_PATTERNS, EMAIL_REGEX, PHONE_REGEX, SSN_REGEX, CREDIT_CARD_CANDIDATE_REGEX;
 var init_redaction = __esm(() => {
   KEY_NAME_PATTERN = String.raw`[A-Za-z_][A-Za-z0-9_-]*`;
-  QUOTED_KEY_SECRET_REGEX = new RegExp(String.raw`(["'])(${KEY_NAME_PATTERN})\1(\s*:\s*)(["'])([^"'\r\n]+)(\4)`, "g");
-  ASSIGNMENT_SECRET_REGEX = new RegExp(String.raw`\b(${KEY_NAME_PATTERN})(\s*[:=]\s*)(["']?)([^\s"',;` + "`" + String.raw`]+)(\3)`, "g");
-  AUTHORIZATION_HEADER_REGEX = /\b(authorization\s*:\s*bearer\s+)([^\s"',;`]+)/gi;
+  QUOTED_KEY_SECRET_REGEX = new RegExp(String.raw`(["'])(${KEY_NAME_PATTERN})\1(\s*:\s*)(["'])(${quotedValuePattern(4)})\4`, "g");
+  QUOTED_ASSIGNMENT_SECRET_REGEX = new RegExp(String.raw`\b(${KEY_NAME_PATTERN})(\s*[:=]\s*)(["'])(${quotedValuePattern(3)})\3`, "g");
+  BARE_ASSIGNMENT_SECRET_REGEX = new RegExp(String.raw`\b(${KEY_NAME_PATTERN})(\s*[:=]\s*)([^\s"',;` + "`" + String.raw`]+)`, "g");
+  AUTHORIZATION_HEADER_REGEX = /\b(authorization\s*:\s*(?:bearer|basic|token)\s+)([^\s"',;`]+)/gi;
+  PEM_PRIVATE_KEY_REGEX = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g;
+  URL_CREDENTIALS_REGEX = /(\/\/[^\s/:@"'`]+):([^\s/@"'`]+)@/g;
   BARE_BEARER_TOKEN_REGEX = /\b(Bearer\s+)(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9._~+/-]{20,})\b/g;
   TOKEN_PATTERNS = [
     [/\bAKIA[0-9A-Z]{16}\b/g, "<API_KEY>"],
@@ -1142,7 +1147,7 @@ var init_redaction = __esm(() => {
     [/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "<TOKEN>"]
   ];
   EMAIL_REGEX = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
-  PHONE_REGEX = /\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b/g;
+  PHONE_REGEX = /\b(?:\+?1[-.\s]?)?(?:\(\d{3}\)\s?|\d{3}[-.\s])\d{3}[-.\s]\d{4}\b/g;
   SSN_REGEX = /\b\d{3}-\d{2}-\d{4}\b/g;
   CREDIT_CARD_CANDIDATE_REGEX = /\b(?:\d[ -]*?){13,19}\b/g;
 });
@@ -1280,35 +1285,55 @@ async function syncInstance(state, root, trigger) {
   if (state.syncing.has(root))
     return false;
   state.syncing.add(root);
+  let succeeded = false;
   try {
     const localCli = localSidecarCliPath(root);
     const cli = localCli ?? currentCliPath();
     logSidecarEvent("daemon-sync-start", { root, trigger, local: Boolean(localCli) });
     const result = await runChild(process.execPath, [cli, "sync"], {
       cwd: root,
-      env: { ...process.env, [SKIP_LOCAL_EXEC_ENV]: "1", [GLOBAL_EXEC_ENV]: "1" },
+      env: { ...process.env, [SKIP_LOCAL_EXEC_ENV]: "1", [GLOBAL_EXEC_ENV]: "1", [SOFT_SYNC_ENV]: "1" },
       timeoutMs: SYNC_TIMEOUT_MS
     });
     if (result.status === 0) {
       state.failures.delete(root);
       state.skipUntilCycle.delete(root);
       logSidecarEvent("daemon-sync", { root, trigger, local: Boolean(localCli) });
-      return true;
+      succeeded = true;
+    } else {
+      const failures = (state.failures.get(root) ?? 0) + 1;
+      state.failures.set(root, failures);
+      state.skipUntilCycle.set(root, state.cycleCount + Math.min(2 ** (failures - 1), MAX_BACKOFF_CYCLES));
+      logSidecarEvent("failure", {
+        command: "daemon",
+        root,
+        trigger,
+        message: result.timedOut ? "sync timed out" : result.output.trim().slice(-500) || `sync exited ${result.status}`
+      });
     }
-    const failures = (state.failures.get(root) ?? 0) + 1;
-    state.failures.set(root, failures);
-    state.skipUntilCycle.set(root, state.cycleCount + Math.min(2 ** (failures - 1), MAX_BACKOFF_CYCLES));
-    logSidecarEvent("failure", {
-      command: "daemon",
-      root,
-      trigger,
-      message: result.timedOut ? "sync timed out" : result.output.trim().slice(-500) || `sync exited ${result.status}`
-    });
-    return false;
   } finally {
     state.syncing.delete(root);
     state.lastSyncEndAt.set(root, Date.now());
   }
+  if (succeeded)
+    await followUpTrailingSync(state, root);
+  else
+    state.trailingPending.delete(root);
+  return succeeded;
+}
+async function followUpTrailingSync(state, root) {
+  if (!state.trailingPending.delete(root))
+    return;
+  if (await checkoutIsDirty(root)) {
+    syncInstance(state, root, "watch-followup");
+  }
+}
+async function checkoutIsDirty(root) {
+  const sidecarPath = readInstances().find((instance) => instance.root === root)?.sidecarPath;
+  if (!sidecarPath || !fs.existsSync(sidecarPath))
+    return false;
+  const result = await runChild("git", ["-C", sidecarPath, "status", "--porcelain"], { timeoutMs: 30000 });
+  return result.status === 0 && Boolean(result.stdout.trim());
 }
 function localSidecarCliPath(root) {
   if (!projectDependsOnSidecar(root))
@@ -1398,8 +1423,10 @@ async function refreshWatchers(state) {
   }
 }
 function scheduleWatchSync(state, root) {
-  if (state.syncing.has(root))
+  if (state.syncing.has(root)) {
+    state.trailingPending.add(root);
     return;
+  }
   if (Date.now() - (state.lastSyncEndAt.get(root) ?? 0) < SYNC_ECHO_GRACE_MS)
     return;
   if (state.pendingTimers.has(root)) {
@@ -1410,7 +1437,11 @@ function scheduleWatchSync(state, root) {
   const timer = setTimeout(() => {
     state.pendingTimers.delete(root);
     if (state.trailingPending.delete(root)) {
-      syncInstance(state, root, "watch-trailing");
+      if (state.syncing.has(root)) {
+        state.trailingPending.add(root);
+      } else {
+        syncInstance(state, root, "watch-trailing");
+      }
     }
   }, state.options.debounceSeconds * 1000);
   state.pendingTimers.set(root, timer);
@@ -1549,17 +1580,26 @@ function restartAfterUpdate() {
 }
 async function acquireDaemonPid() {
   const pidPath = daemonPidPath();
+  fs.mkdirSync(path.dirname(pidPath), { recursive: true });
   while (true) {
+    try {
+      fs.writeFileSync(pidPath, `${process.pid}
+`, { encoding: "utf8", flag: "wx" });
+      return;
+    } catch (error) {
+      if (error.code !== "EEXIST")
+        throw error;
+    }
     const holder = readPid(pidPath);
-    if (holder && holder !== process.pid && pidAlive(holder)) {
+    if (holder === process.pid)
+      return;
+    if (holder && pidIsSidecarDaemon(holder)) {
       logSidecarEvent("daemon-wait", { holder });
       await delay(30000);
       continue;
     }
-    fs.mkdirSync(path.dirname(pidPath), { recursive: true });
-    fs.writeFileSync(pidPath, `${process.pid}
-`, "utf8");
-    return;
+    logSidecarEvent("daemon-pid-heal", { holder: holder ?? null });
+    fs.rmSync(pidPath, { force: true });
   }
 }
 function installShutdownHandlers() {
@@ -1583,14 +1623,6 @@ function readPid(pidPath) {
     return Number.isInteger(pid) && pid > 0 ? pid : undefined;
   } catch {
     return;
-  }
-}
-function pidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
   }
 }
 function runChild(command, args, options) {
@@ -1727,6 +1759,8 @@ function run(argv) {
       return cmdSync(rest);
     case "merge":
       return cmdMerge(rest);
+    case "redact":
+      return cmdRedact();
     default:
       throw new SidecarError(`unknown command ${JSON.stringify(command)}`);
   }
@@ -1743,8 +1777,9 @@ commands:
   update
   tail [-f|--follow] [-n|--lines count]
   snapshot [--push] [-m message]
-  sync [--no-snapshot] [-m message]
-  merge [--fork-files] [--no-push]`);
+  sync [--no-snapshot] [--soft] [-m message]
+  merge [--fork-files] [--no-push]
+  redact (git clean filter: stdin -> redacted stdout)`);
 }
 function cmdInit(args) {
   const parsed = parseOptions(args, {
@@ -1755,9 +1790,16 @@ function cmdInit(args) {
     throw new SidecarError("usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template]");
   }
   const remote = parsed.positional[0];
-  const existingRoot = remote ? undefined : findConfigRootOptional(process.cwd());
+  let existingRoot = remote ? undefined : findConfigRootOptional(process.cwd());
   const root = existingRoot ?? gitToplevel(process.cwd());
   const configPath = path2.join(root, ".sidecar");
+  if (remote && fs2.existsSync(configPath)) {
+    const existing = readConfig(configPath);
+    const unchanged = existing.remote === remote && existing.path === getValue(parsed, "--path", DEFAULT_PATH) && existing.branch === getValue(parsed, "--branch", DEFAULT_BRANCH) && existing.inbox === getValue(parsed, "--inbox", DEFAULT_INBOX);
+    if (unchanged || !promptOverwriteConfig(configPath, existing.remote, remote)) {
+      existingRoot = root;
+    }
+  }
   const config = existingRoot ? readConfig(configPath) : {
     remote: remote ?? promptRemote(root),
     version: 1,
@@ -1766,6 +1808,7 @@ function cmdInit(args) {
     inbox: getValue(parsed, "--inbox", DEFAULT_INBOX)
   };
   if (!existingRoot) {
+    validateRemote(config.remote);
     validateBranch(config.branch);
     validateInboxTemplate(config.inbox);
     writeConfig(configPath, config);
@@ -1794,11 +1837,34 @@ function cmdInit(args) {
     cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   }
   registerCurrentInstance(root, config, { event: "init" });
-  addSidecarDevDependency(root);
   const globalSidecar = ensureGlobalSidecar();
-  if (globalSidecar)
+  if (globalSidecar) {
     registerInstallWithGlobalSidecar(globalSidecar, root);
+    ensureDaemonSetup(globalSidecar);
+  }
   return 0;
+}
+function ensureDaemonSetup(globalSidecar) {
+  if (process.env[SKIP_SERVICE_ENV] === "1")
+    return;
+  if (!readSettings().daemonEnabled)
+    return;
+  const service = daemonServiceStatus();
+  if (!service.available || service.installed && service.running)
+    return;
+  const result = spawnSync(globalSidecar, ["daemon", "enable"], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      [SKIP_LOCAL_EXEC_ENV2]: "1",
+      [GLOBAL_EXEC_ENV2]: "1"
+    }
+  });
+  if (result.status !== 0) {
+    console.log(`could not enable the sync daemon: ${result.stderr.trim() || result.stdout.trim() || "unknown error"}; run \`sidecar daemon enable\` manually`);
+    return;
+  }
+  console.log("enabled the sidecar daemon for background sync");
 }
 function ensureGlobalSidecar() {
   const installHint = `install with \`npm install -g ${PACKAGE_SPEC}\``;
@@ -2297,54 +2363,51 @@ function cmdSnapshot(args) {
     throw new SidecarError("usage: sidecar snapshot [--push] [-m message]");
   const [root, config] = loadProject();
   const sidecarPath = requireSidecarCheckout(root, config);
-  const inbox = expandInbox(config, sidecarPath);
-  ensureCommitIdentity(sidecarPath);
-  ensureInboxBranch(sidecarPath, config, inbox);
-  const committed = snapshot(sidecarPath, root, inbox, getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined);
-  if (committed && parsed.flags.has("--push")) {
-    syncBranchBeforePush(sidecarPath, inbox);
-    pushBranch(sidecarPath, inbox);
-  }
+  withSyncLock(root, "throw", () => {
+    const inbox = expandInbox(config, sidecarPath);
+    ensureCommitIdentity(sidecarPath);
+    ensureInboxBranch(sidecarPath, config, inbox);
+    const committed = snapshot(sidecarPath, root, inbox, getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined);
+    if (committed && parsed.flags.has("--push")) {
+      syncBranchBeforePush(sidecarPath, inbox);
+      pushBranch(sidecarPath, inbox);
+    }
+  });
   return 0;
 }
 function cmdSync(args) {
   const parsed = parseOptions(args, {
-    boolean: new Set(["--no-snapshot"]),
+    boolean: new Set(["--no-snapshot", "--soft"]),
     value: new Set(["-m", "--message"])
   });
   if (parsed.positional.length)
-    throw new SidecarError("usage: sidecar sync [--no-snapshot] [-m message]");
+    throw new SidecarError("usage: sidecar sync [--no-snapshot] [--soft] [-m message]");
   const [root, config] = loadProject();
   removeLegacyGitHooks(root);
-  syncProject(root, config, {
-    snapshot: !parsed.flags.has("--no-snapshot"),
-    message: getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined
+  const soft = parsed.flags.has("--soft") || process.env[SOFT_SYNC_ENV] === "1";
+  const synced = withSyncLock(root, soft ? "skip" : "throw", () => {
+    syncProject(root, config, {
+      snapshot: !parsed.flags.has("--no-snapshot"),
+      message: getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined
+    });
   });
-  registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
+  if (synced)
+    registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
   return 0;
 }
 function syncProject(root, config, options) {
-  const releaseLock = acquireSyncLock(root);
-  if (!releaseLock) {
-    console.log("another sidecar sync is already running; skipping");
-    return;
+  const sidecarPath = ensureSidecarCheckout(root, config);
+  const inbox = expandInbox(config, sidecarPath);
+  ensureCommitIdentity(sidecarPath);
+  fetch(sidecarPath, true, false);
+  ensureInboxBranch(sidecarPath, config, inbox);
+  if (options.snapshot) {
+    snapshot(sidecarPath, root, inbox, options.message);
   }
-  try {
-    const sidecarPath = ensureSidecarCheckout(root, config);
-    const inbox = expandInbox(config, sidecarPath);
-    ensureCommitIdentity(sidecarPath);
-    fetch(sidecarPath, true, false);
-    ensureInboxBranch(sidecarPath, config, inbox);
-    if (options.snapshot) {
-      snapshot(sidecarPath, root, inbox, options.message);
-    }
-    syncBranchBeforePush(sidecarPath, inbox);
-    pushBranch(sidecarPath, inbox);
-    mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: true });
-    refreshInboxFromMain(sidecarPath, config, inbox);
-  } finally {
-    releaseLock();
-  }
+  syncBranchBeforePush(sidecarPath, inbox);
+  pushBranch(sidecarPath, inbox);
+  mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: true });
+  refreshInboxFromMain(sidecarPath, config, inbox);
 }
 function cmdMerge(args) {
   const parsed = parseOptions(args, {
@@ -2373,37 +2436,67 @@ function cmdMerge(args) {
 function mergeInboxBranches(sidecarPath, config, options) {
   ensureClean(sidecarPath);
   ensureCommitIdentity(sidecarPath);
-  fetch(sidecarPath, false);
-  ensureMainBranch(sidecarPath, config);
-  const inboxBranches = pendingInboxBranches(sidecarPath, config).filter((remoteBranch) => !isAncestor(sidecarPath, remoteBranch, "HEAD"));
-  if (!inboxBranches.length) {
-    console.log("no inbox branches to merge");
-    return 0;
+  const current = git(sidecarPath, ["branch", "--show-current"]).stdout.trim();
+  if (!hasAnyCommit(sidecarPath) || current === config.branch) {
+    return mergeInboxBranchesAt(sidecarPath, config, options);
   }
-  const merged = [];
-  for (const remoteBranch of inboxBranches) {
-    console.log(`merging ${remoteBranch}`);
-    const result = git(sidecarPath, ["merge", "--no-ff", "-m", `Merge ${remoteBranch}`, remoteBranch], { check: false });
-    if (result.status === 0) {
+  const scratch = fs2.mkdtempSync(path2.join(os.tmpdir(), "sidecar-merge-"));
+  const worktree = path2.join(scratch, "checkout");
+  try {
+    git(sidecarPath, ["worktree", "add", "--detach", worktree]);
+    return mergeInboxBranchesAt(worktree, config, options);
+  } finally {
+    git(sidecarPath, ["worktree", "remove", "--force", worktree], { check: false });
+    fs2.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+function mergeInboxBranchesAt(sidecarPath, config, options) {
+  const maxAttempts = 3;
+  for (let attempt = 1;; attempt += 1) {
+    fetch(sidecarPath, false);
+    ensureMainBranch(sidecarPath, config);
+    const inboxBranches = pendingInboxBranches(sidecarPath, config).filter((remoteBranch) => !isAncestor(sidecarPath, remoteBranch, "HEAD"));
+    if (!inboxBranches.length && attempt === 1) {
+      console.log("no inbox branches to merge");
+      return 0;
+    }
+    const merged = [];
+    for (const remoteBranch of inboxBranches) {
+      console.log(`merging ${remoteBranch}`);
+      const result = git(sidecarPath, ["merge", "--no-ff", "-m", `Merge ${remoteBranch}`, remoteBranch], { check: false });
+      if (result.status === 0) {
+        merged.push(remoteBranch);
+        continue;
+      }
+      if (!hasUnmergedPaths(sidecarPath)) {
+        throw new SidecarError(result.stderr.trim() || `merge failed for ${remoteBranch}`);
+      }
+      if (!options.forkFiles) {
+        git(sidecarPath, ["merge", "--abort"], { check: false });
+        throw new SidecarError(`merge conflict in ${remoteBranch}; rerun with --fork-files`);
+      }
+      forkConflicts(sidecarPath, remoteBranch);
+      git(sidecarPath, ["commit", "-m", `Merge ${remoteBranch} with forked conflict files`]);
       merged.push(remoteBranch);
-      continue;
     }
-    if (!hasUnmergedPaths(sidecarPath)) {
-      throw new SidecarError(result.stderr.trim() || `merge failed for ${remoteBranch}`);
+    if (options.push) {
+      const push = git(sidecarPath, ["push", "-u", "origin", `HEAD:refs/heads/${config.branch}`], { check: false });
+      if (push.status !== 0) {
+        if (attempt >= maxAttempts) {
+          throw new SidecarError(push.stderr.trim() || `could not push ${config.branch}`);
+        }
+        console.log(`push of ${config.branch} was rejected; refetching and retrying`);
+        continue;
+      }
+      console.log(`pushed ${config.branch}`);
     }
-    if (!options.forkFiles) {
-      git(sidecarPath, ["merge", "--abort"], { check: false });
-      throw new SidecarError(`merge conflict in ${remoteBranch}; rerun with --fork-files`);
-    }
-    forkConflicts(sidecarPath, remoteBranch);
-    git(sidecarPath, ["commit", "-m", `Merge ${remoteBranch} with forked conflict files`]);
-    merged.push(remoteBranch);
+    console.log(`merged ${merged.length} inbox branch(es)`);
+    return merged.length;
   }
-  if (options.push) {
-    pushBranch(sidecarPath, config.branch);
-  }
-  console.log(`merged ${merged.length} inbox branch(es)`);
-  return merged.length;
+}
+function cmdRedact() {
+  process.stdout.write(redactBuffer(fs2.readFileSync(0)));
+  return 0;
 }
 function cloneOrUpdate(root, config, bootstrapMain) {
   const sidecarPath = resolveSidecarPath(root, config);
@@ -2414,7 +2507,7 @@ function cloneOrUpdate(root, config, bootstrapMain) {
     fs2.rmdirSync(sidecarPath);
   }
   if (!fs2.existsSync(sidecarPath)) {
-    gitRaw(["clone", config.remote, sidecarPath]);
+    gitRaw(["clone", "--", config.remote, sidecarPath]);
   } else if (hasGitMetadata(sidecarPath)) {
     const existing = git(sidecarPath, ["remote", "get-url", "origin"], { check: false });
     if (existing.status !== 0) {
@@ -2427,6 +2520,7 @@ function cloneOrUpdate(root, config, bootstrapMain) {
     throw new SidecarError(`${sidecarPath} is not usable as a sidecar checkout`);
   }
   ensureCommitIdentity(sidecarPath);
+  ensureRedactionFilter(sidecarPath);
   if (bootstrapMain)
     bootstrapMainBranch(sidecarPath, config);
   const inbox = expandInbox(config, sidecarPath);
@@ -2470,9 +2564,16 @@ function ensureMainBranch(repo, config) {
     bootstrapMainBranch(repo, config);
     return;
   }
-  if (remoteRefExists(repo, config.branch)) {
-    git(repo, ["merge", "--ff-only", `origin/${config.branch}`]);
+  if (!remoteRefExists(repo, config.branch))
+    return;
+  const remoteBranch = `origin/${config.branch}`;
+  if (isAncestor(repo, remoteBranch, "HEAD"))
+    return;
+  if (isAncestor(repo, "HEAD", remoteBranch)) {
+    git(repo, ["merge", "--ff-only", remoteBranch]);
+    return;
   }
+  git(repo, ["reset", "--hard", remoteBranch]);
 }
 function ensureInboxBranch(repo, config, inbox) {
   const current = git(repo, ["branch", "--show-current"]).stdout.trim();
@@ -2502,7 +2603,7 @@ function ensureInboxBranch(repo, config, inbox) {
   git(repo, ["switch", "-c", inbox, config.branch]);
 }
 function snapshot(repo, mainRoot, inbox, message = "sidecar snapshot") {
-  scrubSidecarTree(repo);
+  ensureRedactionFilter(repo);
   git(repo, ["add", "-A"]);
   if (git(repo, ["diff", "--cached", "--quiet"], { check: false }).status === 0) {
     console.log("no sidecar changes to snapshot");
@@ -2523,36 +2624,44 @@ function snapshot(repo, mainRoot, inbox, message = "sidecar snapshot") {
   console.log(`committed sidecar snapshot to ${inbox}`);
   return true;
 }
-function scrubSidecarTree(root) {
-  let changed = 0;
-  for (const filePath of walkFiles(root)) {
-    const relative = path2.relative(root, filePath).split(path2.sep);
-    if (relative.includes(".git"))
-      continue;
-    let data;
-    try {
-      data = fs2.readFileSync(filePath);
-    } catch {
-      continue;
-    }
-    if (data.includes(0))
-      continue;
-    let text;
-    try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(data);
-    } catch {
-      continue;
-    }
-    const redacted = redactText(text);
-    if (redacted !== text) {
-      fs2.writeFileSync(filePath, redacted, "utf8");
-      changed += 1;
-    }
+function ensureRedactionFilter(repo) {
+  const command = `${filterCommandQuote(process.execPath)} ${filterCommandQuote(redactCliPath())} redact`;
+  git(repo, ["config", `filter.${REDACTION_FILTER_NAME}.clean`, command]);
+  git(repo, ["config", `filter.${REDACTION_FILTER_NAME}.smudge`, "cat"]);
+  git(repo, ["config", `filter.${REDACTION_FILTER_NAME}.required`, "true"]);
+  const attributesPath = path2.join(gitDir(repo), "info", "attributes");
+  const line = `* filter=${REDACTION_FILTER_NAME}`;
+  let existing = "";
+  try {
+    existing = fs2.readFileSync(attributesPath, "utf8");
+  } catch {}
+  if (existing.split(/\r?\n/).includes(line))
+    return;
+  fs2.mkdirSync(path2.dirname(attributesPath), { recursive: true });
+  const prefix = existing && !existing.endsWith(`
+`) ? `${existing}
+` : existing;
+  fs2.writeFileSync(attributesPath, `${prefix}${line}
+`, "utf8");
+}
+function redactCliPath() {
+  const self = fileURLToPath2(import.meta.url);
+  return self.endsWith(".ts") ? path2.join(path2.dirname(self), "..", "dist", "cli.js") : self;
+}
+function filterCommandQuote(value) {
+  return `"${value.replace(/([\\"$`])/g, "\\$1")}"`;
+}
+function redactBuffer(data) {
+  if (data.includes(0))
+    return data;
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(data);
+  } catch {
+    return data;
   }
-  if (changed) {
-    console.log(`redacted sensitive text in ${changed} sidecar file(s)`);
-  }
-  return changed;
+  const redacted = redactText(text);
+  return redacted === text ? data : Buffer.from(redacted, "utf8");
 }
 function syncBranchBeforePush(repo, branch) {
   fetch(repo, true, false);
@@ -2717,6 +2826,14 @@ function validateBranch(branch) {
   if (result.status !== 0)
     throw new SidecarError(`invalid branch name ${JSON.stringify(branch)}`);
 }
+function validateRemote(remote) {
+  const allowedScheme = /^(https?|ssh|git|file):\/\//i;
+  const scpLike = /^[A-Za-z0-9._~-]+@[A-Za-z0-9._-]+:/;
+  const ok = remote.length > 0 && !remote.startsWith("-") && (allowedScheme.test(remote) || scpLike.test(remote) || path2.isAbsolute(remote));
+  if (!ok) {
+    throw new SidecarError(`unsupported sidecar remote ${JSON.stringify(remote)}; use an https://, ssh://, git://, or file:// URL, user@host:path, or an absolute path`);
+  }
+}
 function validateInboxTemplate(template) {
   const prefix = inboxBranchPrefix(template);
   if (template.includes("{") && !prefix.endsWith("/")) {
@@ -2855,21 +2972,32 @@ function daemonServicePath() {
 function daemonPidPath() {
   return path2.join(sidecarStateDir(), "daemon.pid");
 }
-function isDaemonRunning() {
-  let pid;
+function readDaemonPid() {
   try {
-    pid = Number(fs2.readFileSync(daemonPidPath(), "utf8").trim());
+    const pid = Number(fs2.readFileSync(daemonPidPath(), "utf8").trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
   } catch {
-    return false;
+    return;
   }
-  if (!Number.isInteger(pid) || pid <= 0)
-    return false;
+}
+function pidIsSidecarDaemon(pid) {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (error) {
-    return error.code === "EPERM";
+    if (error.code !== "EPERM")
+      return false;
   }
+  if (process.platform === "win32")
+    return true;
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
+  if (result.status !== 0)
+    return false;
+  const command = (result.stdout ?? "").trim();
+  return command.includes("daemon") && /sidecar|cli\.js/.test(command);
+}
+function isDaemonRunning() {
+  const pid = readDaemonPid();
+  return pid !== undefined && pidIsSidecarDaemon(pid);
 }
 function daemonServiceFileContents(invocation) {
   if (process.platform === "darwin")
@@ -2973,14 +3101,13 @@ function stopDaemonService() {
   return { available: true, installed: fs2.existsSync(servicePath), running: false, path: servicePath };
 }
 function stopDaemonProcess() {
-  let pid;
-  try {
-    pid = Number(fs2.readFileSync(daemonPidPath(), "utf8").trim());
-  } catch {
+  const pid = readDaemonPid();
+  if (!pid || pid === process.pid)
+    return;
+  if (!pidIsSidecarDaemon(pid)) {
+    fs2.rmSync(daemonPidPath(), { force: true });
     return;
   }
-  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid)
-    return;
   try {
     process.kill(pid, "SIGTERM");
   } catch {}
@@ -3127,7 +3254,7 @@ function logSidecarEvent(event, fields = {}) {
       event,
       ...fields
     };
-    fs2.appendFileSync(sidecarLogPath(), `${JSON.stringify(record)}
+    fs2.appendFileSync(sidecarLogPath(), `${redactText(JSON.stringify(record))}
 `, "utf8");
   } catch {}
 }
@@ -3315,9 +3442,17 @@ function ghGitProtocol(gh) {
     return "https";
   return result.stdout.trim() || "https";
 }
+function promptOverwriteConfig(configPath, existingRemote, newRemote) {
+  if (!process.stdin.isTTY) {
+    throw new SidecarError(`${configPath} already exists (remote ${existingRemote}); delete it to reinitialize with ${newRemote}`);
+  }
+  console.log(`${configPath} already exists (remote ${existingRemote})`);
+  const answer = promptLine("overwrite it with the new settings? [y/N] ").toLowerCase();
+  return answer === "y" || answer === "yes";
+}
 function promptYesNo(question) {
   if (!process.stdin.isTTY)
-    return true;
+    return false;
   const answer = promptLine(question).toLowerCase();
   return answer === "" || answer === "y" || answer === "yes";
 }
@@ -3341,58 +3476,6 @@ function promptLine(prompt) {
   } finally {
     fs2.closeSync(fd);
   }
-}
-function addSidecarDevDependency(root) {
-  const manifestPath = path2.join(root, "package.json");
-  if (!fs2.existsSync(manifestPath))
-    return;
-  try {
-    const existing = JSON.parse(fs2.readFileSync(manifestPath, "utf8"));
-    if (existing?.name === PACKAGE_NAME)
-      return;
-    const workspacePath = path2.join(root, "packages", "sidecar", "package.json");
-    if (fs2.existsSync(workspacePath)) {
-      const workspace = JSON.parse(fs2.readFileSync(workspacePath, "utf8"));
-      if (workspace?.name === PACKAGE_NAME)
-        return;
-    }
-  } catch {}
-  let manifest;
-  try {
-    const parsed = JSON.parse(fs2.readFileSync(manifestPath, "utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new SidecarError(`${manifestPath} must contain a JSON object`);
-    }
-    manifest = parsed;
-  } catch (error) {
-    if (error instanceof SidecarError)
-      throw error;
-    throw new SidecarError(`could not read ${manifestPath}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  const spec = dependencySpec(manifest.devDependencies) ?? dependencySpec(manifest.dependencies) ?? dependencySpec(manifest.optionalDependencies) ?? dependencySpec(manifest.peerDependencies) ?? `^${packageVersion()}`;
-  manifest.devDependencies = {
-    ...objectValue(manifest.devDependencies),
-    [PACKAGE_NAME]: spec
-  };
-  removeDependency(manifest.dependencies);
-  removeDependency(manifest.optionalDependencies);
-  removeDependency(manifest.peerDependencies);
-  fs2.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}
-`, "utf8");
-  console.log(`added devDependency ${PACKAGE_NAME}`);
-}
-function dependencySpec(value) {
-  const dependencies = objectValue(value);
-  const spec = dependencies[PACKAGE_NAME];
-  return typeof spec === "string" && spec ? spec : undefined;
-}
-function removeDependency(value) {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    delete value[PACKAGE_NAME];
-  }
-}
-function objectValue(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function loadProject() {
   const root = findConfigRoot(process.cwd());
@@ -3476,6 +3559,7 @@ function readConfig(configPath) {
     branch: stringConfigValue(configPath, values, "branch", DEFAULT_BRANCH),
     inbox: stringConfigValue(configPath, values, "inbox", DEFAULT_INBOX)
   };
+  validateRemote(config.remote);
   validateBranch(config.branch);
   validateInboxTemplate(config.inbox);
   return config;
@@ -3530,6 +3614,25 @@ function acquireSyncLock(root) {
     }
   }
   return;
+}
+function acquireSyncLockOrThrow(root) {
+  const release = acquireSyncLock(root);
+  if (release)
+    return release;
+  throw new SidecarError("another sidecar sync is already running; try again once it finishes");
+}
+function withSyncLock(root, onBusy, fn) {
+  const releaseLock = onBusy === "skip" ? acquireSyncLock(root) : acquireSyncLockOrThrow(root);
+  if (!releaseLock) {
+    console.log("another sidecar sync is already running; skipping this soft sync");
+    return false;
+  }
+  try {
+    fn();
+    return true;
+  } finally {
+    releaseLock();
+  }
 }
 function syncLockIsStale(lockDir) {
   let pid;
@@ -3754,27 +3857,6 @@ function gitDir(repo) {
   const result = git(repo, ["rev-parse", "--git-dir"]).stdout.trim();
   return path2.isAbsolute(result) ? result : path2.resolve(repo, result);
 }
-function* walkEntries(root) {
-  if (!fs2.existsSync(root))
-    return;
-  for (const entry of fs2.readdirSync(root, { withFileTypes: true })) {
-    const entryPath = path2.join(root, entry.name);
-    yield entryPath;
-    if (entry.isDirectory() && !entry.isSymbolicLink())
-      yield* walkEntries(entryPath);
-  }
-}
-function* walkFiles(root) {
-  for (const entryPath of walkEntries(root)) {
-    try {
-      const stat = fs2.lstatSync(entryPath);
-      if (!stat.isSymbolicLink() && stat.isFile())
-        yield entryPath;
-    } catch {
-      continue;
-    }
-  }
-}
 function stringConfigValue(configPath, values, key, fallback) {
   const value = values[key] ?? fallback;
   if (typeof value !== "string")
@@ -3819,7 +3901,7 @@ function nowIso() {
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
-var DEFAULT_PATH = "sidecar", DEFAULT_BRANCH = "main", DEFAULT_INBOX = "sidecar-inbox/{user}/{random}", PACKAGE_NAME = "@projectors/sidecar", PACKAGE_SPEC = "@projectors/sidecar", GLOBAL_EXEC_ENV2 = "SIDECAR_GLOBAL_EXEC", SKIP_LOCAL_EXEC_ENV2 = "SIDECAR_SKIP_LOCAL_EXEC", STATE_DIR_ENV = "SIDECAR_STATE_DIR", SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE", DAEMON_LABEL = "com.anteprojector.sidecar", SidecarError, INSTALL_SOURCES, STATUS_LABEL_WIDTH, DEFAULT_SETTINGS, LOG_ROTATE_BYTES = 5242880, LEGACY_HOOK_NAMES, LEGACY_HOOK_HELPER = "sidecar-sync-hook", LEGACY_HOOK_MARKER = "sidecar-sync", LEGACY_SYNC_STAMP_FILE = "sidecar-last-sync";
+var DEFAULT_PATH = "sidecar", DEFAULT_BRANCH = "main", DEFAULT_INBOX = "sidecar-inbox/{user}/{random}", PACKAGE_NAME = "@projectors/sidecar", PACKAGE_SPEC = "@projectors/sidecar", GLOBAL_EXEC_ENV2 = "SIDECAR_GLOBAL_EXEC", SKIP_LOCAL_EXEC_ENV2 = "SIDECAR_SKIP_LOCAL_EXEC", STATE_DIR_ENV = "SIDECAR_STATE_DIR", SOFT_SYNC_ENV = "SIDECAR_SYNC_SOFT", SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE", DAEMON_LABEL = "com.anteprojector.sidecar", SidecarError, INSTALL_SOURCES, STATUS_LABEL_WIDTH, REDACTION_FILTER_NAME = "sidecar-redact", DEFAULT_SETTINGS, LOG_ROTATE_BYTES = 5242880, LEGACY_HOOK_NAMES, LEGACY_HOOK_HELPER = "sidecar-sync-hook", LEGACY_HOOK_MARKER = "sidecar-sync", LEGACY_SYNC_STAMP_FILE = "sidecar-last-sync";
 var init_cli = __esm(() => {
   init_dist();
   init_color();
@@ -3845,7 +3927,7 @@ import { fileURLToPath as fileURLToPath3 } from "node:url";
 var SKIP_LOCAL_EXEC_ENV3 = "SIDECAR_SKIP_LOCAL_EXEC";
 var GLOBAL_EXEC_ENV3 = "SIDECAR_GLOBAL_EXEC";
 var PACKAGE_NAME2 = "@projectors/sidecar";
-var GLOBAL_ONLY_COMMANDS = new Set(["daemon", "register-install", "update"]);
+var GLOBAL_ONLY_COMMANDS = new Set(["daemon", "register-install", "set-install-source", "update"]);
 if (!process.env[SKIP_LOCAL_EXEC_ENV3]) {
   const localExecutable = findLocalExecutable(process.cwd(), fileURLToPath3(import.meta.url));
   if (localExecutable) {

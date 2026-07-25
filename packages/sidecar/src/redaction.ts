@@ -1,16 +1,28 @@
 const KEY_NAME_PATTERN = String.raw`[A-Za-z_][A-Za-z0-9_-]*`;
+// A quoted value runs to the matching close quote (backreferenced by group
+// number), so it may contain spaces, the other quote char, and escapes.
+const quotedValuePattern = (quoteGroup: number): string =>
+  String.raw`(?:\\.|(?!` + `\\${quoteGroup}` + String.raw`)[^\r\n])+`;
 
 const QUOTED_KEY_SECRET_REGEX = new RegExp(
-  String.raw`(["'])(${KEY_NAME_PATTERN})\1(\s*:\s*)(["'])([^"'\r\n]+)(\4)`,
+  String.raw`(["'])(${KEY_NAME_PATTERN})\1(\s*:\s*)(["'])(${quotedValuePattern(4)})\4`,
   "g",
 );
 
-const ASSIGNMENT_SECRET_REGEX = new RegExp(
-  String.raw`\b(${KEY_NAME_PATTERN})(\s*[:=]\s*)(["']?)([^\s"',;` + "`" + String.raw`]+)(\3)`,
+const QUOTED_ASSIGNMENT_SECRET_REGEX = new RegExp(
+  String.raw`\b(${KEY_NAME_PATTERN})(\s*[:=]\s*)(["'])(${quotedValuePattern(3)})\3`,
   "g",
 );
 
-const AUTHORIZATION_HEADER_REGEX = /\b(authorization\s*:\s*bearer\s+)([^\s"',;`]+)/gi;
+const BARE_ASSIGNMENT_SECRET_REGEX = new RegExp(
+  String.raw`\b(${KEY_NAME_PATTERN})(\s*[:=]\s*)([^\s"',;` + "`" + String.raw`]+)`,
+  "g",
+);
+
+const AUTHORIZATION_HEADER_REGEX = /\b(authorization\s*:\s*(?:bearer|basic|token)\s+)([^\s"',;`]+)/gi;
+const PEM_PRIVATE_KEY_REGEX =
+  /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g;
+const URL_CREDENTIALS_REGEX = /(\/\/[^\s/:@"'`]+):([^\s/@"'`]+)@/g;
 const BARE_BEARER_TOKEN_REGEX =
   /\b(Bearer\s+)(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9._~+/-]{20,})\b/g;
 
@@ -25,14 +37,17 @@ const TOKEN_PATTERNS: Array<[RegExp, string]> = [
 ];
 
 const EMAIL_REGEX = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
-const PHONE_REGEX = /\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b/g;
+// Requires phone-style separators so bare digit runs (IDs, counters) pass.
+const PHONE_REGEX = /\b(?:\+?1[-.\s]?)?(?:\(\d{3}\)\s?|\d{3}[-.\s])\d{3}[-.\s]\d{4}\b/g;
 const SSN_REGEX = /\b\d{3}-\d{2}-\d{4}\b/g;
 const CREDIT_CARD_CANDIDATE_REGEX = /\b(?:\d[ -]*?){13,19}\b/g;
 
 export function redactText(input: string): string {
   let output = input
+    .replace(PEM_PRIVATE_KEY_REGEX, "<PRIVATEKEY>")
     .replace(AUTHORIZATION_HEADER_REGEX, (_match, prefix: string) => `${prefix}<TOKEN>`)
     .replace(BARE_BEARER_TOKEN_REGEX, (_match, prefix: string) => `${prefix}<TOKEN>`)
+    .replace(URL_CREDENTIALS_REGEX, (_match, prefix: string) => `${prefix}:<SECRET>@`)
     .replace(
       QUOTED_KEY_SECRET_REGEX,
       (
@@ -48,9 +63,14 @@ export function redactText(input: string): string {
           : match,
     )
     .replace(
-      ASSIGNMENT_SECRET_REGEX,
+      QUOTED_ASSIGNMENT_SECRET_REGEX,
       (match, key: string, separator: string, quote: string) =>
         isSensitiveKey(key) ? `${key}${separator}${quote}${placeholderForKey(key)}${quote}` : match,
+    )
+    .replace(
+      BARE_ASSIGNMENT_SECRET_REGEX,
+      (match, key: string, separator: string) =>
+        isSensitiveKey(key) ? `${key}${separator}${placeholderForKey(key)}` : match,
     );
 
   for (const [pattern, replacement] of TOKEN_PATTERNS) {
@@ -116,6 +136,9 @@ function isSensitiveKey(key: string): boolean {
 function isLikelyCreditCard(value: string): boolean {
   const digits = value.replace(/\D/g, "");
   if (digits.length < 13 || digits.length > 19) return false;
+  // A separator-free digit run is only treated as a card at the two dominant
+  // card lengths; anything else is far more likely an ID or hash.
+  if (!/[ -]/.test(value) && digits.length !== 15 && digits.length !== 16) return false;
 
   let sum = 0;
   let doubleDigit = false;
