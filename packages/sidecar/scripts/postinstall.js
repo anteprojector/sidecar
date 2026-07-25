@@ -12,6 +12,7 @@ try {
   const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
   if (isGlobalInstall()) {
     enableDaemon(packageRoot);
+    recordInstallSource(packageRoot);
   } else {
     cloneIfMissing(packageRoot);
     registerWithGlobalSidecar(packageRoot);
@@ -46,6 +47,18 @@ function enableDaemon(packageRoot) {
     return;
   }
   console.warn(result.stdout.trim() || `sidecar: enabled daemon ${LABEL}`);
+}
+
+// --if-unset keeps a source that owns the install (like the curl script's
+// "curl") from being clobbered when its underlying npm install re-runs.
+function recordInstallSource(packageRoot) {
+  const cliPath = path.join(packageRoot, "dist", "cli.js");
+  if (!fs.existsSync(cliPath)) return;
+
+  const usesBun = isInside(realpath(packageRoot), realpath(bunGlobalNodeModules()));
+  spawnSync(process.execPath, [cliPath, "set-install-source", usesBun ? "bun" : "npm", "--if-unset"], {
+    encoding: "utf8",
+  });
 }
 
 function cloneIfMissing(packageRoot) {

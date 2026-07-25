@@ -28,7 +28,7 @@ var __export = (target, all) => {
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
-// node_modules/smol-toml/dist/date.js
+// ../../node_modules/.bun/smol-toml@1.7.0/node_modules/smol-toml/dist/date.js
 var DATE_TIME_RE, TomlDate;
 var init_date = __esm(() => {
   /*!
@@ -150,7 +150,7 @@ var init_date = __esm(() => {
   };
 });
 
-// node_modules/smol-toml/dist/error.js
+// ../../node_modules/.bun/smol-toml@1.7.0/node_modules/smol-toml/dist/error.js
 function getLineColFromPtr(string, ptr) {
   let lines = string.slice(0, ptr).split(/\r\n|\n|\r/g);
   return [lines.length, lines.pop().length + 1];
@@ -222,7 +222,7 @@ ${codeblock}`, options);
   };
 });
 
-// node_modules/smol-toml/dist/primitive.js
+// ../../node_modules/.bun/smol-toml@1.7.0/node_modules/smol-toml/dist/primitive.js
 function parseString(str, ptr) {
   let c = str[ptr++];
   let first = c;
@@ -407,7 +407,7 @@ var init_primitive = __esm(() => {
   LEADING_ZERO = /^[+-]?0[0-9_]/;
 });
 
-// node_modules/smol-toml/dist/util.js
+// ../../node_modules/.bun/smol-toml@1.7.0/node_modules/smol-toml/dist/util.js
 function indexOfNewline(str, start = 0, end = str.length) {
   let idx = str.indexOf(`
 `, start);
@@ -499,7 +499,7 @@ var init_util = __esm(() => {
    */
 });
 
-// node_modules/smol-toml/dist/extract.js
+// ../../node_modules/.bun/smol-toml@1.7.0/node_modules/smol-toml/dist/extract.js
 function sliceAndTrimEndOf(str, startPtr, endPtr) {
   let value = str.slice(startPtr, endPtr);
   let commentIdx = value.indexOf("#");
@@ -600,7 +600,7 @@ var init_extract = __esm(() => {
    */
 });
 
-// node_modules/smol-toml/dist/struct.js
+// ../../node_modules/.bun/smol-toml@1.7.0/node_modules/smol-toml/dist/struct.js
 function parseKey(str, ptr, end = "=") {
   let dot = ptr - 1;
   let parsed = [];
@@ -778,7 +778,7 @@ var init_struct = __esm(() => {
   KEY_PART_RE = /^[a-zA-Z0-9-_]+[ \t]*$/;
 });
 
-// node_modules/smol-toml/dist/parse.js
+// ../../node_modules/.bun/smol-toml@1.7.0/node_modules/smol-toml/dist/parse.js
 function peekTable(key, table, meta, type) {
   let t = table;
   let m = meta;
@@ -925,7 +925,7 @@ var init_parse = __esm(() => {
    */
 });
 
-// node_modules/smol-toml/dist/stringify.js
+// ../../node_modules/.bun/smol-toml@1.7.0/node_modules/smol-toml/dist/stringify.js
 var init_stringify = __esm(() => {
   /*!
    * Copyright (c) Squirrel Chat et al., All rights reserved.
@@ -956,7 +956,7 @@ var init_stringify = __esm(() => {
    */
 });
 
-// node_modules/smol-toml/dist/index.js
+// ../../node_modules/.bun/smol-toml@1.7.0/node_modules/smol-toml/dist/index.js
 var init_dist = __esm(() => {
   init_parse();
   init_stringify();
@@ -989,6 +989,66 @@ var init_dist = __esm(() => {
    * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
    * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
    */
+});
+
+// src/color.ts
+function colorLevel(stream = process.stdout) {
+  const env = process.env;
+  if (env.NO_COLOR !== undefined && env.NO_COLOR !== "")
+    return 0;
+  if (env.FORCE_COLOR === "0" || env.CLICOLOR === "0")
+    return 0;
+  const forced = env.FORCE_COLOR !== undefined && env.FORCE_COLOR !== "" || env.CLICOLOR_FORCE !== undefined && env.CLICOLOR_FORCE !== "0";
+  if (!forced) {
+    if (env.TERM === "dumb")
+      return 0;
+    if (!stream.isTTY)
+      return 0;
+  }
+  const term = env.TERM ?? "";
+  const colorterm = env.COLORTERM ?? "";
+  if (/truecolor|24bit/i.test(colorterm))
+    return 3;
+  if (/-256(color)?$/i.test(term) || term === "xterm-kitty" || colorterm !== "")
+    return 2;
+  return 1;
+}
+function code(role, level) {
+  switch (role) {
+    case "label":
+    case "quiet":
+      return "2";
+    case "ok":
+      return "32";
+    case "bad":
+      return "31";
+    case "repo":
+      if (level === 3)
+        return `38;2;${REPO.r};${REPO.g};${REPO.b}`;
+      if (level === 2)
+        return `38;5;${REPO_256}`;
+      return "35";
+    case "brand":
+    case "attn": {
+      const bold = role === "attn" ? "1;" : "";
+      if (level === 3)
+        return `${bold}38;2;${BRAND.r};${BRAND.g};${BRAND.b}`;
+      if (level === 2)
+        return `${bold}38;5;${BRAND_256}`;
+      return `${bold}33`;
+    }
+  }
+}
+function paint(role, text, level = colorLevel()) {
+  if (level === 0 || text === "")
+    return text;
+  const sgr = code(role, level);
+  return sgr ? `\x1B[${sgr}m${text}\x1B[0m` : text;
+}
+var BRAND, BRAND_256 = 214, REPO, REPO_256 = 99;
+var init_color = __esm(() => {
+  BRAND = { r: 255, g: 198, b: 30 };
+  REPO = { r: 139, g: 92, b: 246 };
 });
 
 // src/redaction.ts
@@ -1438,7 +1498,8 @@ async function checkAndInstallUpdate() {
   if (compareVersions(latest, current) <= 0) {
     return { status: "current", current, latest };
   }
-  const usesBun = isInsidePath(realpathOr(currentCliPath()), realpathOr(bunGlobalRoot()));
+  const source = readSettings().installSource;
+  const usesBun = source ? source === "bun" : isInsidePath(realpathOr(currentCliPath()), realpathOr(bunGlobalRoot()));
   const bun = usesBun ? findExecutableOnPath(process.platform === "win32" ? "bun.exe" : "bun") : undefined;
   const installer = bun ?? npm;
   const args = bun ? ["add", "-g", `${PACKAGE_NAME}@${latest}`] : ["install", "-g", `${PACKAGE_NAME}@${latest}`];
@@ -1559,9 +1620,9 @@ function runChild(command, args, options) {
       clearTimeout(timer);
       resolve({ status: 1, output: output || String(error), stdout, timedOut });
     });
-    child.on("close", (code) => {
+    child.on("close", (code2) => {
       clearTimeout(timer);
-      resolve({ status: code ?? 1, output, stdout, timedOut });
+      resolve({ status: code2 ?? 1, output, stdout, timedOut });
     });
   });
 }
@@ -1656,6 +1717,8 @@ function run(argv) {
       return cmdDaemon(rest);
     case "register-install":
       return cmdRegisterInstall(rest);
+    case "set-install-source":
+      return cmdSetInstallSource(rest);
     case "update":
       return cmdUpdate(rest);
     case "snapshot":
@@ -1678,7 +1741,7 @@ commands:
   instances
   daemon status|enable|disable|restart|autoupdate on|off|run [--once] [--interval seconds]
   update
-  tail [-f|--follow]
+  tail [-f|--follow] [-n|--lines count]
   snapshot [--push] [-m message]
   sync [--no-snapshot] [-m message]
   merge [--fork-files] [--no-push]`);
@@ -1696,7 +1759,7 @@ function cmdInit(args) {
   const root = existingRoot ?? gitToplevel(process.cwd());
   const configPath = path2.join(root, ".sidecar");
   const config = existingRoot ? readConfig(configPath) : {
-    remote: remote ?? promptRemote(),
+    remote: remote ?? promptRemote(root),
     version: 1,
     path: getValue(parsed, "--path", DEFAULT_PATH),
     branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
@@ -1812,6 +1875,7 @@ function installGlobalSidecar() {
   if (result.status !== 0) {
     throw new SidecarError(`global sidecar install failed; run \`${command.join(" ")}\` manually`);
   }
+  writeSettings({ ...readSettings(), installSource: bun ? "bun" : "npm" });
 }
 function findExecutableOnPath(name) {
   for (const entry of (process.env.PATH || "").split(path2.delimiter).filter(Boolean)) {
@@ -1856,6 +1920,10 @@ function cmdClone(args) {
   registerCurrentInstance(root, config, { event: "clone" });
   return 0;
 }
+function statusLine(label, value, role) {
+  const padded = `${label}:`.padEnd(STATUS_LABEL_WIDTH);
+  console.log(`${paint("label", padded)} ${role ? paint(role, value) : value}`);
+}
 function cmdStatus(args) {
   const parsed = parseOptions(args, { boolean: new Set, value: new Set });
   if (parsed.positional.length)
@@ -1864,31 +1932,99 @@ function cmdStatus(args) {
   const sidecarPath = resolveSidecarPath(root, config);
   const checkoutPresent = hasGitMetadata(sidecarPath);
   const inbox = expandInbox(config, checkoutPresent ? sidecarPath : undefined);
-  console.log(`main repo:    ${root}`);
-  console.log(`sidecar path: ${sidecarPath}`);
-  console.log(`remote:       ${config.remote}`);
-  console.log(`main branch:  ${config.branch}`);
-  console.log(`inbox branch: ${inbox}`);
+  statusLine("main repo", root, "repo");
+  statusLine("sidecar path", sidecarPath, "brand");
+  statusLine("remote", config.remote, "brand");
+  statusLine("main branch", config.branch);
+  statusLine("inbox branch", inbox);
   if (!checkoutPresent) {
-    console.log("checkout:     missing");
+    statusLine("checkout", "missing", "bad");
+    printDaemonLine();
+    printLastSyncLine(root);
     return 0;
   }
   const branch = git(sidecarPath, ["branch", "--show-current"]).stdout.trim();
   const dirty = Boolean(git(sidecarPath, ["status", "--porcelain"]).stdout.trim());
-  console.log("checkout:     present");
-  console.log(`branch:       ${branch || "(detached)"}`);
-  console.log(`dirty:        ${dirty ? "yes" : "no"}`);
+  statusLine("checkout", "present");
+  if (branch)
+    statusLine("branch", branch);
+  else
+    statusLine("branch", "(detached)", "attn");
+  statusLine("dirty", dirty ? "yes" : "no", dirty ? "attn" : "quiet");
+  printDaemonLine();
+  printLastSyncLine(root);
   fetch(sidecarPath, true, false);
   const base = remoteRefExists(sidecarPath, config.branch) ? `origin/${config.branch}` : branchExists(sidecarPath, config.branch) ? config.branch : "HEAD";
   const pending = pendingInboxBranches(sidecarPath, config).filter((remoteBranch) => !isAncestor(sidecarPath, remoteBranch, base));
   if (pending.length) {
-    console.log("pending inbox:");
+    statusLine("pending inbox", String(pending.length), "attn");
     for (const branchName of pending)
       console.log(`  ${branchName}`);
   } else {
-    console.log("pending inbox: none");
+    statusLine("pending inbox", "none", "quiet");
   }
   return 0;
+}
+function daemonHealth() {
+  if (!shouldUseGlobalRegistry())
+    return { text: "no global install", role: "quiet" };
+  const service = daemonServiceStatus();
+  if (!service.available)
+    return { text: service.message ?? "unavailable", role: "quiet" };
+  if (service.running)
+    return { text: "running", role: "ok" };
+  if (!readSettings().daemonEnabled)
+    return { text: "disabled", role: "attn" };
+  if (!service.installed)
+    return { text: "not installed — run `sidecar daemon enable`", role: "bad" };
+  return { text: "stopped", role: "bad" };
+}
+function printDaemonLine() {
+  const health = daemonHealth();
+  statusLine("daemon", health.text, health.role);
+}
+function printLastSyncLine(root) {
+  const lastSyncAt = readInstances().find((instance) => instance.root === root)?.lastSyncAt;
+  if (!lastSyncAt) {
+    statusLine("last sync", "never", "quiet");
+    return;
+  }
+  const relative = formatRelativeTime(lastSyncAt);
+  const absolute = formatLocalTimestamp(lastSyncAt);
+  if (!relative || !absolute) {
+    statusLine("last sync", lastSyncAt);
+    return;
+  }
+  statusLine("last sync", `${relative} ${paint("quiet", `(${absolute})`)}`);
+}
+function formatRelativeTime(iso, now = Date.now()) {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then))
+    return;
+  const seconds = Math.max(0, Math.round((now - then) / 1000));
+  if (seconds < 45)
+    return "just now";
+  const scales = [
+    [60, "minute", 60],
+    [3600, "hour", 24],
+    [86400, "day", 14],
+    [604800, "week", 9],
+    [2592000, "month", 18],
+    [31536000, "year", Number.POSITIVE_INFINITY]
+  ];
+  for (const [size, unit, limit] of scales) {
+    const count = Math.max(1, Math.floor(seconds / size));
+    if (count < limit)
+      return `${count} ${unit}${count === 1 ? "" : "s"} ago`;
+  }
+  return "a very long time ago";
+}
+function formatLocalTimestamp(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime()))
+    return;
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` + ` ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 function cmdInstances(args) {
   const parsed = parseOptions(args, {
@@ -1926,10 +2062,15 @@ function cmdInstances(args) {
 function cmdTail(args) {
   const parsed = parseOptions(args, {
     boolean: new Set(["-f", "--follow"]),
-    value: new Set
+    value: new Set(["-n", "--lines"])
   });
   if (parsed.positional.length)
-    throw new SidecarError("usage: sidecar tail [-f|--follow]");
+    throw new SidecarError("usage: sidecar tail [-f|--follow] [-n|--lines count]");
+  const rawLines = getValue(parsed, "--lines", getValue(parsed, "-n", "50"));
+  const lines = Number.parseInt(rawLines, 10);
+  if (!Number.isFinite(lines) || lines < 1 || String(lines) !== rawLines) {
+    throw new SidecarError("--lines requires a positive integer");
+  }
   const filePath = sidecarLogPath();
   if (!fs2.existsSync(filePath)) {
     if (parsed.flags.has("-f") || parsed.flags.has("--follow")) {
@@ -1940,12 +2081,22 @@ function cmdTail(args) {
   }
   const stat = fs2.statSync(filePath);
   if (stat.size > 0) {
-    process.stdout.write(fs2.readFileSync(filePath, "utf8"));
+    process.stdout.write(lastLines(fs2.readFileSync(filePath, "utf8"), lines));
   }
   if (parsed.flags.has("-f") || parsed.flags.has("--follow")) {
     followLog(filePath, stat.size);
   }
   return 0;
+}
+function lastLines(content, count) {
+  const trimmed = content.endsWith(`
+`) ? content.slice(0, -1) : content;
+  if (!trimmed)
+    return "";
+  return `${trimmed.split(`
+`).slice(-count).join(`
+`)}
+`;
 }
 function cmdDaemon(args) {
   if (isProjectLocalPath(currentExecutablePath())) {
@@ -2107,6 +2258,24 @@ async function cmdUpdate(args) {
   console.log(`service:  ${daemonServiceLabel(service)}`);
   if (service.message)
     console.log(`detail:   ${service.message}`);
+  return 0;
+}
+function cmdSetInstallSource(args) {
+  const parsed = parseOptions(args, { boolean: new Set(["--if-unset"]), value: new Set });
+  const [source, ...extra] = parsed.positional;
+  if (!source || extra.length || !INSTALL_SOURCES.has(source)) {
+    throw new SidecarError("usage: sidecar set-install-source npm|bun|curl [--if-unset]");
+  }
+  if (isProjectLocalPath(currentExecutablePath())) {
+    throw new SidecarError("set-install-source must run from a globally installed sidecar");
+  }
+  const settings = readSettings();
+  if (parsed.flags.has("--if-unset") && settings.installSource) {
+    console.log(`install source: ${settings.installSource} (kept)`);
+    return 0;
+  }
+  writeSettings({ ...settings, installSource: source });
+  console.log(`install source: ${source}`);
   return 0;
 }
 function cmdRegisterInstall(args) {
@@ -2282,7 +2451,9 @@ function bootstrapMainBranch(repo, config) {
   git(repo, ["switch", "--orphan", config.branch]);
   fs2.writeFileSync(path2.join(repo, "README.md"), `# Sidecar
 
-Canonical sidecar state for this repository.
+Scratch space for a code repository: plans, notes, and agent context.
+This is a plain git repo you own — read it, edit it, clone it anywhere.
+Kept in sync by [sidecar](https://github.com/anteprojector/sidecar).
 `, "utf8");
   git(repo, ["add", "README.md"]);
   git(repo, ["commit", "-m", "Initialize sidecar"]);
@@ -2592,7 +2763,8 @@ function readSettings() {
     return {
       daemonEnabled: typeof record.daemonEnabled === "boolean" ? record.daemonEnabled : true,
       autoUpdate: typeof record.autoUpdate === "boolean" ? record.autoUpdate : true,
-      lastUpdateCheckAt: typeof record.lastUpdateCheckAt === "string" ? record.lastUpdateCheckAt : undefined
+      lastUpdateCheckAt: typeof record.lastUpdateCheckAt === "string" ? record.lastUpdateCheckAt : undefined,
+      installSource: INSTALL_SOURCES.has(record.installSource) ? record.installSource : undefined
     };
   } catch (error) {
     logSidecarEvent("failure", {
@@ -2610,6 +2782,8 @@ function writeSettings(settings) {
   };
   if (settings.lastUpdateCheckAt)
     record.lastUpdateCheckAt = settings.lastUpdateCheckAt;
+  if (settings.installSource)
+    record.installSource = settings.installSource;
   fs2.writeFileSync(settingsPath(), `${JSON.stringify(record, null, 2)}
 `, "utf8");
 }
@@ -3089,14 +3263,57 @@ function projectDependsOnSidecar(projectRoot) {
     return false;
   }
 }
-function promptRemote() {
+function promptRemote(root) {
   if (!process.stdin.isTTY) {
     throw new SidecarError("remote URL is required when no .sidecar config exists");
   }
-  const remote = promptLine("sidecar remote URL: ");
-  if (!remote)
-    throw new SidecarError("remote URL is required");
-  return remote;
+  console.log("sidecar stores its files in a separate git repo that you own — any empty repo works.");
+  const remote = promptLine("sidecar remote URL (leave blank to create one with gh): ");
+  if (remote)
+    return remote;
+  return createRemoteWithGh(root);
+}
+function createRemoteWithGh(root) {
+  const gh = findExecutableOnPath(process.platform === "win32" ? "gh.exe" : "gh");
+  if (!gh) {
+    throw new SidecarError("gh not found on PATH; install the GitHub CLI (https://cli.github.com) or rerun with `sidecar init <remote>`");
+  }
+  const origin = git(root, ["remote", "get-url", "origin"], { check: false }).stdout.trim() || undefined;
+  const parsedOrigin = origin ? parseGitHubRemote(origin) : undefined;
+  const owner = parsedOrigin?.owner ?? ghLogin(gh);
+  const baseName = parsedOrigin?.repo ?? path2.basename(root);
+  const suggested = owner ? `${owner}/${baseName}-sidecar` : `${baseName}-sidecar`;
+  const answer = promptLine(`repository to create [${suggested}]: `) || suggested;
+  const fullName = answer.includes("/") ? answer : owner ? `${owner}/${answer}` : undefined;
+  if (!fullName) {
+    throw new SidecarError("could not determine the repository owner; enter it as owner/name");
+  }
+  console.log(`running gh repo create ${fullName} --private`);
+  const create = spawnSync(gh, ["repo", "create", fullName, "--private"], { stdio: "inherit" });
+  if (create.status !== 0) {
+    throw new SidecarError("gh repo create failed; create the repo yourself and rerun `sidecar init <remote>`");
+  }
+  const ssh = origin ? origin.startsWith("git@") || origin.startsWith("ssh://") : ghGitProtocol(gh) === "ssh";
+  return ssh ? `git@github.com:${fullName}.git` : `https://github.com/${fullName}.git`;
+}
+function parseGitHubRemote(url) {
+  const match = /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/.exec(url) ?? /^(?:https|ssh):\/\/(?:[^@/]+@)?github\.com\/([^/]+)\/(.+?)(?:\.git)?\/?$/.exec(url);
+  if (!match)
+    return;
+  return { owner: match[1], repo: match[2] };
+}
+function ghLogin(gh) {
+  const result = spawnSync(gh, ["api", "user", "-q", ".login"], { encoding: "utf8" });
+  if (result.status !== 0)
+    return;
+  const login = result.stdout.trim();
+  return login || undefined;
+}
+function ghGitProtocol(gh) {
+  const result = spawnSync(gh, ["config", "get", "git_protocol"], { encoding: "utf8" });
+  if (result.status !== 0)
+    return "https";
+  return result.stdout.trim() || "https";
 }
 function promptYesNo(question) {
   if (!process.stdin.isTTY)
@@ -3133,6 +3350,12 @@ function addSidecarDevDependency(root) {
     const existing = JSON.parse(fs2.readFileSync(manifestPath, "utf8"));
     if (existing?.name === PACKAGE_NAME)
       return;
+    const workspacePath = path2.join(root, "packages", "sidecar", "package.json");
+    if (fs2.existsSync(workspacePath)) {
+      const workspace = JSON.parse(fs2.readFileSync(workspacePath, "utf8"));
+      if (workspace?.name === PACKAGE_NAME)
+        return;
+    }
   } catch {}
   let manifest;
   try {
@@ -3596,9 +3819,10 @@ function nowIso() {
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
-var DEFAULT_PATH = "sidecar", DEFAULT_BRANCH = "main", DEFAULT_INBOX = "sidecar-inbox/{user}/{random}", PACKAGE_NAME = "@projectors/sidecar", PACKAGE_SPEC = "@projectors/sidecar", GLOBAL_EXEC_ENV2 = "SIDECAR_GLOBAL_EXEC", SKIP_LOCAL_EXEC_ENV2 = "SIDECAR_SKIP_LOCAL_EXEC", STATE_DIR_ENV = "SIDECAR_STATE_DIR", SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE", DAEMON_LABEL = "com.anteprojector.sidecar", SidecarError, DEFAULT_SETTINGS, LOG_ROTATE_BYTES = 5242880, LEGACY_HOOK_NAMES, LEGACY_HOOK_HELPER = "sidecar-sync-hook", LEGACY_HOOK_MARKER = "sidecar-sync", LEGACY_SYNC_STAMP_FILE = "sidecar-last-sync";
+var DEFAULT_PATH = "sidecar", DEFAULT_BRANCH = "main", DEFAULT_INBOX = "sidecar-inbox/{user}/{random}", PACKAGE_NAME = "@projectors/sidecar", PACKAGE_SPEC = "@projectors/sidecar", GLOBAL_EXEC_ENV2 = "SIDECAR_GLOBAL_EXEC", SKIP_LOCAL_EXEC_ENV2 = "SIDECAR_SKIP_LOCAL_EXEC", STATE_DIR_ENV = "SIDECAR_STATE_DIR", SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE", DAEMON_LABEL = "com.anteprojector.sidecar", SidecarError, INSTALL_SOURCES, STATUS_LABEL_WIDTH, DEFAULT_SETTINGS, LOG_ROTATE_BYTES = 5242880, LEGACY_HOOK_NAMES, LEGACY_HOOK_HELPER = "sidecar-sync-hook", LEGACY_HOOK_MARKER = "sidecar-sync", LEGACY_SYNC_STAMP_FILE = "sidecar-last-sync";
 var init_cli = __esm(() => {
   init_dist();
+  init_color();
   init_redaction();
   SidecarError = class SidecarError extends Error {
     constructor(message) {
@@ -3606,6 +3830,8 @@ var init_cli = __esm(() => {
       this.name = "SidecarError";
     }
   };
+  INSTALL_SOURCES = new Set(["npm", "bun", "curl"]);
+  STATUS_LABEL_WIDTH = "pending inbox:".length;
   DEFAULT_SETTINGS = { daemonEnabled: true, autoUpdate: true };
   LEGACY_HOOK_NAMES = ["post-commit", "pre-push"];
 });

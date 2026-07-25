@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
 import { parse as parseToml } from "smol-toml";
 
+import { type Role, paint } from "./color.js";
 import { redactText } from "./redaction.js";
 
 export const DEFAULT_PATH = "sidecar";
@@ -73,11 +74,16 @@ type InstanceStatus = SidecarInstance & {
   currentBranch: string;
 };
 
+export type InstallSource = "npm" | "bun" | "curl";
+
 export type SidecarSettings = {
   daemonEnabled: boolean;
   autoUpdate: boolean;
   lastUpdateCheckAt?: string;
+  installSource?: InstallSource;
 };
+
+const INSTALL_SOURCES = new Set<InstallSource>(["npm", "bun", "curl"]);
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   try {
@@ -133,6 +139,8 @@ function run(argv: string[]): number | Promise<number> {
       return cmdDaemon(rest);
     case "register-install":
       return cmdRegisterInstall(rest);
+    case "set-install-source":
+      return cmdSetInstallSource(rest);
     case "update":
       return cmdUpdate(rest);
     case "snapshot":
@@ -156,7 +164,7 @@ commands:
   instances
   daemon status|enable|disable|restart|autoupdate on|off|run [--once] [--interval seconds]
   update
-  tail [-f|--follow]
+  tail [-f|--follow] [-n|--lines count]
   snapshot [--push] [-m message]
   sync [--no-snapshot] [-m message]
   merge [--fork-files] [--no-push]`);
@@ -178,7 +186,7 @@ function cmdInit(args: string[]): number {
   const config = existingRoot
     ? readConfig(configPath)
     : {
-        remote: remote ?? promptRemote(),
+        remote: remote ?? promptRemote(root),
         version: 1,
         path: getValue(parsed, "--path", DEFAULT_PATH),
         branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
@@ -298,6 +306,7 @@ function installGlobalSidecar(): void {
   if (result.status !== 0) {
     throw new SidecarError(`global sidecar install failed; run \`${command.join(" ")}\` manually`);
   }
+  writeSettings({ ...readSettings(), installSource: bun ? "bun" : "npm" });
 }
 
 export function findExecutableOnPath(name: string): string | undefined {
@@ -344,6 +353,15 @@ function cmdClone(args: string[]): number {
   return 0;
 }
 
+// "pending inbox:" is the longest label; every value starts one space past it.
+const STATUS_LABEL_WIDTH = "pending inbox:".length;
+
+/** One `label: value` row. The label is dim so the eye lands on the values. */
+function statusLine(label: string, value: string, role?: Role): void {
+  const padded = `${label}:`.padEnd(STATUS_LABEL_WIDTH);
+  console.log(`${paint("label", padded)} ${role ? paint(role, value) : value}`);
+}
+
 function cmdStatus(args: string[]): number {
   const parsed = parseOptions(args, { boolean: new Set(), value: new Set() });
   if (parsed.positional.length) throw new SidecarError("usage: sidecar status");
@@ -352,22 +370,27 @@ function cmdStatus(args: string[]): number {
   const sidecarPath = resolveSidecarPath(root, config);
   const checkoutPresent = hasGitMetadata(sidecarPath);
   const inbox = expandInbox(config, checkoutPresent ? sidecarPath : undefined);
-  console.log(`main repo:    ${root}`);
-  console.log(`sidecar path: ${sidecarPath}`);
-  console.log(`remote:       ${config.remote}`);
-  console.log(`main branch:  ${config.branch}`);
-  console.log(`inbox branch: ${inbox}`);
+  statusLine("main repo", root, "repo");
+  statusLine("sidecar path", sidecarPath, "brand");
+  statusLine("remote", config.remote, "brand");
+  statusLine("main branch", config.branch);
+  statusLine("inbox branch", inbox);
 
   if (!checkoutPresent) {
-    console.log("checkout:     missing");
+    statusLine("checkout", "missing", "bad");
+    printDaemonLine();
+    printLastSyncLine(root);
     return 0;
   }
 
   const branch = git(sidecarPath, ["branch", "--show-current"]).stdout.trim();
   const dirty = Boolean(git(sidecarPath, ["status", "--porcelain"]).stdout.trim());
-  console.log("checkout:     present");
-  console.log(`branch:       ${branch || "(detached)"}`);
-  console.log(`dirty:        ${dirty ? "yes" : "no"}`);
+  statusLine("checkout", "present");
+  if (branch) statusLine("branch", branch);
+  else statusLine("branch", "(detached)", "attn");
+  statusLine("dirty", dirty ? "yes" : "no", dirty ? "attn" : "quiet");
+  printDaemonLine();
+  printLastSyncLine(root);
 
   fetch(sidecarPath, true, false);
   const base = remoteRefExists(sidecarPath, config.branch)
@@ -379,12 +402,86 @@ function cmdStatus(args: string[]): number {
     (remoteBranch) => !isAncestor(sidecarPath, remoteBranch, base),
   );
   if (pending.length) {
-    console.log("pending inbox:");
+    statusLine("pending inbox", String(pending.length), "attn");
     for (const branchName of pending) console.log(`  ${branchName}`);
   } else {
-    console.log("pending inbox: none");
+    statusLine("pending inbox", "none", "quiet");
   }
   return 0;
+}
+
+/**
+ * Green when the daemon is up, red when it should be up and isn't, and dim when
+ * this install can't run one at all — a project-local sidecar has no daemon to
+ * report on, which is a fact about the install rather than a fault.
+ */
+export function daemonHealth(): { text: string; role: Role } {
+  if (!shouldUseGlobalRegistry()) return { text: "no global install", role: "quiet" };
+
+  const service = daemonServiceStatus();
+  if (!service.available) return { text: service.message ?? "unavailable", role: "quiet" };
+  if (service.running) return { text: "running", role: "ok" };
+  if (!readSettings().daemonEnabled) return { text: "disabled", role: "attn" };
+  if (!service.installed) return { text: "not installed — run `sidecar daemon enable`", role: "bad" };
+  return { text: "stopped", role: "bad" };
+}
+
+function printDaemonLine(): void {
+  const health = daemonHealth();
+  statusLine("daemon", health.text, health.role);
+}
+
+function printLastSyncLine(root: string): void {
+  const lastSyncAt = readInstances().find((instance) => instance.root === root)?.lastSyncAt;
+  if (!lastSyncAt) {
+    statusLine("last sync", "never", "quiet");
+    return;
+  }
+  const relative = formatRelativeTime(lastSyncAt);
+  const absolute = formatLocalTimestamp(lastSyncAt);
+  if (!relative || !absolute) {
+    statusLine("last sync", lastSyncAt);
+    return;
+  }
+  // Age isn't colored: a sidecar only syncs when something changed, so a quiet
+  // week is normal and flagging it would train you to ignore the color.
+  statusLine("last sync", `${relative} ${paint("quiet", `(${absolute})`)}`);
+}
+
+/** "4 minutes ago" — floored, so it never claims more time has passed than has. */
+export function formatRelativeTime(iso: string, now = Date.now()): string | undefined {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return undefined;
+
+  // Clocks on two machines writing the same registry drift; a small negative
+  // age is normal and reads better as "just now" than as a negative duration.
+  const seconds = Math.max(0, Math.round((now - then) / 1000));
+  if (seconds < 45) return "just now";
+
+  const scales: [seconds: number, unit: string, limit: number][] = [
+    [60, "minute", 60],
+    [3600, "hour", 24],
+    [86400, "day", 14],
+    [604800, "week", 9],
+    [2592000, "month", 18],
+    [31536000, "year", Number.POSITIVE_INFINITY],
+  ];
+  for (const [size, unit, limit] of scales) {
+    const count = Math.max(1, Math.floor(seconds / size));
+    if (count < limit) return `${count} ${unit}${count === 1 ? "" : "s"} ago`;
+  }
+  return "a very long time ago";
+}
+
+/** Local wall-clock time, because that's the frame you remember working in. */
+export function formatLocalTimestamp(iso: string): string | undefined {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return undefined;
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    ` ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  );
 }
 
 function cmdInstances(args: string[]): number {
@@ -425,9 +522,14 @@ function cmdInstances(args: string[]): number {
 function cmdTail(args: string[]): number {
   const parsed = parseOptions(args, {
     boolean: new Set(["-f", "--follow"]),
-    value: new Set(),
+    value: new Set(["-n", "--lines"]),
   });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar tail [-f|--follow]");
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar tail [-f|--follow] [-n|--lines count]");
+  const rawLines = getValue(parsed, "--lines", getValue(parsed, "-n", "50"));
+  const lines = Number.parseInt(rawLines, 10);
+  if (!Number.isFinite(lines) || lines < 1 || String(lines) !== rawLines) {
+    throw new SidecarError("--lines requires a positive integer");
+  }
 
   const filePath = sidecarLogPath();
   if (!fs.existsSync(filePath)) {
@@ -440,12 +542,18 @@ function cmdTail(args: string[]): number {
 
   const stat = fs.statSync(filePath);
   if (stat.size > 0) {
-    process.stdout.write(fs.readFileSync(filePath, "utf8"));
+    process.stdout.write(lastLines(fs.readFileSync(filePath, "utf8"), lines));
   }
   if (parsed.flags.has("-f") || parsed.flags.has("--follow")) {
     followLog(filePath, stat.size);
   }
   return 0;
+}
+
+export function lastLines(content: string, count: number): string {
+  const trimmed = content.endsWith("\n") ? content.slice(0, -1) : content;
+  if (!trimmed) return "";
+  return `${trimmed.split("\n").slice(-count).join("\n")}\n`;
 }
 
 function cmdDaemon(args: string[]): number | Promise<number> {
@@ -613,6 +721,30 @@ async function cmdUpdate(args: string[]): Promise<number> {
   const service = installDaemonService();
   console.log(`service:  ${daemonServiceLabel(service)}`);
   if (service.message) console.log(`detail:   ${service.message}`);
+  return 0;
+}
+
+// Records how the global executable got onto this machine (npm, bun, the
+// curl script, ...) so update paths can pick the matching channel instead of
+// guessing from filesystem layout.
+function cmdSetInstallSource(args: string[]): number {
+  const parsed = parseOptions(args, { boolean: new Set(["--if-unset"]), value: new Set() });
+  const [source, ...extra] = parsed.positional;
+  if (!source || extra.length || !INSTALL_SOURCES.has(source as InstallSource)) {
+    throw new SidecarError("usage: sidecar set-install-source npm|bun|curl [--if-unset]");
+  }
+  if (isProjectLocalPath(currentExecutablePath())) {
+    throw new SidecarError("set-install-source must run from a globally installed sidecar");
+  }
+  const settings = readSettings();
+  // --if-unset lets postinstall record the default channel without an npm-run
+  // autoupdate clobbering a source (like "curl") that owns the install.
+  if (parsed.flags.has("--if-unset") && settings.installSource) {
+    console.log(`install source: ${settings.installSource} (kept)`);
+    return 0;
+  }
+  writeSettings({ ...settings, installSource: source as InstallSource });
+  console.log(`install source: ${source}`);
   return 0;
 }
 
@@ -816,7 +948,12 @@ export function bootstrapMainBranch(repo: string, config: SidecarConfig): void {
   git(repo, ["switch", "--orphan", config.branch]);
   fs.writeFileSync(
     path.join(repo, "README.md"),
-    "# Sidecar\n\nCanonical sidecar state for this repository.\n",
+    `# Sidecar
+
+Scratch space for a code repository: plans, notes, and agent context.
+This is a plain git repo you own — read it, edit it, clone it anywhere.
+Kept in sync by [sidecar](https://github.com/anteprojector/sidecar).
+`,
     "utf8",
   );
   git(repo, ["add", "README.md"]);
@@ -1194,6 +1331,9 @@ export function readSettings(): SidecarSettings {
       daemonEnabled: typeof record.daemonEnabled === "boolean" ? record.daemonEnabled : true,
       autoUpdate: typeof record.autoUpdate === "boolean" ? record.autoUpdate : true,
       lastUpdateCheckAt: typeof record.lastUpdateCheckAt === "string" ? record.lastUpdateCheckAt : undefined,
+      installSource: INSTALL_SOURCES.has(record.installSource as InstallSource)
+        ? (record.installSource as InstallSource)
+        : undefined,
     };
   } catch (error) {
     logSidecarEvent("failure", {
@@ -1211,6 +1351,7 @@ export function writeSettings(settings: SidecarSettings): void {
     autoUpdate: settings.autoUpdate,
   };
   if (settings.lastUpdateCheckAt) record.lastUpdateCheckAt = settings.lastUpdateCheckAt;
+  if (settings.installSource) record.installSource = settings.installSource;
   fs.writeFileSync(settingsPath(), `${JSON.stringify(record, null, 2)}\n`, "utf8");
 }
 
@@ -1761,14 +1902,68 @@ export function projectDependsOnSidecar(projectRoot: string): boolean {
   }
 }
 
-function promptRemote(): string {
+function promptRemote(root: string): string {
   if (!process.stdin.isTTY) {
     throw new SidecarError("remote URL is required when no .sidecar config exists");
   }
 
-  const remote = promptLine("sidecar remote URL: ");
-  if (!remote) throw new SidecarError("remote URL is required");
-  return remote;
+  console.log("sidecar stores its files in a separate git repo that you own — any empty repo works.");
+  const remote = promptLine("sidecar remote URL (leave blank to create one with gh): ");
+  if (remote) return remote;
+  return createRemoteWithGh(root);
+}
+
+function createRemoteWithGh(root: string): string {
+  const gh = findExecutableOnPath(process.platform === "win32" ? "gh.exe" : "gh");
+  if (!gh) {
+    throw new SidecarError(
+      "gh not found on PATH; install the GitHub CLI (https://cli.github.com) or rerun with `sidecar init <remote>`",
+    );
+  }
+
+  const origin = git(root, ["remote", "get-url", "origin"], { check: false }).stdout.trim() || undefined;
+  const parsedOrigin = origin ? parseGitHubRemote(origin) : undefined;
+  const owner = parsedOrigin?.owner ?? ghLogin(gh);
+  const baseName = parsedOrigin?.repo ?? path.basename(root);
+  const suggested = owner ? `${owner}/${baseName}-sidecar` : `${baseName}-sidecar`;
+
+  const answer = promptLine(`repository to create [${suggested}]: `) || suggested;
+  const fullName = answer.includes("/") ? answer : owner ? `${owner}/${answer}` : undefined;
+  if (!fullName) {
+    throw new SidecarError("could not determine the repository owner; enter it as owner/name");
+  }
+
+  console.log(`running gh repo create ${fullName} --private`);
+  const create = spawnSync(gh, ["repo", "create", fullName, "--private"], { stdio: "inherit" });
+  if (create.status !== 0) {
+    throw new SidecarError("gh repo create failed; create the repo yourself and rerun `sidecar init <remote>`");
+  }
+
+  const ssh = origin
+    ? origin.startsWith("git@") || origin.startsWith("ssh://")
+    : ghGitProtocol(gh) === "ssh";
+  return ssh ? `git@github.com:${fullName}.git` : `https://github.com/${fullName}.git`;
+}
+
+export function parseGitHubRemote(url: string): { owner: string; repo: string } | undefined {
+  const match =
+    /^git@github\.com:([^/]+)\/(.+?)(?:\.git)?$/.exec(url) ??
+    /^(?:https|ssh):\/\/(?:[^@/]+@)?github\.com\/([^/]+)\/(.+?)(?:\.git)?\/?$/.exec(url);
+  if (!match) return undefined;
+  return { owner: match[1], repo: match[2] };
+}
+
+function ghLogin(gh: string): string | undefined {
+  const result = spawnSync(gh, ["api", "user", "-q", ".login"], { encoding: "utf8" });
+  if (result.status !== 0) return undefined;
+  const login = result.stdout.trim();
+  return login || undefined;
+}
+
+function ghGitProtocol(gh: string): string {
+  const result = spawnSync(gh, ["config", "get", "git_protocol"], { encoding: "utf8" });
+  if (result.status !== 0) return "https";
+  return result.stdout.trim() || "https";
 }
 
 function promptYesNo(question: string): boolean {
@@ -1803,8 +1998,15 @@ function addSidecarDevDependency(root: string): void {
   try {
     // Running init inside the sidecar package repo itself must not add a
     // self-dependency that would shadow the dev build via local delegation.
+    // Two shapes to catch: the package itself, and the monorepo root that
+    // carries it as the packages/sidecar workspace.
     const existing = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { name?: string };
     if (existing?.name === PACKAGE_NAME) return;
+    const workspacePath = path.join(root, "packages", "sidecar", "package.json");
+    if (fs.existsSync(workspacePath)) {
+      const workspace = JSON.parse(fs.readFileSync(workspacePath, "utf8")) as { name?: string };
+      if (workspace?.name === PACKAGE_NAME) return;
+    }
   } catch {
     // Unreadable manifests fail with a clear error just below.
   }

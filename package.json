@@ -1,43 +1,17 @@
 {
-  "name": "@projectors/sidecar",
-  "version": "0.5.0",
-  "description": "A Git-backed sidecar inbox for repo-local development metadata.",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/anteprojector/sidecar.git"
-  },
-  "publishConfig": {
-    "access": "public"
-  },
+  "name": "@projectors/sidecar-mono",
+  "private": true,
   "type": "module",
-  "bin": {
-    "sidecar": "dist/cli.js"
-  },
-  "files": [
-    "dist",
-    "scripts/postinstall.js",
-    "README.md",
-    "LICENSE"
+  "workspaces": [
+    "packages/*"
   ],
   "scripts": {
-    "build": "rm -rf dist && bun build src/bin.ts --target=node --format=esm --external chokidar --outfile=dist/cli.js",
-    "check": "tsc --noEmit -p tsconfig.json",
-    "postinstall": "node scripts/postinstall.js",
-    "prepublishOnly": "npm run check && npm test",
-    "pretest": "npm run build",
-    "test": "vitest run"
+    "build": "bun run --cwd packages/sidecar build",
+    "check": "bun run --cwd packages/sidecar check",
+    "test": "bun run --cwd packages/sidecar test",
+    "site": "bun run --cwd packages/marketing serve"
   },
   "engines": {
     "node": ">=20"
-  },
-  "devDependencies": {
-    "@types/node": "^22.13.10",
-    "typescript": "^5.8.2",
-    "vitest": "^3.0.8"
-  },
-  "dependencies": {
-    "chokidar": "^4.0.3",
-    "smol-toml": "^1.7.0"
   }
 }

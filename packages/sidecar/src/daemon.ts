@@ -453,7 +453,11 @@ export async function checkAndInstallUpdate(): Promise<UpdateResult> {
     return { status: "current", current, latest };
   }
 
-  const usesBun = isInsidePath(realpathOr(currentCliPath()), realpathOr(bunGlobalRoot()));
+  // The recorded install source wins; the bun-directory heuristic is the
+  // fallback for installs that predate recording. "curl" installs via npm
+  // under the hood, so it takes the npm path.
+  const source = readSettings().installSource;
+  const usesBun = source ? source === "bun" : isInsidePath(realpathOr(currentCliPath()), realpathOr(bunGlobalRoot()));
   const bun = usesBun ? findExecutableOnPath(process.platform === "win32" ? "bun.exe" : "bun") : undefined;
   const installer = bun ?? npm;
   const args = bun

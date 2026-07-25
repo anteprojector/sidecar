@@ -1,0 +1,844 @@
+:root {
+  --bg: #ffffff;
+  --ink: #000000;
+  --muted: #6b6b6b;
+  --faint: #9a9a9a;
+  --rule: #e4e4e4;
+  --wash: #f6f6f6;
+  --accent: #ffc61e; /* the yellow from branding/color.png */
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: "Schibsted Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --shadow: #cfcfcf;
+  --wrap: 43.75rem;
+  /* How the hero mark docks into the nav. All four share one shape — full
+     effect at 48.75rem wide, nothing at 41.25rem, linear between — so the mark,
+     its horizontal offset, the brackets, and the gap in the rule move as one
+     thing. The mark's opaque band is 14rem (12.5rem of art + 2x0.75rem of
+     padding), so its edge is at 7rem; the rule stops 0.625rem further out, at
+     the 7.625rem where the bracket stems stand. */
+  --mark-y: clamp(-6rem, (41.25rem - 100vw) * 0.8, 0px);
+  --mark-x: clamp(-5.375rem, (41.25rem - 100vw) * 0.72, 0px);
+  --mark-bracket: clamp(0px, (100vw - 41.25rem) * 0.28, 2.125rem);
+  --mark-cut: clamp(0px, (100vw - 41.25rem) * 1.02, 7.625rem);
+  /* Terminal roles, mirroring src/color.ts. Purple is your repo, yellow is the
+     sidecar. The brand yellow is only legible as text on a dark background, so
+     on paper the same role darkens to an amber. */
+  --t-repo: #6d28d9;
+  --t-brand: #8a5a00;
+  --t-attn: #8a5a00;
+  --t-ok: #1f7a3d;
+  --t-bad: #b3261e;
+}
+
+/* Dark palette, declared twice because a media-scoped selector and a plain one
+   can't share a rule: once for an explicit choice, once for "system" (no
+   data-theme attribute). Keep the two blocks in sync. */
+:root[data-theme="dark"] {
+  --bg: #000000;
+  --ink: #ffffff;
+  --muted: #999999;
+  --faint: #6e6e6e;
+  --rule: #232323;
+  --wash: #0d0d0d;
+  --shadow: #3a3a3a;
+  /* Dark is the only theme where the terminal roles can be their real values. */
+  --t-repo: #c4b5fd;
+  --t-brand: #ffc61e;
+  --t-attn: #ffc61e;
+  --t-ok: #3ddc84;
+  --t-bad: #ff6b5e;
+}
+/* Yellow paper. The brand yellow is the page here, so the accent has to move
+   off it — a burnt amber keeps the caret and the handwritten note readable. */
+:root[data-theme="yellow"] {
+  --bg: #ffe9a3;
+  --ink: #1c1607;
+  --muted: #6b5b28;
+  --faint: #97854a;
+  --rule: #e2c86d;
+  --wash: #fbdf90;
+  --accent: #a3540b;
+  --shadow: #d8b955;
+  --t-repo: #5b21b6;
+  --t-brand: #a3540b;
+  --t-attn: #a3540b;
+  --t-ok: #1d6b33;
+  --t-bad: #9c2018;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: #000000;
+    --ink: #ffffff;
+    --muted: #999999;
+    --faint: #6e6e6e;
+    --rule: #232323;
+    --wash: #0d0d0d;
+    --shadow: #3a3a3a;
+    --t-repo: #c4b5fd;
+    --t-brand: #ffc61e;
+    --t-attn: #ffc61e;
+    --t-ok: #3ddc84;
+    --t-bad: #ff6b5e;
+  }
+}
+
+/* Self-hosted so the page makes no third-party requests — the exceptions,
+   while exploration mode lasts, are explorer.js's font candidates (Google
+   Fonts CDN) and main.js's GitHub star count. Latin subset only. Schibsted
+   Grotesk ships one variable file covering the whole weight range. */
+@font-face {
+  font-family: "Schibsted Grotesk";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("./assets/schibsted-grotesk.woff2") format("woff2");
+  unicode-range: U+0000-00FF;
+}
+@font-face {
+  font-family: "Caveat";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./assets/caveat-600.woff2") format("woff2");
+  unicode-range: U+0000-00FF;
+}
+
+* { box-sizing: border-box; }
+
+/* The page's one scale knob. Every length below is in rem, so this is what
+   sets the size of the whole design — 125% makes 1rem = 20px, a quarter up
+   from the browser default. Hairlines stay in px: a 1px rule should stay 1px.
+   Note media-query preludes can't use rem for this — inside them rem always
+   resolves against the initial 16px — so their thresholds are written in px. */
+html { font-size: 125%; }
+
+.vh {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 1rem;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--ink); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 0.1875rem; }
+
+
+main { max-width: var(--wrap); margin: 0 auto; padding: 0 2.25rem; }
+
+/* shared label style — the mono all-caps eyebrow used above each section */
+
+.label {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 0 0 1.125rem;
+}
+
+/* nav */
+
+.nav-inner {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 1.125rem 2.25rem;
+}
+.nav-inner::after,
+.foot-inner::before {
+  content: "";
+  position: absolute;
+  left: 2.25rem;
+  right: 2.25rem;
+}
+.foot-inner::before { top: 0; border-top: 1px solid var(--rule); }
+
+/* The nav's rule is two segments rather than one line, so it can stop dead at
+   each bracket instead of running behind the mark. Each segment is sized from
+   the centre out — 50% is this box's own centre, which is the mark's reference
+   too — and --mark-cut collapses to zero as the mark leaves, closing the gap. */
+.nav-inner::after {
+  bottom: 0;
+  height: 1px;
+  background-image:
+    linear-gradient(var(--rule), var(--rule)),
+    linear-gradient(var(--rule), var(--rule));
+  background-repeat: no-repeat;
+  background-position: left, right;
+  background-size:
+    calc(50% + var(--mark-x) - var(--mark-cut)) 1px,
+    calc(50% - var(--mark-x) - var(--mark-cut)) 1px;
+}
+
+/* A pair of square brackets around the docked mark, straddling the rule — the
+   stems half above the line and half below. One box draws both: the side
+   borders are the stems, and four background slivers are the arms, turned in
+   toward the mark. The stems stand 0.625rem clear of the mark's opaque band, which
+   is the room the arms need; the rule stops at the stems, so that gap is empty
+   line. Every part is sized off --mark-bracket, so the whole thing grows from
+   nothing as the mark docks. */
+.nav-inner::before {
+  content: "";
+  position: absolute;
+  bottom: calc(var(--mark-bracket) / -2);
+  left: calc(50% + var(--mark-x) - var(--mark-cut));
+  width: calc(var(--mark-cut) * 2);
+  height: var(--mark-bracket);
+  border-left: 1px solid var(--rule);
+  border-right: 1px solid var(--rule);
+  background-image:
+    linear-gradient(var(--rule), var(--rule)),
+    linear-gradient(var(--rule), var(--rule)),
+    linear-gradient(var(--rule), var(--rule)),
+    linear-gradient(var(--rule), var(--rule));
+  background-repeat: no-repeat;
+  background-origin: border-box;   /* so an arm starts flush with its stem */
+  background-size: calc(var(--mark-bracket) * 0.24) 1px;
+  background-position: left top, left bottom, right top, right bottom;
+}
+
+.nav-brand {
+  display: flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.nav-brand:hover { text-decoration: none; }
+.nav-links {
+  display: flex;
+  gap: 1.5rem;
+  font-family: var(--mono);
+  font-size: 0.78125rem;
+}
+.nav-links a { color: var(--muted); }
+.nav-links a:hover { color: var(--ink); text-decoration: none; }
+
+/* Every icon is stacked at the left of a fixed-size box, so nothing here can
+   reflow the nav: the drop simply translates off the theme icon on hover. */
+.theme {
+  position: relative;
+  /* .nav-links doesn't set align-items, so the default stretch applies — and a
+     flex item with a definite height falls back to flex-start under it, which
+     pinned this to the top of the taller link line boxes. */
+  align-self: center;
+  width: 2.3125rem;
+  height: 1rem;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin-left: -0.375rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+.theme:hover { color: var(--ink); }
+.theme svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1rem;
+  height: 1rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.theme .i-drop {
+  /* Smaller than the theme icons, so it needs its own vertical centring: the
+     drop is drawn from y=1.6 to y=13.4 of a 16 box, not edge to edge. */
+  width: 0.8125rem;
+  height: 0.8125rem;
+  top: 0.125rem;
+  stroke-width: 1.7;
+  transition: transform 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.theme:hover .i-drop,
+.theme:focus-visible .i-drop { transform: translateX(1.375rem); }
+
+/* The theme icons only exist to be uncovered — hidden until the drop moves. */
+.theme .i-system,
+.theme .i-light,
+.theme .i-dark,
+.theme .i-yellow {
+  opacity: 0;
+  transition: opacity 0.18s ease 0.06s;
+}
+.theme[data-mode="system"]:hover .i-system,
+.theme[data-mode="light"]:hover .i-light,
+.theme[data-mode="dark"]:hover .i-dark,
+.theme[data-mode="yellow"]:hover .i-yellow,
+.theme[data-mode="system"]:focus-visible .i-system,
+.theme[data-mode="light"]:focus-visible .i-light,
+.theme[data-mode="dark"]:focus-visible .i-dark,
+.theme[data-mode="yellow"]:focus-visible .i-yellow { opacity: 1; }
+/* The full drop: the brand yellow literally, not --accent, which darkens to
+   amber in the yellow theme — where this icon is the one that gets shown. */
+.theme .i-yellow { fill: #ffc61e; stroke: none; }
+@media (prefers-reduced-motion: reduce) {
+  .theme .i-drop, .theme svg { transition: none; }
+}
+
+/* hero */
+
+/* The vertical gaps below the headline breathe with the viewport: svh-based
+   clamps whose floors keep all three step buttons above the fold on a short
+   laptop screen (~41.875rem of height), while taller windows stretch toward the
+   ceilings. Only these gaps are elastic — the 2.875rem top padding is part of the
+   hero-mark docking geometry and must stay fixed.
+
+   The hero is also a flex column filling the first screen (100svh minus the
+   nav), so the "Requires…" note can dock at the fold via margin-top: auto —
+   without it, --mark-y pulling the content up on wide viewports dragged the
+   note up with it. Auto cross-axis margins still centre the mark and tree. */
+.hero {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  /* Tracks the fold (100svh minus the 3.625rem nav) so the note can dock to it,
+     but stops at 47.5rem: past that, extra window height becomes empty page
+     below the hero rather than ever-larger gaps inside it. */
+  min-height: min(calc(100svh - 3.625rem), 47.5rem);
+  text-align: center;
+  padding: 2.875rem 0 clamp(2.5rem, 9svh, 6rem);
+}
+
+/* Once the mark has dropped clear of the nav and the brackets are gone, a line
+   drops from under the wordmark and runs across to meet it, the way a tree
+   draws a child: the same "└─" the layout above spells out in text. It hangs
+   from the middle of "sidecar" — ~1.875rem in, at 0.875rem mono — so it reads as
+   belonging to the name rather than to the page edge. Below 41.25rem the mark's
+   offsets are pinned at zero, so the rest is fixed: one box with two borders,
+   dropping to the mark's centreline (2.875rem of hero padding + half of the 8.4375rem
+   art) and stopping 0.5rem short of its 14rem band. */
+@media (max-width: 825px) {
+  .hero::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 1.875rem;
+    width: calc(50% - 9.375rem);
+    height: 7.0625rem;
+    border-left: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+  }
+}
+/* The mark is the separator: it rides up far enough to straddle the nav's rule
+   and, painting above the header with a background of its own, breaks the line
+   in two rather than crossing it. It also slides left of page centre, because
+   the links (~14.375rem) far outweigh the wordmark (~3.75rem) and the gap they leave
+   is centred ~5.375rem to the left. Both offsets unwind together as the viewport
+   narrows, so the mark is back at true centre by the time it clears the nav. */
+.hero-mark {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: fit-content;   /* a block span would otherwise stretch the band edge to edge */
+  margin: var(--mark-y) auto 1rem;
+  padding: 0 0.75rem;      /* the opaque band that keeps the art clear of the rule */
+  background: var(--bg);
+  transform: translateX(var(--mark-x));
+}
+/* Sized in rem too, so the art scales with the type rather than staying at the
+   200x135 in its width/height attributes (those still set the aspect ratio). */
+/* The mark is a mask, not an image: the SVG supplies the silhouette and the
+   background supplies the colour, so it follows --ink into every theme instead
+   of only flipping black to white. That also retires --logo-invert. */
+.hero-mark .mark {
+  display: block;
+  width: 12.5rem;
+  aspect-ratio: 937 / 624;   /* the SVG's viewBox, so no height guess */
+  background: var(--ink);
+  -webkit-mask: url("./assets/logo.svg") center / contain no-repeat;
+          mask: url("./assets/logo.svg") center / contain no-repeat;
+}
+.hero h1 {
+  /* Never wraps: the second min() term is the size at which the headline
+     (10.94em of text, measured) exactly fills the viewport minus main's
+     padding, so below ~28.125rem wide it shrinks to fit instead of breaking
+     "a child repo for your repo" onto two lines. Wider layouts take the
+     original clamp unchanged. */
+  font-size: min(clamp(2rem, 6vw, 3.25rem), calc((100vw - 4.75rem) / 11.2));
+  white-space: nowrap;
+  font-weight: 450;
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+  margin: 0 0 1.25rem;
+  padding-bottom: 1.1em; /* clearance for the caret + handwritten note */
+}
+/* Proofreader's insertion: a caret in the headline, the correction written in
+   below it. The slot is zero-width so the mark sits between words without
+   pushing them apart, and the note is absolutely positioned so a long
+   annotation can't widen the headline. */
+.insert {
+  position: relative;
+  display: inline-block;
+  width: 0;
+}
+.caret {
+  position: absolute;
+  top: 100%;          /* below the line box entirely — no glyph collisions */
+  left: 50%;
+  width: 0.4em;
+  height: 0.25em;
+  margin-top: 0.08em;
+  /* Two corrections: the apex sits ~73% across the asymmetric viewBox rather
+     than at its centre (-0.29em), and .insert sits before the space rather than
+     inside it, so the mark needs half a space-width back to the right (+0.1em)
+     to centre between the "o" and the "f". */
+  margin-left: -0.19em;
+  overflow: visible;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: url(#ink-rough);
+  transform: rotate(-7deg);
+}
+/* Three strokes, drawn as if by hand: a wobbling main pass, a lighter retrace
+   that doesn't quite follow it, and a short flick past the apex. */
+/* ~1.9px rendered, matching the stem weight of the handwritten note beneath it.
+   The viewBox is 52 wide and the headline is 3.25rem, so rendered stroke width is
+   just width(em) x stroke-width — these scale up as the mark shrinks. */
+.caret .s1 { stroke-width: 4.8; }
+.caret .s2 { stroke-width: 3.5; opacity: 0.45; }
+.caret .s3 { stroke-width: 3.2; opacity: 0.4; }
+
+.note {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%) rotate(-3.5deg);
+  margin-top: 0.95em;
+  font-family: "Caveat", ui-rounded, cursive;
+  font-weight: 600;
+  font-size: 0.54em;
+  line-height: 1;
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+  color: var(--accent);
+  filter: url(#ink);
+}
+/* Per-letter jitter. A font gives every "o" and "u" the same outline; nudging
+   each glyph off its baseline is what breaks that tell. Values are irregular
+   on purpose — an even pattern reads as a font again. */
+.note i {
+  display: inline-block;
+  font-style: normal;
+  transform: translateY(var(--y, 0)) rotate(var(--r, 0deg)) scale(var(--s, 1));
+}
+.note i:nth-of-type(1)  { --r: -5deg;  --y: 0.012em;  --s: 1.03; }
+.note i:nth-of-type(2)  { --r: 2deg;   --y: -0.02em;  --s: 0.97; }
+.note i:nth-of-type(3)  { --r: -1deg;  --y: 0.026em;  --s: 1.05; }
+.note i:nth-of-type(4)  { --r: 4deg;   --y: -0.01em;  --s: 0.99; }
+.note i:nth-of-type(5)  { --r: -3deg;  --y: 0.018em;  --s: 1.02; }
+.note i:nth-of-type(6)  { --r: 1deg;   --y: -0.026em; --s: 0.96; }
+.note i:nth-of-type(7)  { --r: 5deg;   --y: 0.008em;  --s: 1.04; }
+.note i:nth-of-type(8)  { --r: -2deg;  --y: -0.014em; --s: 1.01; }
+.note i:nth-of-type(9)  { --r: 3deg;   --y: 0.03em;   --s: 0.98; }
+.note i:nth-of-type(10) { --r: -4deg;  --y: -0.006em; --s: 1.05; }
+.note i:nth-of-type(11) { --r: 0deg;   --y: 0.022em;  --s: 0.97; }
+.note i:nth-of-type(12) { --r: -6deg;  --y: -0.018em; --s: 1.02; }
+.note i:nth-of-type(13) { --r: 2deg;   --y: 0.014em;  --s: 1.0; }
+/* Bare tree in the hero — no border or header bar, so it reads as a caption
+   under the headline rather than a second boxed panel. A grid rather than a
+   <pre> so the long comment can wrap on a phone instead of forcing one
+   unbreakable line; on desktop it looks the same either way. */
+.tree {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 1.4em;
+  width: fit-content;
+  max-width: 100%;
+  margin: clamp(1rem, 3svh, 2.125rem) auto 0;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 0.78125rem;
+  line-height: 1.8;
+}
+.tree .t-root { grid-column: 1 / -1; }
+.tree b { font-weight: 400; color: var(--ink); white-space: pre; }
+.tree span { color: var(--faint); }
+/* Each claim gets its own mark, the way you'd underline words one at a time
+   rather than dragging a single line across the phrase. One stretched stroke
+   per point — no repeating tile, which is what read as mechanical — with a
+   different bow and tilt on each so no two are identical. nowrap keeps a point
+   from splitting across lines, which would strand half its underline. */
+.tree u {
+  position: relative;
+  white-space: nowrap;
+  text-decoration: none;
+  /* Inherit, so an underlined claim is the same comment grey as the line above
+     it — the hand-drawn mark is what sets it apart, not a darker colour. */
+  color: inherit;
+}
+.tree u svg {
+  position: absolute;
+  left: 0;
+  bottom: -0.68em;   /* well clear of the descenders — a separate mark, not an underline */
+  width: 100%;
+  height: 0.3125rem;
+  overflow: visible;
+}
+.tree u path {
+  fill: none;
+  stroke: var(--t-brand);
+  stroke-opacity: 0.38;  /* understated — the mark shouldn't outshout the text */
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  /* Deliberately NOT non-scaling-stroke: with preserveAspectRatio="none" that
+     makes Chrome compute the dash in screen space while scaling it by the
+     user-space pathLength ratio, so any mark wider than its viewBox maps to
+     stops short (u4 reached ~74%). Scaled strokes keep an even weight anyway,
+     because the SVG height is fixed so the vertical scale is the same for all
+     four — widths below are pre-multiplied for it. */
+}
+/* Tilt and ink weight vary per mark too — a hand doesn't repeat itself. */
+.tree .u1 svg { transform: rotate(-1.3deg); }
+.tree .u2 svg { transform: rotate(1.1deg); }
+.tree .u3 svg { transform: rotate(-0.6deg); }
+.tree .u4 svg { transform: rotate(1.5deg); }
+.tree .u1 path { stroke-width: 1.9; }
+.tree .u2 path { stroke-width: 1.55; }
+.tree .u3 path { stroke-width: 1.8; }
+.tree .u4 path { stroke-width: 1.6; }
+/* The retrace carries less pressure than the first pass. */
+.tree u .p2 { stroke-opacity: 0.26; }
+
+
+/* install steps */
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;   /* content-width buttons, flush left under the hero */
+  gap: 0.75rem;                 /* clears the 0.1875rem drop shadow under each button */
+  /* auto + the auto on .req split the hero's leftover height equally above
+     and below the buttons; the clamp rides on top as the guaranteed gap. */
+  margin-top: auto;
+  padding-top: clamp(1.375rem, 4.5svh, 3rem);
+  text-align: left;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 1.75rem;
+  max-width: 100%;
+  padding: 0.6875rem 0.875rem 0.6875rem 1.125rem;
+  /* Hard offset shadow instead of a blur: the button reads as a physical card
+     sitting above the page, and pressing it means moving it onto its shadow. */
+  border: 1.5px solid var(--ink);
+  border-radius: 0.5rem;
+  background: var(--bg);
+  box-shadow: 0.1875rem 0.1875rem 0 var(--shadow);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.12s, box-shadow 0.12s;
+}
+.step:hover {
+  transform: translate(0.125rem, 0.125rem);
+  box-shadow: 0.0625rem 0.0625rem 0 var(--shadow);
+  text-decoration: none;
+}
+.step:active {
+  transform: translate(0.1875rem, 0.1875rem);
+  box-shadow: 0 0 0 var(--shadow);
+}
+.step:focus-visible { outline: 2px solid var(--accent); outline-offset: 0.1875rem; }
+@media (prefers-reduced-motion: reduce) {
+  .step { transition: none; }
+}
+
+.step-body { min-width: 0; }
+.step-label {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.59375rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  line-height: 1.3;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 1px;
+}
+.step-body code {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.step-act {
+  flex: none;
+  display: flex;
+  align-items: center;
+  color: var(--faint);
+}
+.step:hover .step-act { color: var(--ink); }
+.step-act svg {
+  width: 0.9375rem;
+  height: 0.9375rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.step-act .i-star { fill: currentColor; stroke-width: 0; }
+/* star count, fenced off from the button's text by a rule */
+.step-stars {
+  align-self: stretch;   /* the rule runs the full height of the button */
+  gap: 0.3125rem;
+  padding-left: 0.75rem;
+  border-left: 1.5px solid var(--rule);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.78125rem;
+  font-variant-numeric: tabular-nums;
+}
+.step:hover .step-stars { border-left-color: var(--ink); }
+.step-act .i-done { display: none; }
+.step[data-copied] .step-act { color: var(--accent); }
+.step[data-copied] .i-copy { display: none; }
+.step[data-copied] .i-done { display: block; }
+
+.req {
+  color: var(--faint);
+  font-size: 0.78125rem;
+  font-family: var(--mono);
+  text-align: left;  /* was inherited from .steps; the hero centres */
+  /* The other half of the fold's leftover height (see .steps); 0.875rem is the
+     guaranteed gap when the fold has nothing spare. */
+  margin: auto 0 0;
+  padding-top: 0.875rem;
+}
+
+/* boxed code — tree + terminal */
+
+.box {
+  border: 1px solid var(--rule);
+  margin-bottom: 4.5rem;
+}
+.box-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6875rem 1.125rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--wash);
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.box pre {
+  margin: 0;
+  padding: 1.375rem 1.125rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  line-height: 1.85;
+}
+/* .c comment, .p prompt — decoration, safe at --faint. Labels and inert values
+   are real text you read, so they take --muted, which clears AA on every theme
+   where --faint does not. In the terminal both are simply dim. */
+.box .c, .box .p { color: var(--faint); }
+.box .l, .box .q { color: var(--muted); }
+/* The four roles that mean something. Same vocabulary as `sidecar status`. */
+.box .m { color: var(--t-repo); }
+.box .b { color: var(--t-brand); }
+/* .w and .r are the states the caption names; the healthy sample never hits them. */
+.box .w { color: var(--t-attn); font-weight: 700; }
+.box .g { color: var(--t-ok); }
+.box .r { color: var(--t-bad); }
+
+/* numbered features */
+
+.features { margin-bottom: 4.5rem; }
+.features .grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  border-top: 1px solid var(--rule);
+  border-left: 1px solid var(--rule);
+}
+.feature {
+  border-right: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  padding: 1.625rem 1.375rem 1.75rem;
+}
+.feature .num {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+  margin-bottom: 0.75rem;
+}
+.feature h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 0 0 0.5625rem;
+}
+.feature p { margin: 0; color: var(--muted); font-size: 0.90625rem; line-height: 1.6; }
+
+/* why */
+
+.why { max-width: 38.75rem; margin: 0 auto 4.5rem; }
+.why p { color: var(--muted); font-size: 1.03125rem; }
+.why p:first-of-type { margin-top: 0; }
+.why em { color: var(--ink); font-style: italic; }
+
+/* docs */
+
+.docs { margin-bottom: 4.5rem; }
+.docs ul { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
+.docs li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 0.875rem;
+  align-items: baseline;
+  padding: 0.875rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+.docs li a { font-size: 0.9375rem; }
+.docs li span { color: var(--faint); font-size: 0.84375rem; }
+
+/* footer */
+
+.foot-inner {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1.375rem;
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 1.625rem 2.25rem 2.875rem;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+.foot-inner a { color: var(--faint); }
+.foot-inner a:hover { color: var(--ink); }
+.foot-inner .end { margin-left: auto; }
+
+@media (max-width: 775px) {
+  .nav-links a[href="#how"] { display: none; }
+  .hero { padding: 2rem 0 2.875rem; }
+  .foot-inner .end { margin-left: 0; }
+}
+
+/* ---------------------------------------------------------------------------
+   The annotations draw themselves in on load: the caret and the four marks are
+   strokes, so they paint along their own path. pathLength="1" on every path
+   means the dash offset is a plain 1 -> 0 and no length has to be measured.
+
+   CSS-only and un-triggered, so it runs on first paint with no JS and can't
+   leave anything invisible if a script fails. Everything lands inside ~2.4s.
+   --------------------------------------------------------------------------- */
+
+@keyframes ink-draw { to { stroke-dashoffset: 0; } }
+.caret path,
+.tree u path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation-name: ink-draw;
+  animation-fill-mode: forwards;
+}
+/* A short beat of stillness first, so the page is read before it's marked up. */
+.caret path {
+  animation-duration: 0.12s;
+  /* A pen doesn't hesitate at the start of a stroke, so this leaves the gate at
+     speed and only settles at the end — the old ease-in-out crept in and out,
+     which is what read as wrong for a drawn mark. */
+  animation-timing-function: cubic-bezier(0.18, 0.85, 0.3, 1);
+}
+/* The main stroke, then the pen lifts and retraces, then the flick past the apex.
+   Each one starts after the last has landed — an overlap reads as one smeared
+   gesture rather than as separate strokes. */
+.caret .s1 {
+  animation-delay: 0.20s;
+  /* The apex is a corner, and a hand slows into a corner and accelerates out of
+     it: ~2x speed off the line, ~0.6x through the middle of the V, fast again on
+     the way down. A single ease can't say that; this S-curve can. */
+  animation-timing-function: cubic-bezier(0.08, 0.5, 0.92, 0.5);
+}
+/* Down the way it came up, like the underlines' retrace — a negative dash offset
+   reverses it. Faster than the first pass, because a retrace always is. */
+.caret .s2 {
+  animation-delay: 0.37s;
+  animation-duration: 0.08s;
+  stroke-dashoffset: -1;
+}
+.caret .s3 {
+  animation-delay: 0.50s;
+  animation-duration: 0.06s;
+  animation-timing-function: cubic-bezier(0.1, 0.9, 0.4, 1); /* a flick leaves fast */
+}
+
+/* Each item is underlined twice, and a double underline is two strokes, not one
+   thick one: the first pass lands, the pen lifts for 60ms, then the retrace goes
+   back the other way — right to left, the way a hand returns. A negative dash
+   offset is what reverses it; the keyframe only names its end state, so each path
+   animates from whichever offset it starts at. */
+.tree u path {
+  animation-duration: 0.15s;
+  animation-timing-function: ease-in-out;
+}
+.tree u .p2 {
+  stroke-dashoffset: -1;
+  animation-duration: 0.11s;
+}
+
+/* Reading order of the phrase, one item at a time: the retrace starts after the
+   first pass has landed, and the next item waits for the retrace. No two items
+   share a tempo — stroke length, the lift between the two, and the pause before
+   the next all vary, because a hand that repeated itself exactly would read as a
+   loop. The last mark lands at ~2.4s. */
+.tree .u1 .p1 { animation-delay: 0.90s; }
+.tree .u1 .p2 { animation-delay: 1.10s; }                            /* 50ms lift */
+.tree .u2 .p1 { animation-delay: 1.27s; animation-duration: 0.14s; }
+.tree .u2 .p2 { animation-delay: 1.49s; animation-duration: 0.10s; } /* 80ms */
+.tree .u3 .p1 { animation-delay: 1.66s; animation-duration: 0.16s; }
+.tree .u3 .p2 { animation-delay: 1.88s; animation-duration: 0.12s; } /* 60ms */
+.tree .u4 .p1 { animation-delay: 2.06s; }
+.tree .u4 .p2 { animation-delay: 2.30s; }                            /* 90ms */
+
+@media (prefers-reduced-motion: reduce) {
+  .caret path,
+  .tree u path,
+  /* Both retraces outrank the bare `path` selectors above, so they need naming
+     here or their reversed -1 offset survives and leaves the stroke hidden. */
+  .caret .s2,
+  .tree u .p2 {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+}

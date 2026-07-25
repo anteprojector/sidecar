@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import {
   DEFAULT_INBOX,
@@ -27,7 +27,12 @@ import {
   ignoreEntryForSidecarPath,
   removeIgnoreEntry,
   removeLegacyGitHooks,
+  lastLines,
+  parseGitHubRemote,
+  formatLocalTimestamp,
+  formatRelativeTime,
 } from "../src/cli.js";
+import { colorLevel, paint, stripColor } from "../src/color.js";
 import { redactText } from "../src/redaction.js";
 
 const tempRoots: string[] = [];
@@ -440,6 +445,150 @@ describe("conflict forking", () => {
     expect(JSON.stringify(manifest)).not.toContain("content_base64");
     expect(manifest.paths[0].versions[0]).toHaveProperty("sha256");
     expect(manifest.paths[0].versions[0]).toHaveProperty("path");
+  });
+});
+
+describe("lastLines", () => {
+  test("returns the trailing lines with a final newline", () => {
+    expect(lastLines("a\nb\nc\n", 2)).toBe("b\nc\n");
+  });
+
+  test("handles content without a trailing newline", () => {
+    expect(lastLines("a\nb\nc", 2)).toBe("b\nc\n");
+  });
+
+  test("returns everything when the limit exceeds the line count", () => {
+    expect(lastLines("a\nb\n", 50)).toBe("a\nb\n");
+  });
+
+  test("returns empty output for empty content", () => {
+    expect(lastLines("", 50)).toBe("");
+    expect(lastLines("\n", 50)).toBe("");
+  });
+});
+
+describe("parseGitHubRemote", () => {
+  test("parses ssh remotes", () => {
+    expect(parseGitHubRemote("git@github.com:org/repo.git")).toEqual({ owner: "org", repo: "repo" });
+    expect(parseGitHubRemote("git@github.com:org/repo")).toEqual({ owner: "org", repo: "repo" });
+  });
+
+  test("parses https and ssh-url remotes", () => {
+    expect(parseGitHubRemote("https://github.com/org/repo.git")).toEqual({ owner: "org", repo: "repo" });
+    expect(parseGitHubRemote("https://github.com/org/repo")).toEqual({ owner: "org", repo: "repo" });
+    expect(parseGitHubRemote("ssh://git@github.com/org/repo.git")).toEqual({ owner: "org", repo: "repo" });
+  });
+
+  test("rejects non-github remotes", () => {
+    expect(parseGitHubRemote("git@gitlab.com:org/repo.git")).toBeUndefined();
+    expect(parseGitHubRemote("/local/path/repo.git")).toBeUndefined();
+  });
+});
+
+describe("status color", () => {
+  const keys = ["NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "TERM", "COLORTERM"];
+  const saved = new Map<string, string | undefined>();
+
+  beforeEach(() => {
+    for (const key of keys) {
+      saved.set(key, process.env[key]);
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of keys) {
+      const value = saved.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  test("stays off for piped output so `status | grep` sees no escapes", () => {
+    expect(colorLevel({ isTTY: undefined })).toBe(0);
+    expect(paint("brand", "sidecar", colorLevel({ isTTY: undefined }))).toBe("sidecar");
+  });
+
+  test("honors NO_COLOR and FORCE_COLOR=0 even on a tty", () => {
+    process.env.NO_COLOR = "1";
+    expect(colorLevel({ isTTY: true })).toBe(0);
+    delete process.env.NO_COLOR;
+    process.env.FORCE_COLOR = "0";
+    expect(colorLevel({ isTTY: true })).toBe(0);
+  });
+
+  test("FORCE_COLOR overrides a non-tty, TERM=dumb does not color", () => {
+    process.env.FORCE_COLOR = "1";
+    expect(colorLevel({ isTTY: undefined })).toBeGreaterThan(0);
+    delete process.env.FORCE_COLOR;
+    process.env.TERM = "dumb";
+    expect(colorLevel({ isTTY: true })).toBe(0);
+  });
+
+  test("picks the widest palette the terminal advertises", () => {
+    process.env.COLORTERM = "truecolor";
+    expect(colorLevel({ isTTY: true })).toBe(3);
+    delete process.env.COLORTERM;
+    process.env.TERM = "xterm-256color";
+    expect(colorLevel({ isTTY: true })).toBe(2);
+    process.env.TERM = "vt100";
+    expect(colorLevel({ isTTY: true })).toBe(1);
+  });
+
+  test("brand yellow degrades from truecolor to 256 to basic", () => {
+    expect(paint("brand", "x", 3)).toBe("\x1b[38;2;255;198;30mx\x1b[0m");
+    expect(paint("brand", "x", 2)).toBe("\x1b[38;5;214mx\x1b[0m");
+    expect(paint("brand", "x", 1)).toBe("\x1b[33mx\x1b[0m");
+  });
+
+  test("the repo purple degrades to 256 and then to magenta", () => {
+    expect(paint("repo", "x", 3)).toBe("\x1b[38;2;139;92;246mx\x1b[0m");
+    expect(paint("repo", "x", 2)).toBe("\x1b[38;5;99mx\x1b[0m");
+    expect(paint("repo", "x", 1)).toBe("\x1b[35mx\x1b[0m");
+  });
+
+  test("attention is the brand yellow bolded, so it reads against the path", () => {
+    expect(paint("attn", "yes", 2)).toBe("\x1b[1;38;5;214myes\x1b[0m");
+    expect(paint("ok", "running", 2)).toBe("\x1b[32mrunning\x1b[0m");
+    expect(paint("bad", "stopped", 2)).toBe("\x1b[31mstopped\x1b[0m");
+    expect(paint("label", "dirty:", 2)).toBe("\x1b[2mdirty:\x1b[0m");
+  });
+
+  test("stripColor undoes painting", () => {
+    expect(stripColor(paint("attn", "2", 3))).toBe("2");
+  });
+});
+
+describe("relative timestamps", () => {
+  const now = Date.parse("2026-07-25T12:00:00.000Z");
+  const ago = (ms: number): string | undefined =>
+    formatRelativeTime(new Date(now - ms).toISOString(), now);
+
+  test("floors so it never overstates the age", () => {
+    expect(ago(0)).toBe("just now");
+    expect(ago(44_000)).toBe("just now");
+    expect(ago(60_000)).toBe("1 minute ago");
+    expect(ago(119_000)).toBe("1 minute ago");
+    expect(ago(4 * 60_000)).toBe("4 minutes ago");
+    expect(ago(90 * 60_000)).toBe("1 hour ago");
+    expect(ago(26 * 3_600_000)).toBe("1 day ago");
+    expect(ago(30 * 86_400_000)).toBe("4 weeks ago");
+    expect(ago(70 * 86_400_000)).toBe("2 months ago");
+    expect(ago(800 * 86_400_000)).toBe("2 years ago");
+  });
+
+  test("reads a clock-skewed future timestamp as just now", () => {
+    expect(ago(-30_000)).toBe("just now");
+    expect(ago(-86_400_000)).toBe("just now");
+  });
+
+  test("returns undefined for unparseable input", () => {
+    expect(formatRelativeTime("not a date", now)).toBeUndefined();
+    expect(formatLocalTimestamp("not a date")).toBeUndefined();
+  });
+
+  test("formats local wall-clock time to the minute", () => {
+    expect(formatLocalTimestamp(new Date(now).toISOString())).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
   });
 });
 

@@ -1,0 +1,12 @@
+{
+  "name": "marketing",
+  "private": true,
+  "description": "The sidecar landing page, branding art, and their build scripts.",
+  "type": "module",
+  "scripts": {
+    "serve": "node scripts/serve-site.mjs --root site",
+    "stamp-stars": "node scripts/stamp-stars.mjs",
+    "favicon": "python3 scripts/make-favicon.py && python3 scripts/make-favicon.py --variants",
+    "readme-hero": "python3 scripts/make-readme-hero-masks.py && node scripts/make-readme-hero-svg.mjs"
+  }
+}

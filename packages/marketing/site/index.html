@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sidecar — a child repo for your repo</title>
+<meta name="description" content="A gitignored, auto-synced child repo inside your repo. Give your agents a scratchpad that's always up to date and never causes a merge conflict.">
+<link rel="icon" href="./assets/favicon.svg" type="image/svg+xml">
+<link rel="alternate icon" href="./assets/favicon.png" sizes="512x512">
+<link rel="stylesheet" href="./style.css">
+<meta name="color-scheme" content="light dark">
+<script>
+  // Applied before first paint so the theme never flashes. Yellow is the
+  // default; only an explicit "system" choice defers to prefers-color-scheme.
+  try {
+    var t = localStorage.getItem('theme');
+    if (t === 'light' || t === 'dark' || t === 'yellow') document.documentElement.dataset.theme = t;
+    else if (t !== 'system') document.documentElement.dataset.theme = 'yellow';
+  } catch (e) {
+    document.documentElement.dataset.theme = 'yellow';
+  }
+</script>
+
+<meta property="og:title" content="sidecar — a child repo for your repo">
+<meta property="og:description" content="Gitignored, auto-synced, shared with your team. Give your agents a scratchpad that's always up to date and never causes a merge conflict.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://anteprojector.github.io/sidecar/assets/logo.png">
+<meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+
+<!-- Wobbles the ink of the caret and the handwritten note. Because the
+     displacement varies with position, repeated letters distort differently —
+     which is what stops the annotation reading as a typeface. -->
+<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <filter id="ink" x="-20%" y="-20%" width="140%" height="140%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.045 0.09" numOctaves="3" seed="7" result="n"/>
+    <feDisplacementMap in="SourceGraphic" in2="n" scale="2.4" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+  <!-- The caret is only ~30px wide, so it needs a much higher frequency than the
+       note: at 0.045 the noise barely changes across the mark and just shifts it. -->
+  <filter id="ink-rough" x="-35%" y="-35%" width="170%" height="170%">
+    <feTurbulence type="fractalNoise" baseFrequency="0.19 0.26" numOctaves="3" seed="11" result="n"/>
+    <feDisplacementMap in="SourceGraphic" in2="n" scale="0.9" xChannelSelector="R" yChannelSelector="G"/>
+  </filter>
+</svg>
+
+<header class="nav">
+  <div class="nav-inner">
+    <a class="nav-brand" href="./">
+      <span>sidecar</span>
+    </a>
+    <nav class="nav-links">
+      <a href="#how">Why</a>
+      <a href="#docs">Docs</a>
+      <a href="https://github.com/anteprojector/sidecar">GitHub</a>
+      <!-- Fixed-size box: the ink drop slides right on hover to uncover the icon
+           for the current theme, so the control never changes the space it takes. -->
+      <button class="theme" type="button" data-mode="system" aria-label="Theme: system">
+        <svg class="i-system" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="9" rx="1"/><path d="M5.5 14h5"/></svg>
+        <svg class="i-light" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.1"/><path d="M8 .9v1.8M8 13.3v1.8M15.1 8h-1.8M2.7 8H.9M13 3l-1.3 1.3M4.3 11.7 3 13M13 13l-1.3-1.3M4.3 4.3 3 3"/></svg>
+        <svg class="i-dark" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.6A6 6 0 1 1 6.4 2.5a4.8 4.8 0 0 0 7.1 7.1Z"/></svg>
+        <svg class="i-yellow" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.6c2.7 3 4.4 5.2 4.4 7.1a4.4 4.4 0 0 1-8.8 0c0-1.9 1.7-4.1 4.4-7.1Z"/></svg>
+        <svg class="i-drop" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.6c2.7 3 4.4 5.2 4.4 7.1a4.4 4.4 0 0 1-8.8 0c0-1.9 1.7-4.1 4.4-7.1Z"/></svg>
+      </button>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<section class="hero">
+  <!-- The band lives on the wrapper, not the image: the image carries the
+       invert filter for dark mode, which would flip its own background too. -->
+  <span class="hero-mark"><span class="mark" role="img" aria-label="sidecar"></span></span>
+  <h1 aria-label="a child repo (not a submodule) for your repo">a child repo<span class="insert"><svg class="caret" viewBox="0 0 52 32" aria-hidden="true"><path class="s1" pathLength="1" d="M2 29.2 8.6 24.8 15 20.2 21.6 15.9 28 11.2 34.2 7.1 37.8 4.2 40.1 8.5 42.3 14.1 44.7 19.3 46.7 24.7 48.3 29.6"/><path class="s2" pathLength="1" d="M7 29.4 14.2 25.2 21.4 20.8 28.4 16.2 34 11.4 36.8 7.8"/><path class="s3" pathLength="1" d="M35.4 6.2 42 0.8"/></svg><span class="note" aria-hidden="true"><i>n</i><i>o</i><i>t</i> <i>a</i> <i>s</i><i>u</i><i>b</i><i>m</i><i>o</i><i>d</i><i>u</i><i>l</i><i>e</i></span></span> for your repo</h1>
+  <div class="tree">
+    <b class="t-root">your-repo/</b>
+    <b>├─ .sidecar</b><span># committed config</span>
+    <b>└─ sidecar/</b><span># <u class="u1">gitignored<svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><path class="p1" pathLength="1" d="M-1.5 3.1C14 4.6 28 5.1 44 4.3 58 3.6 76 4.9 101 3.5"/><path class="p2" pathLength="1" d="M3.5 4.9C18 6.5 33 6 47 5.3 61 4.3 79 6.4 96 5.2"/></svg></u>, <u class="u2">shared<svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><path class="p1" pathLength="1" d="M-1 4.7C16 3.1 38 2.8 58 3.6 76 4.3 88 4 100.5 4.8"/><path class="p2" pathLength="1" d="M2.5 6.4C18 4.8 36 3.9 57 5.2 74 6.1 90 5.1 102.5 6.5"/></svg></u>, <u class="u3">auto-synced<svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><path class="p1" pathLength="1" d="M0.5 2.8C18 4.5 30 5.3 47 4.6 63 4 78 5.4 100.8 4.9"/><path class="p2" pathLength="1" d="M-2 4.4C16 6.3 33 6.7 49 5.5 65 4.7 81 6.8 97 6.2"/></svg></u>, <u class="u4">no merge conflicts<svg viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><path class="p1" pathLength="1" d="M-1 5C12 3.3 26 2.9 41 3.7 55 4.4 70 3 84 3.4 92 3.7 96 2.8 101 3.1"/><path class="p2" pathLength="1" d="M2 6.5C14 4.8 29 4.4 44 5.5 58 6.2 72 4.5 87 5 95 5.4 99 4.3 103.5 4.7"/></svg></u></span>
+  </div>
+
+  <div class="steps">
+    <button class="step" type="button" data-copy>
+      <span class="step-body">
+        <span class="step-label">Install</span>
+        <code>npm i -g @projectors/sidecar</code>
+      </span>
+      <span class="step-act">
+        <span class="vh">Copy</span>
+        <svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+        <svg class="i-done" viewBox="0 0 24 24" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg>
+      </span>
+    </button>
+
+    <button class="step" type="button" data-copy>
+      <span class="step-body">
+        <span class="step-label">Setup</span>
+        <code>cd your-repo &amp;&amp; sidecar init</code>
+      </span>
+      <span class="step-act">
+        <span class="vh">Copy</span>
+        <svg class="i-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
+        <svg class="i-done" viewBox="0 0 24 24" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg>
+      </span>
+    </button>
+
+    <a class="step" href="https://github.com/anteprojector/sidecar">
+      <span class="step-body">
+        <span class="step-label">GitHub</span>
+        <code>Star on GitHub</code>
+      </span>
+      <span class="step-act step-stars">
+        <svg class="i-star" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.9 6 6.5.9-4.7 4.6 1.1 6.5L12 17.9 6.2 21l1.1-6.5L2.6 9.9 9.1 9z"/></svg>
+        <!-- Stamped at build by scripts/stamp-stars.mjs; refreshed client-side
+             by main.js at most once an hour per visitor. -->
+        <span class="count" data-stars>1</span>
+        <span class="vh">stars</span>
+      </span>
+    </a>
+  </div>
+
+  <!-- Direct hero child, not part of .steps: its auto margin and the one on
+       .steps split the fold's leftover height equally above and below the
+       button set. -->
+  <p class="req">Requires Node.js 20+ and git.</p>
+</section>
+
+<section class="features">
+  <p class="label">What you get</p>
+  <div class="grid">
+    <article class="feature">
+      <span class="num">01</span>
+      <h3>It's just git</h3>
+      <p>The scratchpad is a normal repo you own — clone it, grep it, read it on GitHub, delete it if you want out.</p>
+    </article>
+    <article class="feature">
+      <span class="num">02</span>
+      <h3>Zero merge conflicts</h3>
+      <p>Each machine writes to its own inbox branch; sidecar merges them so a sync never stops you to resolve anything.</p>
+    </article>
+    <article class="feature">
+      <span class="num">03</span>
+      <h3>Zero ceremony</h3>
+      <p>A background daemon watches for changes and syncs automatically. You never commit, pull, or push it by hand.</p>
+    </article>
+    <article class="feature">
+      <span class="num">04</span>
+      <h3>Found by default</h3>
+      <p>It lives inside your working tree, so agents and tools pick it up with no configuration at all.</p>
+    </article>
+  </div>
+</section>
+
+<section id="how" class="why">
+  <p class="label">Why</p>
+  <p>
+    Your agents' planning docs, research notes, and context files don't belong
+    in your code's history. They shouldn't reset when you switch branches or
+    worktrees, and the latest version is the only one that matters.
+  </p>
+  <p>
+    sidecar keeps them in a separate git repo that lives <em>inside</em> your
+    working tree — so agents and tools find them with zero configuration —
+    while a background daemon keeps every clone in sync.
+  </p>
+</section>
+
+<section class="box">
+  <div class="box-head"><span>terminal</span><span>sidecar status</span></div>
+<pre><code><span class="p">$</span> sidecar status
+<span class="l">main repo:    </span> <span class="m">~/dev/your-repo</span>
+<span class="l">sidecar path: </span> <span class="b">~/dev/your-repo/sidecar</span>
+<span class="l">remote:       </span> <span class="b">https://github.com/you/your-repo-sidecar.git</span>
+<span class="l">main branch:  </span> main
+<span class="l">inbox branch: </span> sidecar-inbox/zack/79ffcdaf92aa
+<span class="l">checkout:     </span> present
+<span class="l">branch:       </span> main
+<span class="l">dirty:        </span> <span class="q">no</span>
+<span class="l">daemon:       </span> <span class="g">running</span>
+<span class="l">last sync:    </span> 4 minutes ago <span class="q">(2026-07-25 11:58)</span>
+<span class="l">pending inbox:</span> <span class="q">none</span></code></pre>
+</section>
+
+<section id="docs" class="docs">
+  <p class="label">Docs</p>
+  <ul>
+    <li><a href="https://github.com/anteprojector/sidecar/blob/main/docs/sync.md">How syncing works</a><span>the daemon, inbox branches, conflict-free merging</span></li>
+    <li><a href="https://github.com/anteprojector/sidecar/blob/main/docs/editors.md">Editor search visibility</a><span>making gitignored files searchable</span></li>
+    <li><a href="https://github.com/anteprojector/sidecar/blob/main/docs/install.md">Global vs local installs</a><span>pinning sidecar per-repo</span></li>
+    <li><a href="https://github.com/anteprojector/sidecar/blob/main/docs/commands.md">All commands</a><span>the full CLI reference</span></li>
+  </ul>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="foot-inner">
+    <span>MIT</span>
+    <span>Node.js 20+</span>
+    <a href="https://www.npmjs.com/package/@projectors/sidecar">@projectors/sidecar</a>
+    <a class="end" href="https://github.com/anteprojector/sidecar">anteprojector/sidecar</a>
+  </div>
+</footer>
+
+<script src="./main.js"></script>
+<!-- Theme/font/favicon explorer (the corner paintbrush) — see the header of
+     explorer.js for what it does and how to retire it. Shipping in exploration
+     mode on purpose while the design settles. -->
+<script src="./explorer.js"></script>
+</body>
+</html>
