@@ -6,11 +6,13 @@ Every command and flag the CLI accepts. The most common ones first:
 sidecar init               # set up or join sidecar in a repo; prompts for a
                            # remote, or creates one with gh, when .sidecar is absent
 sidecar init <remote>      # set up sidecar non-interactively with a known remote
+sidecar deinit             # remove files and configuration created by sidecar init
 sidecar status             # show checkout, daemon health, last sync, pending work
 sidecar sync               # snapshot, push, merge, and push canonical state
 sidecar snapshot           # commit local changes to the inbox branch, nothing else
 sidecar clone              # clone or update the configured sidecar repo
 sidecar merge --fork-files # merge inbox branches and preserve conflicts
+sidecar redactions         # preview what redaction changes on the next push
 sidecar instances          # list known local sidecar checkouts
 sidecar daemon status      # report daemon health, service state, settings paths
 sidecar daemon restart     # restart the background auto-sync process
@@ -32,6 +34,7 @@ With no remote and no config it prompts for a remote URL (or creates one with
 | `--path <dir>` | where the sidecar checkout lives (default `sidecar`) |
 | `--branch <name>` | canonical branch in the sidecar repo (default `main`) |
 | `--inbox <template>` | inbox branch template (default `sidecar-inbox/{user}/{random}`) |
+| `--redaction <mode>` | what gets redacted on push: `secrets+pii` (default), `secrets`, or `none` — see [redaction.md](redaction.md) |
 | `--no-clone` | write config and registration only; skip cloning |
 | `--no-bootstrap-main` | don't create the canonical branch on an empty remote |
 
@@ -42,6 +45,14 @@ and to make the checkout searchable in Zed. It never edits your
 `@projectors/sidecar` devDependency themselves (see
 [install.md](install.md)). When not attached to a terminal, every optional
 prompt defaults to no.
+
+### `sidecar deinit`
+
+Removes Sidecar from the current Git repository: the `.sidecar` config, the
+configured checkout, Sidecar-owned `.gitignore`, Git exclude, Zed search, and
+daemon registry entries. It preserves unrelated settings and does not touch
+`package.json` or installed dependencies. Outside a Git repository it warns,
+does nothing, and exits successfully.
 
 ### `sidecar status`
 
@@ -69,6 +80,12 @@ Commit local sidecar changes to the inbox branch without merging anything.
 Merge remote inbox branches into the canonical branch. A conflict stops the
 merge unless `--fork-files` is passed, which keeps every side as separate
 forked files. `--no-push` merges locally without pushing.
+
+### `sidecar redactions`
+
+Preview exactly what redaction changes: a per-file diff of local content
+against what is pushed, recomputed on demand from the working tree. See
+[redaction.md](redaction.md) for modes and the per-file opt-out pragma.
 
 ### `sidecar clone [--if-missing]`
 
@@ -113,6 +130,7 @@ You normally never run these; installers do.
 |---|---|
 | `sidecar set-install-source npm\|bun\|curl [--if-unset]` | record how the global executable was installed so the self-updater uses the matching channel; `--if-unset` keeps an existing record |
 | `sidecar register-install` | register the current repo with the global daemon (run by `init` and postinstall) |
+| `sidecar redact --mode=<mode>` | the git clean filter (stdin → redacted stdout); wired into the sidecar checkout automatically |
 
 ## Reading `sidecar status`
 

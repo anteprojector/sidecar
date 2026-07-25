@@ -39,6 +39,9 @@ while a background daemon keeps every clone in sync.
   You never commit, pull, or push it by hand.
 - **Found by default.** It lives inside your working tree, so agents and
   tools pick it up with no configuration at all.
+- **Secrets stay home.** Pasted API keys, tokens, and PII are redacted from
+  pushes while your local files stay untouched —
+  [how redaction works](docs/redaction.md).
 
 ## Quickstart
 
@@ -61,6 +64,7 @@ The daemon takes it from here. `sidecar status` shows what's happening;
 ## Learn more
 
 - [How syncing works](docs/sync.md) — the daemon, inbox branches, conflict-free merging
+- [Redaction](docs/redaction.md) — what's stripped from pushes, reviewing it, opting out
 - [Editor search visibility](docs/editors.md) — making gitignored files searchable
 - [Global vs local installs](docs/install.md) — pinning sidecar per-repo
 - [All commands](docs/commands.md)

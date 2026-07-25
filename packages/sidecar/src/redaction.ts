@@ -1,16 +1,50 @@
-const KEY_NAME_PATTERN = String.raw`[A-Za-z_][A-Za-z0-9_-]*`;
-// A quoted value runs to the matching close quote (backreferenced by group
-// number), so it may contain spaces, the other quote char, and escapes.
-const quotedValuePattern = (quoteGroup: number): string =>
-  String.raw`(?:\\.|(?!` + `\\${quoteGroup}` + String.raw`)[^\r\n])+`;
+export type RedactionMode = "none" | "secrets" | "secrets+pii";
 
-const QUOTED_KEY_SECRET_REGEX = new RegExp(
-  String.raw`(["'])(${KEY_NAME_PATTERN})\1(\s*:\s*)(["'])(${quotedValuePattern(4)})\4`,
-  "g",
+export const DEFAULT_REDACTION_MODE: RedactionMode = "secrets+pii";
+export const REDACTION_MODES: readonly RedactionMode[] = ["none", "secrets", "secrets+pii"];
+
+// Files carrying this marker near the top opt out of redaction entirely; the
+// local original is committed as-is.
+export const NO_REDACT_PRAGMA = "sidecar:no-redact";
+// Deep enough to clear the preamble a file may be obliged to open with — a
+// licence header, YAML front matter, an XML declaration, a shebang and module
+// docstring — so the marker can go where a reader would put it rather than
+// having to fight for line one. `split`'s limit stops the scan there, so the
+// window costs nothing on a large file.
+const PRAGMA_SCAN_LINES = 30;
+// The marker has to start its own line, but anything punctuation-like may lead
+// it: rather than enumerate comment syntaxes, allow a short run of non-word
+// characters, which is every leader in practice (# // /* <!-- ; * -- % " ! '
+// (* {- ::). Four is the width of `<!--`, the one that matters most here since
+// the notes these files hold are usually Markdown.
+//
+// Punctuation only, and never a word: that is what keeps prose from disarming
+// redaction by mentioning the marker. "see: sidecar:no-redact" and "the
+// sidecar:no-redact marker" both open on word characters and so do not match.
+// The asymmetry is deliberate — failing to recognise a marker only leaves
+// redaction on, while matching one by accident commits secrets in the clear.
+const NO_REDACT_PRAGMA_REGEX = new RegExp(
+  String.raw`^\s*[^\w\s]{0,4}\s*${NO_REDACT_PRAGMA}\b`,
 );
 
-const QUOTED_ASSIGNMENT_SECRET_REGEX = new RegExp(
-  String.raw`\b(${KEY_NAME_PATTERN})(\s*[:=]\s*)(["'])(${quotedValuePattern(3)})\3`,
+export function hasNoRedactPragma(text: string): boolean {
+  return text
+    .split(/\r\n|\r|\n/, PRAGMA_SCAN_LINES)
+    .some((line) => NO_REDACT_PRAGMA_REGEX.test(line));
+}
+
+// Digit-leading keys (2FA_TOKEN) are as sensitive as any other.
+const KEY_NAME_PATTERN = String.raw`[A-Za-z0-9_][A-Za-z0-9_-]*`;
+// `key: "value"`, `key='value'`, and `"key": "value"` in one pattern: the key
+// quote is optional (a word boundary otherwise), and the quoted value runs to
+// the matching close quote, so it may contain spaces, the other quote char,
+// and escapes.
+const QUOTED_SECRET_REGEX = new RegExp(
+  String.raw`(?:(?<keyQuote>["'])|\b)(?<key>${KEY_NAME_PATTERN})\k<keyQuote>` +
+    // The escape branch is the only one that can consume a backslash, so the
+    // alternation is unambiguous — an unterminated value can't trigger
+    // exponential backtracking.
+    String.raw`(?<separator>\s*[:=]\s*)(?<valueQuote>["'])(?:\\[^\r\n]|(?!\k<valueQuote>)[^\\\r\n])+\k<valueQuote>`,
   "g",
 );
 
@@ -19,7 +53,7 @@ const BARE_ASSIGNMENT_SECRET_REGEX = new RegExp(
   "g",
 );
 
-const AUTHORIZATION_HEADER_REGEX = /\b(authorization\s*:\s*(?:bearer|basic|token)\s+)([^\s"',;`]+)/gi;
+const AUTHORIZATION_HEADER_REGEX = /\b(authorization\s*[:=]\s*(?:bearer|basic|token)\s+)([^\s"',;`]+)/gi;
 const PEM_PRIVATE_KEY_REGEX =
   /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g;
 const URL_CREDENTIALS_REGEX = /(\/\/[^\s/:@"'`]+):([^\s/@"'`]+)@/g;
@@ -42,31 +76,23 @@ const PHONE_REGEX = /\b(?:\+?1[-.\s]?)?(?:\(\d{3}\)\s?|\d{3}[-.\s])\d{3}[-.\s]\d
 const SSN_REGEX = /\b\d{3}-\d{2}-\d{4}\b/g;
 const CREDIT_CARD_CANDIDATE_REGEX = /\b(?:\d[ -]*?){13,19}\b/g;
 
-export function redactText(input: string): string {
+export function redactText(input: string, mode: RedactionMode = DEFAULT_REDACTION_MODE): string {
+  if (mode === "none") return input;
   let output = input
     .replace(PEM_PRIVATE_KEY_REGEX, "<PRIVATEKEY>")
     .replace(AUTHORIZATION_HEADER_REGEX, (_match, prefix: string) => `${prefix}<TOKEN>`)
     .replace(BARE_BEARER_TOKEN_REGEX, (_match, prefix: string) => `${prefix}<TOKEN>`)
     .replace(URL_CREDENTIALS_REGEX, (_match, prefix: string) => `${prefix}:<SECRET>@`)
-    .replace(
-      QUOTED_KEY_SECRET_REGEX,
-      (
-        match,
-        keyQuote: string,
-        key: string,
-        separator: string,
-        valueQuote: string,
-        _value: string,
-      ) =>
-        isSensitiveKey(key)
-          ? `${keyQuote}${key}${keyQuote}${separator}${valueQuote}${placeholderForKey(key)}${valueQuote}`
-          : match,
-    )
-    .replace(
-      QUOTED_ASSIGNMENT_SECRET_REGEX,
-      (match, key: string, separator: string, quote: string) =>
-        isSensitiveKey(key) ? `${key}${separator}${quote}${placeholderForKey(key)}${quote}` : match,
-    )
+    .replace(QUOTED_SECRET_REGEX, (match, ...args) => {
+      const { keyQuote = "", key, separator, valueQuote } = args.at(-1) as {
+        keyQuote?: string;
+        key: string;
+        separator: string;
+        valueQuote: string;
+      };
+      if (!isSensitiveKey(key)) return match;
+      return `${keyQuote}${key}${keyQuote}${separator}${valueQuote}${placeholderForKey(key)}${valueQuote}`;
+    })
     .replace(
       BARE_ASSIGNMENT_SECRET_REGEX,
       (match, key: string, separator: string) =>
@@ -76,6 +102,7 @@ export function redactText(input: string): string {
   for (const [pattern, replacement] of TOKEN_PATTERNS) {
     output = output.replace(pattern, replacement);
   }
+  if (mode === "secrets") return output;
 
   return output
     .replace(EMAIL_REGEX, "<EMAIL>")
@@ -86,35 +113,44 @@ export function redactText(input: string): string {
     );
 }
 
+const PLACEHOLDER_REGEX = /<(?:API_KEY|TOKEN|SECRET|PRIVATEKEY|EMAIL|PHONENUMBER|SSN|CREDITCARD)>/g;
+
+export function countRedactionPlaceholders(text: string): number {
+  return text.match(PLACEHOLDER_REGEX)?.length ?? 0;
+}
+
 function placeholderForKey(key: string): string {
   if (/api[_-]?key/i.test(key)) return "<API_KEY>";
   if (/password|passwd|pwd|passphrase|secret|private/i.test(key)) return "<SECRET>";
   return "<TOKEN>";
 }
 
+const COMPACT_SENSITIVE_KEYS = new Set([
+  "apikey",
+  "accesstoken",
+  "refreshtoken",
+  "idtoken",
+  "authtoken",
+  "githubtoken",
+  "bearertoken",
+  "clientsecret",
+  "credential",
+  "credentials",
+  "secretkey",
+  "privatekey",
+  "password",
+  "passwd",
+  "pwd",
+  "passphrase",
+  "token",
+  "secret",
+]);
+
 function isSensitiveKey(key: string): boolean {
   const normalized = key.replace(/-/g, "_");
   const lower = normalized.toLowerCase();
   const compact = lower.replace(/_/g, "");
-  const compactSensitive = new Set([
-    "apikey",
-    "accesstoken",
-    "refreshtoken",
-    "idtoken",
-    "authtoken",
-    "githubtoken",
-    "bearertoken",
-    "clientsecret",
-    "secretkey",
-    "privatekey",
-    "password",
-    "passwd",
-    "pwd",
-    "passphrase",
-    "token",
-    "secret",
-  ]);
-  if (compactSensitive.has(compact)) return true;
+  if (COMPACT_SENSITIVE_KEYS.has(compact)) return true;
 
   const parts = normalized
     .toUpperCase()

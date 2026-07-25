@@ -21,11 +21,26 @@
   }
 </script>
 
+<!-- Absolute URLs throughout: a crawler resolves these against its own copy of
+     the page, so a relative path would break the moment anyone mirrors it. -->
+<link rel="canonical" href="https://anteprojector.github.io/sidecar/">
+<meta name="theme-color" content="#ffe9a3">
+
 <meta property="og:title" content="sidecar — a child repo for your repo">
 <meta property="og:description" content="Gitignored, auto-synced, shared with your team. Give your agents a scratchpad that's always up to date and never causes a merge conflict.">
 <meta property="og:type" content="website">
-<meta property="og:image" content="https://anteprojector.github.io/sidecar/assets/logo.png">
+<meta property="og:url" content="https://anteprojector.github.io/sidecar/">
+<meta property="og:site_name" content="sidecar">
+<meta property="og:locale" content="en_US">
+<!-- Built by scripts/og-card.html. The dimensions are declared so a scraper can
+     reserve the 1.91:1 box before the image itself arrives. -->
+<meta property="og:image" content="https://anteprojector.github.io/sidecar/assets/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="sidecar — a child repo for your repo. Install with npm i -g @projectors/sidecar.">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image:alt" content="sidecar — a child repo for your repo. Install with npm i -g @projectors/sidecar.">
 </head>
 <body>
 

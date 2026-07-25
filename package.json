@@ -8,6 +8,7 @@
   "scripts": {
     "build": "bun run --cwd packages/sidecar build",
     "check": "bun run --cwd packages/sidecar check",
+    "dev": "bun run --filter '*' dev",
     "test": "bun run --cwd packages/sidecar test",
     "site": "bun run --cwd packages/marketing serve"
   },

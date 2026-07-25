@@ -35,6 +35,7 @@ import {
   hasZedInclusion,
   ignoreEntryForSidecarPath,
   removeIgnoreEntry,
+  removeZedInclusion,
   removeLegacyGitHooks,
   lastLines,
   parseGitHubRemote,
@@ -42,7 +43,7 @@ import {
   formatRelativeTime,
 } from "../src/cli.js";
 import { colorLevel, paint, stripColor } from "../src/color.js";
-import { redactText } from "../src/redaction.js";
+import { hasNoRedactPragma, redactText } from "../src/redaction.js";
 
 const tempRoots: string[] = [];
 
@@ -149,6 +150,24 @@ describe("config", () => {
     fs.writeFileSync(settingsPath, jsonc, "utf8");
     expect(ensureZedInclusion(root, "sidecar")).toBe(false);
     expect(fs.readFileSync(settingsPath, "utf8")).toBe(jsonc);
+  });
+
+  test("removes only the sidecar Zed inclusion", () => {
+    const root = tempDir();
+    const settingsPath = path.join(root, ".zed", "settings.json");
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({ theme: "One Dark", file_scan_inclusions: [".env*", "sidecar/**", "docs/**"] }, null, 2),
+      "utf8",
+    );
+
+    removeZedInclusion(root, "sidecar");
+
+    expect(JSON.parse(fs.readFileSync(settingsPath, "utf8"))).toEqual({
+      theme: "One Dark",
+      file_scan_inclusions: [".env*", "docs/**"],
+    });
   });
 
   test("does not produce ignore entries for sidecar paths outside the repo", () => {
@@ -444,6 +463,98 @@ describe("redaction", () => {
     expect(redacted).not.toContain("supersecret");
   });
 
+  test("mode 'secrets' redacts credentials but leaves PII alone", () => {
+    const input = [
+      "OPENAI_API_KEY=sk-test1234567890abcdef",
+      "email alice@example.com or 555-123-4567",
+    ].join("\n");
+
+    const redacted = redactText(input, "secrets");
+
+    expect(redacted).toContain("OPENAI_API_KEY=<API_KEY>");
+    expect(redacted).toContain("alice@example.com or 555-123-4567");
+  });
+
+  test("mode 'none' returns input verbatim", () => {
+    const input = "OPENAI_API_KEY=sk-test1234567890abcdef alice@example.com";
+    expect(redactText(input, "none")).toBe(input);
+  });
+
+  test("detects the no-redact pragma only in the first lines", () => {
+    expect(hasNoRedactPragma("<!-- sidecar:no-redact -->\nPASSWORD=hunter2\n")).toBe(true);
+    expect(hasNoRedactPragma("# sidecar:no-redact\n")).toBe(true);
+    expect(hasNoRedactPragma("// sidecar:no-redact extras\n")).toBe(true);
+    // Deep enough to sit under a licence header or front matter, and no deeper.
+    expect(hasNoRedactPragma(`${"filler\n".repeat(20)}sidecar:no-redact\n`)).toBe(true);
+    expect(hasNoRedactPragma(`${"filler\n".repeat(30)}sidecar:no-redact\n`)).toBe(false);
+  });
+
+  test("any punctuation leader introduces the pragma", () => {
+    for (const leader of ["#", "//", "///", "//!", "/*", " * ", ";;", "--", "%", '"', "!", "'", "(*", "{-", "::", "<!--"]) {
+      expect(hasNoRedactPragma(`${leader} sidecar:no-redact\n`)).toBe(true);
+    }
+    // Indented, as it would be inside a block comment or a nested mapping.
+    expect(hasNoRedactPragma("      # sidecar:no-redact\n")).toBe(true);
+  });
+
+  test("prose mentioning the pragma does not disable redaction", () => {
+    expect(hasNoRedactPragma("notes about sidecar:no-redact behavior\n")).toBe(false);
+    expect(hasNoRedactPragma("the sidecar:no-redact marker is neat\n")).toBe(false);
+    // A word before the marker is prose, however short and however punctuated.
+    expect(hasNoRedactPragma("see: sidecar:no-redact\n")).toBe(false);
+    expect(hasNoRedactPragma("1. sidecar:no-redact\n")).toBe(false);
+    expect(hasNoRedactPragma("Set sidecar:no-redact at the top\n")).toBe(false);
+  });
+
+  test("unterminated quoted values cannot trigger exponential backtracking", () => {
+    const hostile = `token: "${"\\".repeat(80)}X`;
+    const started = Date.now();
+    redactText(hostile);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  test("redaction is idempotent (machine B re-cleans already-redacted content)", () => {
+    const fixtures = [
+      'OPENAI_API_KEY=sk-test1234567890abcdef\npassword = "my secret phrase"',
+      "Authorization: Basic dXNlcjpwYXNz\npostgres://app:supersecret@db/prod",
+      "email alice@example.com or 555-123-4567\ncard: 4111 1111 1111 1111",
+      "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----",
+    ];
+    for (const fixture of fixtures) {
+      for (const mode of ["secrets", "secrets+pii"] as const) {
+        const once = redactText(fixture, mode);
+        expect(redactText(once, mode)).toBe(once);
+      }
+    }
+  });
+
+  test("redacts equals-form authorization and digit-leading keys", () => {
+    const redacted = redactText("Authorization=Bearer abc123short\n2FA_TOKEN=abcdef\n");
+    expect(redacted).toContain("Authorization=Bearer <TOKEN>");
+    expect(redacted).toContain("2FA_TOKEN=<TOKEN>");
+  });
+
+  test("commits pragma files verbatim", () => {
+    const repo = initRepo();
+    const content = "sidecar:no-redact\nGITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n";
+    fs.writeFileSync(path.join(repo, "raw.md"), content, "utf8");
+
+    snapshot(repo, repo, "sidecar-inbox/test/random");
+
+    expect(git(repo, ["show", "HEAD:raw.md"]).stdout).toBe(content);
+  });
+
+  test("mode 'none' configures a passthrough filter", () => {
+    const repo = initRepo();
+    ensureRedactionFilter(repo, "none");
+    expect(git(repo, ["config", "filter.sidecar-redact.clean"]).stdout.trim()).toBe("cat");
+
+    fs.writeFileSync(path.join(repo, "notes.md"), "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n", "utf8");
+    snapshot(repo, repo, "sidecar-inbox/test/random", undefined, "none");
+
+    expect(git(repo, ["show", "HEAD:notes.md"]).stdout).toContain("ghp_");
+  });
+
   test("commits redacted content while leaving the working tree untouched", () => {
     const repo = initRepo();
     const secret = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n";
@@ -473,12 +584,45 @@ describe("redaction", () => {
 
   test("configures the redaction filter idempotently", () => {
     const repo = initRepo();
-    ensureRedactionFilter(repo);
-    ensureRedactionFilter(repo);
+    expect(ensureRedactionFilter(repo)).toBe(true);
+    expect(ensureRedactionFilter(repo)).toBe(false);
 
     const attributes = fs.readFileSync(path.join(repo, ".git", "info", "attributes"), "utf8");
     expect(attributes.match(/filter=sidecar-redact/g)).toHaveLength(1);
     expect(git(repo, ["config", "filter.sidecar-redact.required"]).stdout.trim()).toBe("true");
+  });
+
+  test("repairs a lost attributes file instead of early-exiting on config alone", () => {
+    const repo = initRepo();
+    ensureRedactionFilter(repo);
+    fs.rmSync(path.join(repo, ".git", "info", "attributes"));
+
+    expect(ensureRedactionFilter(repo)).toBe(true);
+    const attributes = fs.readFileSync(path.join(repo, ".git", "info", "attributes"), "utf8");
+    expect(attributes).toContain("filter=sidecar-redact");
+  });
+
+  test("a mode change renormalizes already-committed files", () => {
+    const repo = initRepo();
+    const secret = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n";
+    fs.writeFileSync(path.join(repo, "notes.md"), secret, "utf8");
+    snapshot(repo, repo, "sidecar-inbox/test/random", undefined, "none");
+    expect(git(repo, ["show", "HEAD:notes.md"]).stdout).toBe(secret);
+
+    snapshot(repo, repo, "sidecar-inbox/test/random", undefined, "secrets+pii");
+
+    expect(git(repo, ["show", "HEAD:notes.md"]).stdout).toBe("GITHUB_TOKEN=<TOKEN>\n");
+    expect(fs.readFileSync(path.join(repo, "notes.md"), "utf8")).toBe(secret);
+  });
+
+  test("a broken filter command fails the snapshot instead of committing raw content", () => {
+    const repo = initRepo();
+    ensureRedactionFilter(repo);
+    fs.writeFileSync(path.join(repo, "notes.md"), "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n", "utf8");
+    git(repo, ["config", "filter.sidecar-redact.clean", "/nonexistent-filter"]);
+    // Bypass ensureRedactionFilter's self-heal to simulate a stale command
+    // mid-run: stage directly the way snapshot does.
+    expect(() => git(repo, ["add", "-A"])).toThrow();
   });
 });
 

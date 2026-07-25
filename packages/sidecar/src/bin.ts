@@ -12,7 +12,7 @@ const PACKAGE_NAME = "@projectors/sidecar";
 // Commands that mutate global state (launchd service, instance registry) must
 // execute in this global install, never in a project-local copy — a delegated
 // daemon command would write a launchd plist pointing at node_modules.
-const GLOBAL_ONLY_COMMANDS = new Set(["daemon", "register-install", "set-install-source", "update"]);
+const GLOBAL_ONLY_COMMANDS = new Set(["daemon", "deinit", "register-install", "set-install-source", "update"]);
 
 if (!process.env[SKIP_LOCAL_EXEC_ENV]) {
   const localExecutable = findLocalExecutable(process.cwd(), fileURLToPath(import.meta.url));

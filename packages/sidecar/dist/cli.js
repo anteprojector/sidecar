@@ -1052,12 +1052,27 @@ var init_color = __esm(() => {
 });
 
 // src/redaction.ts
-function redactText(input) {
-  let output = input.replace(PEM_PRIVATE_KEY_REGEX, "<PRIVATEKEY>").replace(AUTHORIZATION_HEADER_REGEX, (_match, prefix) => `${prefix}<TOKEN>`).replace(BARE_BEARER_TOKEN_REGEX, (_match, prefix) => `${prefix}<TOKEN>`).replace(URL_CREDENTIALS_REGEX, (_match, prefix) => `${prefix}:<SECRET>@`).replace(QUOTED_KEY_SECRET_REGEX, (match, keyQuote, key, separator, valueQuote, _value) => isSensitiveKey(key) ? `${keyQuote}${key}${keyQuote}${separator}${valueQuote}${placeholderForKey(key)}${valueQuote}` : match).replace(QUOTED_ASSIGNMENT_SECRET_REGEX, (match, key, separator, quote) => isSensitiveKey(key) ? `${key}${separator}${quote}${placeholderForKey(key)}${quote}` : match).replace(BARE_ASSIGNMENT_SECRET_REGEX, (match, key, separator) => isSensitiveKey(key) ? `${key}${separator}${placeholderForKey(key)}` : match);
+function hasNoRedactPragma(text) {
+  return text.split(/\r\n|\r|\n/, PRAGMA_SCAN_LINES).some((line) => NO_REDACT_PRAGMA_REGEX.test(line));
+}
+function redactText(input, mode = DEFAULT_REDACTION_MODE) {
+  if (mode === "none")
+    return input;
+  let output = input.replace(PEM_PRIVATE_KEY_REGEX, "<PRIVATEKEY>").replace(AUTHORIZATION_HEADER_REGEX, (_match, prefix) => `${prefix}<TOKEN>`).replace(BARE_BEARER_TOKEN_REGEX, (_match, prefix) => `${prefix}<TOKEN>`).replace(URL_CREDENTIALS_REGEX, (_match, prefix) => `${prefix}:<SECRET>@`).replace(QUOTED_SECRET_REGEX, (match, ...args) => {
+    const { keyQuote = "", key, separator, valueQuote } = args.at(-1);
+    if (!isSensitiveKey(key))
+      return match;
+    return `${keyQuote}${key}${keyQuote}${separator}${valueQuote}${placeholderForKey(key)}${valueQuote}`;
+  }).replace(BARE_ASSIGNMENT_SECRET_REGEX, (match, key, separator) => isSensitiveKey(key) ? `${key}${separator}${placeholderForKey(key)}` : match);
   for (const [pattern, replacement] of TOKEN_PATTERNS) {
     output = output.replace(pattern, replacement);
   }
+  if (mode === "secrets")
+    return output;
   return output.replace(EMAIL_REGEX, "<EMAIL>").replace(PHONE_REGEX, "<PHONENUMBER>").replace(SSN_REGEX, "<SSN>").replace(CREDIT_CARD_CANDIDATE_REGEX, (candidate) => isLikelyCreditCard(candidate) ? "<CREDITCARD>" : candidate);
+}
+function countRedactionPlaceholders(text) {
+  return text.match(PLACEHOLDER_REGEX)?.length ?? 0;
 }
 function placeholderForKey(key) {
   if (/api[_-]?key/i.test(key))
@@ -1070,25 +1085,7 @@ function isSensitiveKey(key) {
   const normalized = key.replace(/-/g, "_");
   const lower = normalized.toLowerCase();
   const compact = lower.replace(/_/g, "");
-  const compactSensitive = new Set([
-    "apikey",
-    "accesstoken",
-    "refreshtoken",
-    "idtoken",
-    "authtoken",
-    "githubtoken",
-    "bearertoken",
-    "clientsecret",
-    "secretkey",
-    "privatekey",
-    "password",
-    "passwd",
-    "pwd",
-    "passphrase",
-    "token",
-    "secret"
-  ]);
-  if (compactSensitive.has(compact))
+  if (COMPACT_SENSITIVE_KEYS.has(compact))
     return true;
   const parts = normalized.toUpperCase().split("_").filter(Boolean);
   const last = parts.at(-1);
@@ -1127,13 +1124,14 @@ function isLikelyCreditCard(value) {
   }
   return sum % 10 === 0;
 }
-var KEY_NAME_PATTERN, quotedValuePattern = (quoteGroup) => String.raw`(?:\\.|(?!` + `\\${quoteGroup}` + String.raw`)[^\r\n])+`, QUOTED_KEY_SECRET_REGEX, QUOTED_ASSIGNMENT_SECRET_REGEX, BARE_ASSIGNMENT_SECRET_REGEX, AUTHORIZATION_HEADER_REGEX, PEM_PRIVATE_KEY_REGEX, URL_CREDENTIALS_REGEX, BARE_BEARER_TOKEN_REGEX, TOKEN_PATTERNS, EMAIL_REGEX, PHONE_REGEX, SSN_REGEX, CREDIT_CARD_CANDIDATE_REGEX;
+var DEFAULT_REDACTION_MODE = "secrets+pii", REDACTION_MODES, NO_REDACT_PRAGMA = "sidecar:no-redact", PRAGMA_SCAN_LINES = 30, NO_REDACT_PRAGMA_REGEX, KEY_NAME_PATTERN, QUOTED_SECRET_REGEX, BARE_ASSIGNMENT_SECRET_REGEX, AUTHORIZATION_HEADER_REGEX, PEM_PRIVATE_KEY_REGEX, URL_CREDENTIALS_REGEX, BARE_BEARER_TOKEN_REGEX, TOKEN_PATTERNS, EMAIL_REGEX, PHONE_REGEX, SSN_REGEX, CREDIT_CARD_CANDIDATE_REGEX, PLACEHOLDER_REGEX, COMPACT_SENSITIVE_KEYS;
 var init_redaction = __esm(() => {
-  KEY_NAME_PATTERN = String.raw`[A-Za-z_][A-Za-z0-9_-]*`;
-  QUOTED_KEY_SECRET_REGEX = new RegExp(String.raw`(["'])(${KEY_NAME_PATTERN})\1(\s*:\s*)(["'])(${quotedValuePattern(4)})\4`, "g");
-  QUOTED_ASSIGNMENT_SECRET_REGEX = new RegExp(String.raw`\b(${KEY_NAME_PATTERN})(\s*[:=]\s*)(["'])(${quotedValuePattern(3)})\3`, "g");
+  REDACTION_MODES = ["none", "secrets", "secrets+pii"];
+  NO_REDACT_PRAGMA_REGEX = new RegExp(String.raw`^\s*[^\w\s]{0,4}\s*${NO_REDACT_PRAGMA}\b`);
+  KEY_NAME_PATTERN = String.raw`[A-Za-z0-9_][A-Za-z0-9_-]*`;
+  QUOTED_SECRET_REGEX = new RegExp(String.raw`(?:(?<keyQuote>["'])|\b)(?<key>${KEY_NAME_PATTERN})\k<keyQuote>` + String.raw`(?<separator>\s*[:=]\s*)(?<valueQuote>["'])(?:\\[^\r\n]|(?!\k<valueQuote>)[^\\\r\n])+\k<valueQuote>`, "g");
   BARE_ASSIGNMENT_SECRET_REGEX = new RegExp(String.raw`\b(${KEY_NAME_PATTERN})(\s*[:=]\s*)([^\s"',;` + "`" + String.raw`]+)`, "g");
-  AUTHORIZATION_HEADER_REGEX = /\b(authorization\s*:\s*(?:bearer|basic|token)\s+)([^\s"',;`]+)/gi;
+  AUTHORIZATION_HEADER_REGEX = /\b(authorization\s*[:=]\s*(?:bearer|basic|token)\s+)([^\s"',;`]+)/gi;
   PEM_PRIVATE_KEY_REGEX = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g;
   URL_CREDENTIALS_REGEX = /(\/\/[^\s/:@"'`]+):([^\s/@"'`]+)@/g;
   BARE_BEARER_TOKEN_REGEX = /\b(Bearer\s+)(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|[A-Za-z0-9._~+/-]{20,})\b/g;
@@ -1150,6 +1148,27 @@ var init_redaction = __esm(() => {
   PHONE_REGEX = /\b(?:\+?1[-.\s]?)?(?:\(\d{3}\)\s?|\d{3}[-.\s])\d{3}[-.\s]\d{4}\b/g;
   SSN_REGEX = /\b\d{3}-\d{2}-\d{4}\b/g;
   CREDIT_CARD_CANDIDATE_REGEX = /\b(?:\d[ -]*?){13,19}\b/g;
+  PLACEHOLDER_REGEX = /<(?:API_KEY|TOKEN|SECRET|PRIVATEKEY|EMAIL|PHONENUMBER|SSN|CREDITCARD)>/g;
+  COMPACT_SENSITIVE_KEYS = new Set([
+    "apikey",
+    "accesstoken",
+    "refreshtoken",
+    "idtoken",
+    "authtoken",
+    "githubtoken",
+    "bearertoken",
+    "clientsecret",
+    "credential",
+    "credentials",
+    "secretkey",
+    "privatekey",
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "token",
+    "secret"
+  ]);
 });
 
 // src/daemon.ts
@@ -1696,18 +1715,17 @@ import os from "node:os";
 import path2 from "node:path";
 import { spawn as spawn2, spawnSync } from "node:child_process";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
-import { TextDecoder } from "node:util";
 async function main(argv = process.argv.slice(2)) {
   try {
     const status = await run(argv);
     const command = argv[0];
-    if (command && shouldUseGlobalRegistry()) {
+    if (command && command !== "redact" && command !== "deinit" && shouldUseGlobalRegistry()) {
       logSidecarEvent("command", { command, status });
     }
     return status;
   } catch (error) {
     const command = argv[0] || "unknown";
-    if (shouldUseGlobalRegistry()) {
+    if (command !== "redact" && command !== "deinit" && shouldUseGlobalRegistry()) {
       logSidecarEvent("failure", {
         command,
         message: error instanceof Error ? error.message : String(error)
@@ -1739,6 +1757,8 @@ function run(argv) {
       return cmdInit(rest);
     case "clone":
       return cmdClone(rest);
+    case "deinit":
+      return cmdDeinit(rest);
     case "status":
       return cmdStatus(rest);
     case "instances":
@@ -1760,7 +1780,9 @@ function run(argv) {
     case "merge":
       return cmdMerge(rest);
     case "redact":
-      return cmdRedact();
+      return cmdRedact(rest);
+    case "redactions":
+      return cmdRedactions(rest);
     default:
       throw new SidecarError(`unknown command ${JSON.stringify(command)}`);
   }
@@ -1769,8 +1791,9 @@ function printUsage() {
   console.error(`usage: sidecar <command> [options]
 
 commands:
-  init [remote] [--path sidecar] [--branch main] [--inbox template]
+  init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii]
   clone [--if-missing]
+  deinit
   status
   instances
   daemon status|enable|disable|restart|autoupdate on|off|run [--once] [--interval seconds]
@@ -1779,15 +1802,53 @@ commands:
   snapshot [--push] [-m message]
   sync [--no-snapshot] [--soft] [-m message]
   merge [--fork-files] [--no-push]
+  redactions (preview what redaction changes before content is pushed)
   redact (git clean filter: stdin -> redacted stdout)`);
+}
+function cmdDeinit(args) {
+  if (args.length)
+    throw new SidecarError("usage: sidecar deinit");
+  const root = gitToplevelOptional(process.cwd());
+  if (!root) {
+    console.error("sidecar: warning: not inside a Git repository; nothing to remove");
+    return 0;
+  }
+  const configPath = path2.join(root, ".sidecar");
+  let configuredPath;
+  if (fs2.existsSync(configPath)) {
+    try {
+      configuredPath = readConfig(configPath).path;
+    } catch {
+      console.error(`sidecar: warning: could not read ${configPath}; remove the Sidecar checkout and ignore entries manually`);
+    }
+  } else {
+    console.error(`sidecar: warning: no .sidecar config found; remove any leftover checkout and ignore entries manually`);
+  }
+  fs2.rmSync(configPath, { force: true });
+  if (configuredPath) {
+    const checkoutPath = path2.resolve(root, configuredPath);
+    if (checkoutPath !== path2.resolve(root) && checkoutPath !== path2.parse(checkoutPath).root) {
+      fs2.rmSync(checkoutPath, { recursive: true, force: true });
+    }
+    const ignoreEntry = ignoreEntryForSidecarPath(root, configuredPath);
+    if (ignoreEntry) {
+      removeIgnoreEntry(path2.join(root, ".gitignore"), ignoreEntry);
+      removeIgnoreEntry(path2.join(gitCommonDir(root), "info", "exclude"), ignoreEntry);
+      removeZedInclusion(root, ignoreEntry);
+    }
+  }
+  removeLegacyGitHooks(root);
+  unregisterInstance(root);
+  console.log(`removed sidecar from ${root}`);
+  return 0;
 }
 function cmdInit(args) {
   const parsed = parseOptions(args, {
     boolean: new Set(["--no-clone", "--no-bootstrap-main"]),
-    value: new Set(["--path", "--branch", "--inbox"])
+    value: new Set(["--path", "--branch", "--inbox", "--redaction"])
   });
   if (parsed.positional.length > 1) {
-    throw new SidecarError("usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template]");
+    throw new SidecarError("usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction mode]");
   }
   const remote = parsed.positional[0];
   let existingRoot = remote ? undefined : findConfigRootOptional(process.cwd());
@@ -1795,7 +1856,7 @@ function cmdInit(args) {
   const configPath = path2.join(root, ".sidecar");
   if (remote && fs2.existsSync(configPath)) {
     const existing = readConfig(configPath);
-    const unchanged = existing.remote === remote && existing.path === getValue(parsed, "--path", DEFAULT_PATH) && existing.branch === getValue(parsed, "--branch", DEFAULT_BRANCH) && existing.inbox === getValue(parsed, "--inbox", DEFAULT_INBOX);
+    const unchanged = existing.remote === remote && existing.path === getValue(parsed, "--path", existing.path) && existing.branch === getValue(parsed, "--branch", existing.branch) && existing.inbox === getValue(parsed, "--inbox", existing.inbox) && existing.redaction === getValue(parsed, "--redaction", existing.redaction);
     if (unchanged || !promptOverwriteConfig(configPath, existing.remote, remote)) {
       existingRoot = root;
     }
@@ -1805,7 +1866,8 @@ function cmdInit(args) {
     version: 1,
     path: getValue(parsed, "--path", DEFAULT_PATH),
     branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
-    inbox: getValue(parsed, "--inbox", DEFAULT_INBOX)
+    inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
+    redaction: redactionModeConfigValue(getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE), "--redaction")
   };
   if (!existingRoot) {
     validateRemote(config.remote);
@@ -2367,7 +2429,7 @@ function cmdSnapshot(args) {
     const inbox = expandInbox(config, sidecarPath);
     ensureCommitIdentity(sidecarPath);
     ensureInboxBranch(sidecarPath, config, inbox);
-    const committed = snapshot(sidecarPath, root, inbox, getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined);
+    const committed = snapshot(sidecarPath, root, inbox, getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined, config.redaction);
     if (committed && parsed.flags.has("--push")) {
       syncBranchBeforePush(sidecarPath, inbox);
       pushBranch(sidecarPath, inbox);
@@ -2402,7 +2464,9 @@ function syncProject(root, config, options) {
   fetch(sidecarPath, true, false);
   ensureInboxBranch(sidecarPath, config, inbox);
   if (options.snapshot) {
-    snapshot(sidecarPath, root, inbox, options.message);
+    snapshot(sidecarPath, root, inbox, options.message, config.redaction);
+  } else {
+    ensureRedactionFilter(sidecarPath, config.redaction);
   }
   syncBranchBeforePush(sidecarPath, inbox);
   pushBranch(sidecarPath, inbox);
@@ -2427,6 +2491,7 @@ function cmdMerge(args) {
   }
   const [root, config] = loadProject();
   const sidecarPath = requireSidecarCheckout(root, config);
+  ensureRedactionFilter(sidecarPath, config.redaction);
   mergeInboxBranches(sidecarPath, config, {
     forkFiles: parsed.flags.has("--fork-files"),
     push: !parsed.flags.has("--no-push")
@@ -2436,12 +2501,20 @@ function cmdMerge(args) {
 function mergeInboxBranches(sidecarPath, config, options) {
   ensureClean(sidecarPath);
   ensureCommitIdentity(sidecarPath);
+  fetch(sidecarPath, false);
+  if (mainMatchesRemote(sidecarPath, config) && !hasPendingInboxWork(sidecarPath, config)) {
+    console.log("no inbox branches to merge");
+    return 0;
+  }
   const current = git(sidecarPath, ["branch", "--show-current"]).stdout.trim();
   if (!hasAnyCommit(sidecarPath) || current === config.branch) {
     return mergeInboxBranchesAt(sidecarPath, config, options);
   }
-  const scratch = fs2.mkdtempSync(path2.join(os.tmpdir(), "sidecar-merge-"));
+  const scratch = path2.join(os.tmpdir(), `sidecar-merge-${crypto.createHash("sha1").update(sidecarPath).digest("hex").slice(0, 12)}`);
   const worktree = path2.join(scratch, "checkout");
+  git(sidecarPath, ["worktree", "remove", "--force", worktree], { check: false });
+  fs2.rmSync(scratch, { recursive: true, force: true });
+  git(sidecarPath, ["worktree", "prune", "--expire", "now"], { check: false });
   try {
     git(sidecarPath, ["worktree", "add", "--detach", worktree]);
     return mergeInboxBranchesAt(worktree, config, options);
@@ -2450,10 +2523,22 @@ function mergeInboxBranches(sidecarPath, config, options) {
     fs2.rmSync(scratch, { recursive: true, force: true });
   }
 }
+function mainMatchesRemote(repo, config) {
+  if (!branchExists(repo, config.branch) || !remoteRefExists(repo, config.branch))
+    return false;
+  const local = git(repo, ["rev-parse", `refs/heads/${config.branch}`]).stdout.trim();
+  const remote = git(repo, ["rev-parse", `refs/remotes/origin/${config.branch}`]).stdout.trim();
+  return local === remote;
+}
+function hasPendingInboxWork(repo, config) {
+  const remoteMain = `origin/${config.branch}`;
+  return pendingInboxBranches(repo, config).some((branch) => !isAncestor(repo, branch, remoteMain));
+}
 function mergeInboxBranchesAt(sidecarPath, config, options) {
   const maxAttempts = 3;
   for (let attempt = 1;; attempt += 1) {
-    fetch(sidecarPath, false);
+    if (attempt > 1)
+      fetch(sidecarPath, false);
     ensureMainBranch(sidecarPath, config);
     const inboxBranches = pendingInboxBranches(sidecarPath, config).filter((remoteBranch) => !isAncestor(sidecarPath, remoteBranch, "HEAD"));
     if (!inboxBranches.length && attempt === 1) {
@@ -2494,8 +2579,69 @@ function mergeInboxBranchesAt(sidecarPath, config, options) {
     return merged.length;
   }
 }
-function cmdRedact() {
-  process.stdout.write(redactBuffer(fs2.readFileSync(0)));
+function cmdRedactions(args) {
+  const parsed = parseOptions(args, { boolean: new Set, value: new Set });
+  if (parsed.positional.length)
+    throw new SidecarError("usage: sidecar redactions");
+  const [root, config] = loadProject();
+  const sidecarPath = requireSidecarCheckout(root, config);
+  if (config.redaction === "none") {
+    console.log('redaction is disabled (redaction = "none" in .sidecar)');
+    return 0;
+  }
+  const files = [
+    ...new Set(git(sidecarPath, ["-c", "core.quotePath=false", "ls-files", "--cached", "--others", "--exclude-standard"]).stdout.split(`
+`).filter(Boolean))
+  ];
+  let shown = 0;
+  let items = 0;
+  for (const relPath of files) {
+    const delta = fileRedactionDelta(path2.join(sidecarPath, relPath), config.redaction);
+    if (!delta)
+      continue;
+    if (shown)
+      console.log("");
+    console.log(`${relPath}:`);
+    printRedactionDiff(delta.text, delta.redacted);
+    shown += 1;
+    items += delta.items;
+  }
+  if (!shown) {
+    console.log(`no redactions pending (mode: ${config.redaction})`);
+    return 0;
+  }
+  console.log(`
+${items} redaction(s) in ${shown} file(s) will be pushed this way (mode: ${config.redaction}).`);
+  console.log(`local files are untouched; add "${NO_REDACT_PRAGMA}" to a file's first lines to push it verbatim`);
+  return 0;
+}
+function printRedactionDiff(original, redacted) {
+  const scratch = fs2.mkdtempSync(path2.join(os.tmpdir(), "sidecar-redactions-"));
+  try {
+    const localPath = path2.join(scratch, "local");
+    const pushedPath = path2.join(scratch, "pushed");
+    fs2.writeFileSync(localPath, original, "utf8");
+    fs2.writeFileSync(pushedPath, redacted, "utf8");
+    const diff = gitRaw(["diff", "--no-index", "--", localPath, pushedPath], { check: false });
+    const lines = diff.stdout.split(`
+`);
+    const firstHunk = lines.findIndex((line) => line.startsWith("@@"));
+    const body = firstHunk === -1 ? "" : lines.slice(firstHunk).join(`
+`).trimEnd();
+    if (body)
+      console.log(body);
+  } finally {
+    fs2.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+function cmdRedact(args) {
+  const parsed = parseOptions(args, { boolean: new Set, value: new Set(["--mode"]) });
+  const mode = redactionModeConfigValue(getValue(parsed, "--mode", DEFAULT_REDACTION_MODE), "--mode");
+  const output = redactBuffer(fs2.readFileSync(0), mode);
+  let offset = 0;
+  while (offset < output.length) {
+    offset += fs2.writeSync(1, output, offset, output.length - offset);
+  }
   return 0;
 }
 function cloneOrUpdate(root, config, bootstrapMain) {
@@ -2520,7 +2666,7 @@ function cloneOrUpdate(root, config, bootstrapMain) {
     throw new SidecarError(`${sidecarPath} is not usable as a sidecar checkout`);
   }
   ensureCommitIdentity(sidecarPath);
-  ensureRedactionFilter(sidecarPath);
+  ensureRedactionFilter(sidecarPath, config.redaction);
   if (bootstrapMain)
     bootstrapMainBranch(sidecarPath, config);
   const inbox = expandInbox(config, sidecarPath);
@@ -2602,13 +2748,17 @@ function ensureInboxBranch(repo, config, inbox) {
   bootstrapMainBranch(repo, config);
   git(repo, ["switch", "-c", inbox, config.branch]);
 }
-function snapshot(repo, mainRoot, inbox, message = "sidecar snapshot") {
-  ensureRedactionFilter(repo);
+function snapshot(repo, mainRoot, inbox, message = "sidecar snapshot", redactionMode = DEFAULT_REDACTION_MODE) {
+  if (ensureRedactionFilter(repo, redactionMode) && hasAnyCommit(repo)) {
+    git(repo, ["add", "--renormalize", "."]);
+  }
   git(repo, ["add", "-A"]);
   if (git(repo, ["diff", "--cached", "--quiet"], { check: false }).status === 0) {
     console.log("no sidecar changes to snapshot");
     return false;
   }
+  const staged = git(repo, ["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--diff-filter=d"]).stdout.split(`
+`).filter(Boolean);
   const mainHead = git(mainRoot, ["rev-parse", "--short", "HEAD"], { check: false });
   const mainHeadText = mainHead.status === 0 ? mainHead.stdout.trim() : "unborn";
   const source = `${currentUser()}@${currentHost()}`;
@@ -2622,27 +2772,79 @@ function snapshot(repo, mainRoot, inbox, message = "sidecar snapshot") {
   git(repo, ["commit", "-m", body.join(`
 `)]);
   console.log(`committed sidecar snapshot to ${inbox}`);
+  reportRedactions(repo, staged, redactionMode);
   return true;
 }
-function ensureRedactionFilter(repo) {
-  const command = `${filterCommandQuote(process.execPath)} ${filterCommandQuote(redactCliPath())} redact`;
-  git(repo, ["config", `filter.${REDACTION_FILTER_NAME}.clean`, command]);
-  git(repo, ["config", `filter.${REDACTION_FILTER_NAME}.smudge`, "cat"]);
-  git(repo, ["config", `filter.${REDACTION_FILTER_NAME}.required`, "true"]);
-  const attributesPath = path2.join(gitDir(repo), "info", "attributes");
-  const line = `* filter=${REDACTION_FILTER_NAME}`;
-  let existing = "";
-  try {
-    existing = fs2.readFileSync(attributesPath, "utf8");
-  } catch {}
-  if (existing.split(/\r?\n/).includes(line))
+function reportRedactions(repo, staged, mode) {
+  if (mode === "none")
     return;
-  fs2.mkdirSync(path2.dirname(attributesPath), { recursive: true });
-  const prefix = existing && !existing.endsWith(`
-`) ? `${existing}
-` : existing;
-  fs2.writeFileSync(attributesPath, `${prefix}${line}
+  let files = 0;
+  let items = 0;
+  for (const relPath of staged) {
+    const delta = fileRedactionDelta(path2.join(repo, relPath), mode);
+    if (!delta)
+      continue;
+    files += 1;
+    items += delta.items;
+  }
+  if (!files)
+    return;
+  console.log(`redacted ${items} item(s) in ${files} file(s); review with \`sidecar redactions\`, or add "${NO_REDACT_PRAGMA}" to a file's first lines to opt it out`);
+  logSidecarEvent("redaction", { files, items });
+}
+function fileRedactionDelta(filePath, mode) {
+  let data;
+  try {
+    data = fs2.readFileSync(filePath);
+  } catch {
+    return;
+  }
+  const text = decodeUtf8Text(data);
+  if (text === undefined || hasNoRedactPragma(text))
+    return;
+  const redacted = redactText(text, mode);
+  if (redacted === text)
+    return;
+  const items = Math.max(1, countRedactionPlaceholders(redacted) - countRedactionPlaceholders(text));
+  return { text, redacted, items };
+}
+function ensureRedactionFilter(repo, mode = DEFAULT_REDACTION_MODE) {
+  const command = mode === "none" ? "cat" : `${filterCommandQuote(process.execPath)} ${filterCommandQuote(redactCliPath())} redact --mode=${mode}`;
+  const wanted = [
+    [`filter.${REDACTION_FILTER_NAME}.clean`, command],
+    [`filter.${REDACTION_FILTER_NAME}.smudge`, "cat"],
+    [`filter.${REDACTION_FILTER_NAME}.required`, "true"]
+  ];
+  const attributesPath = path2.join(gitCommonDir(repo), "info", "attributes");
+  const line = `* filter=${REDACTION_FILTER_NAME}`;
+  const configured = git(repo, ["config", "--get-regexp", `^filter\\.${REDACTION_FILTER_NAME}\\.`], {
+    check: false
+  });
+  const current = new Map(configured.stdout.split(`
+`).filter(Boolean).map((entry) => {
+    const space = entry.indexOf(" ");
+    return [entry.slice(0, space), entry.slice(space + 1)];
+  }));
+  const configOk = wanted.every(([key, value]) => current.get(key) === value);
+  let attributes = "";
+  try {
+    attributes = fs2.readFileSync(attributesPath, "utf8");
+  } catch {}
+  const attributesOk = attributes.split(/\r?\n/).includes(line);
+  if (configOk && attributesOk)
+    return false;
+  for (const [key, value] of wanted) {
+    git(repo, ["config", key, value]);
+  }
+  if (!attributesOk) {
+    fs2.mkdirSync(path2.dirname(attributesPath), { recursive: true });
+    fs2.appendFileSync(attributesPath, attributes && !attributes.endsWith(`
+`) ? `
+${line}
+` : `${line}
 `, "utf8");
+  }
+  return true;
 }
 function redactCliPath() {
   const self = fileURLToPath2(import.meta.url);
@@ -2651,17 +2853,21 @@ function redactCliPath() {
 function filterCommandQuote(value) {
   return `"${value.replace(/([\\"$`])/g, "\\$1")}"`;
 }
-function redactBuffer(data) {
-  if (data.includes(0))
+function redactBuffer(data, mode) {
+  const text = decodeUtf8Text(data);
+  if (text === undefined || hasNoRedactPragma(text))
     return data;
-  let text;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(data);
-  } catch {
-    return data;
-  }
-  const redacted = redactText(text);
+  const redacted = redactText(text, mode);
   return redacted === text ? data : Buffer.from(redacted, "utf8");
+}
+function decodeUtf8Text(data) {
+  if (data.includes(0))
+    return;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(data);
+  } catch {
+    return;
+  }
 }
 function syncBranchBeforePush(repo, branch) {
   fetch(repo, true, false);
@@ -2925,6 +3131,12 @@ function writeInstances(instances) {
   ensureStateDir();
   fs2.writeFileSync(instancesPath(), `${JSON.stringify(instances, null, 2)}
 `, "utf8");
+}
+function unregisterInstance(root) {
+  const instances = readInstances();
+  const remaining = instances.filter((instance) => realpathOr2(instance.root) !== realpathOr2(root));
+  if (remaining.length !== instances.length)
+    writeInstances(remaining);
 }
 function registerCurrentInstance(root, config, options) {
   if (!shouldUseGlobalRegistry())
@@ -3240,6 +3452,16 @@ ${plistValue(item, indent + 2)}`).join("")}${pad}</dict>
 function escapeXml(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
+function redactLogValue(value) {
+  if (typeof value === "string")
+    return redactText(value);
+  if (Array.isArray(value))
+    return value.map(redactLogValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactLogValue(entry)]));
+  }
+  return value;
+}
 function logSidecarEvent(event, fields = {}) {
   try {
     ensureStateDir();
@@ -3252,9 +3474,9 @@ function logSidecarEvent(event, fields = {}) {
     const record = {
       timestamp: nowIso(),
       event,
-      ...fields
+      ...redactLogValue(fields)
     };
-    fs2.appendFileSync(sidecarLogPath(), `${redactText(JSON.stringify(record))}
+    fs2.appendFileSync(logPath, `${JSON.stringify(record)}
 `, "utf8");
   } catch {}
 }
@@ -3499,9 +3721,15 @@ function findConfigRootOptional(start) {
   }
 }
 function gitToplevel(cwd) {
+  const root = gitToplevelOptional(cwd);
+  if (!root)
+    throw new SidecarError("not inside a Git repository");
+  return root;
+}
+function gitToplevelOptional(cwd) {
   const result = gitRaw(["-C", cwd, "rev-parse", "--show-toplevel"], { check: false });
   if (result.status !== 0)
-    throw new SidecarError("not inside a Git repository");
+    return;
   return result.stdout.trim();
 }
 function gitCommonDir(root) {
@@ -3531,6 +3759,7 @@ function writeConfig(configPath, config) {
     `path = ${JSON.stringify(config.path)}`,
     `branch = ${JSON.stringify(config.branch)}`,
     `inbox = ${JSON.stringify(config.inbox)}`,
+    `redaction = ${JSON.stringify(config.redaction ?? DEFAULT_REDACTION_MODE)}`,
     ""
   ].join(`
 `);
@@ -3557,12 +3786,18 @@ function readConfig(configPath) {
     version: numberConfigValue(configPath, values, "version", 1),
     path: stringConfigValue(configPath, values, "path", DEFAULT_PATH),
     branch: stringConfigValue(configPath, values, "branch", DEFAULT_BRANCH),
-    inbox: stringConfigValue(configPath, values, "inbox", DEFAULT_INBOX)
+    inbox: stringConfigValue(configPath, values, "inbox", DEFAULT_INBOX),
+    redaction: redactionModeConfigValue(stringConfigValue(configPath, values, "redaction", DEFAULT_REDACTION_MODE), configPath)
   };
   validateRemote(config.remote);
   validateBranch(config.branch);
   validateInboxTemplate(config.inbox);
   return config;
+}
+function redactionModeConfigValue(value, source) {
+  if (REDACTION_MODES.includes(value))
+    return value;
+  throw new SidecarError(`${source}: invalid redaction mode ${JSON.stringify(value)}; expected one of ${REDACTION_MODES.join(", ")}`);
 }
 function removeLegacyGitHooks(root) {
   let removed = false;
@@ -3730,6 +3965,32 @@ function ensureZedInclusion(root, sidecarPath) {
 `, "utf8");
   }
   return true;
+}
+function removeZedInclusion(root, sidecarPath) {
+  const settingsPath2 = path2.join(root, ".zed", "settings.json");
+  if (!fs2.existsSync(settingsPath2))
+    return;
+  try {
+    const settings = JSON.parse(fs2.readFileSync(settingsPath2, "utf8"));
+    if (!settings || typeof settings !== "object" || Array.isArray(settings))
+      return;
+    const inclusions = settings.file_scan_inclusions;
+    if (!Array.isArray(inclusions))
+      return;
+    const glob = zedInclusionGlob(sidecarPath);
+    const remaining = inclusions.filter((entry) => entry !== glob);
+    if (remaining.length === inclusions.length)
+      return;
+    if (remaining.length) {
+      settings.file_scan_inclusions = remaining;
+    } else {
+      delete settings.file_scan_inclusions;
+    }
+    fs2.writeFileSync(settingsPath2, `${JSON.stringify(settings, null, 2)}
+`, "utf8");
+  } catch {
+    console.error(`sidecar: warning: could not safely remove the Zed inclusion from ${settingsPath2}`);
+  }
 }
 function ignoreEntryForSidecarPath(root, sidecarPath) {
   const resolvedRoot = path2.resolve(root);
@@ -3927,7 +4188,7 @@ import { fileURLToPath as fileURLToPath3 } from "node:url";
 var SKIP_LOCAL_EXEC_ENV3 = "SIDECAR_SKIP_LOCAL_EXEC";
 var GLOBAL_EXEC_ENV3 = "SIDECAR_GLOBAL_EXEC";
 var PACKAGE_NAME2 = "@projectors/sidecar";
-var GLOBAL_ONLY_COMMANDS = new Set(["daemon", "register-install", "set-install-source", "update"]);
+var GLOBAL_ONLY_COMMANDS = new Set(["daemon", "deinit", "register-install", "set-install-source", "update"]);
 if (!process.env[SKIP_LOCAL_EXEC_ENV3]) {
   const localExecutable = findLocalExecutable(process.cwd(), fileURLToPath3(import.meta.url));
   if (localExecutable) {

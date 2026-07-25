@@ -5,11 +5,18 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { TextDecoder } from "node:util";
 import { parse as parseToml } from "smol-toml";
 
 import { type Role, paint } from "./color.js";
-import { redactText } from "./redaction.js";
+import {
+  DEFAULT_REDACTION_MODE,
+  NO_REDACT_PRAGMA,
+  REDACTION_MODES,
+  type RedactionMode,
+  countRedactionPlaceholders,
+  hasNoRedactPragma,
+  redactText,
+} from "./redaction.js";
 
 export const DEFAULT_PATH = "sidecar";
 export const DEFAULT_BRANCH = "main";
@@ -39,6 +46,7 @@ export type SidecarConfig = {
   path: string;
   branch: string;
   inbox: string;
+  redaction: RedactionMode;
 };
 
 type GitResult = {
@@ -93,13 +101,15 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   try {
     const status = await run(argv);
     const command = argv[0];
-    if (command && shouldUseGlobalRegistry()) {
+    // The redact clean filter runs once per staged file; logging it would
+    // write one event per file on every snapshot.
+    if (command && command !== "redact" && command !== "deinit" && shouldUseGlobalRegistry()) {
       logSidecarEvent("command", { command, status });
     }
     return status;
   } catch (error) {
     const command = argv[0] || "unknown";
-    if (shouldUseGlobalRegistry()) {
+    if (command !== "redact" && command !== "deinit" && shouldUseGlobalRegistry()) {
       logSidecarEvent("failure", {
         command,
         message: error instanceof Error ? error.message : String(error),
@@ -133,6 +143,8 @@ function run(argv: string[]): number | Promise<number> {
       return cmdInit(rest);
     case "clone":
       return cmdClone(rest);
+    case "deinit":
+      return cmdDeinit(rest);
     case "status":
       return cmdStatus(rest);
     case "instances":
@@ -154,7 +166,9 @@ function run(argv: string[]): number | Promise<number> {
     case "merge":
       return cmdMerge(rest);
     case "redact":
-      return cmdRedact();
+      return cmdRedact(rest);
+    case "redactions":
+      return cmdRedactions(rest);
     default:
       throw new SidecarError(`unknown command ${JSON.stringify(command)}`);
   }
@@ -164,8 +178,9 @@ function printUsage(): void {
   console.error(`usage: sidecar <command> [options]
 
 commands:
-  init [remote] [--path sidecar] [--branch main] [--inbox template]
+  init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii]
   clone [--if-missing]
+  deinit
   status
   instances
   daemon status|enable|disable|restart|autoupdate on|off|run [--once] [--interval seconds]
@@ -174,16 +189,64 @@ commands:
   snapshot [--push] [-m message]
   sync [--no-snapshot] [--soft] [-m message]
   merge [--fork-files] [--no-push]
+  redactions (preview what redaction changes before content is pushed)
   redact (git clean filter: stdin -> redacted stdout)`);
+}
+
+function cmdDeinit(args: string[]): number {
+  if (args.length) throw new SidecarError("usage: sidecar deinit");
+
+  const root = gitToplevelOptional(process.cwd());
+  if (!root) {
+    console.error("sidecar: warning: not inside a Git repository; nothing to remove");
+    return 0;
+  }
+
+  const configPath = path.join(root, ".sidecar");
+  let configuredPath: string | undefined;
+  if (fs.existsSync(configPath)) {
+    try {
+      configuredPath = readConfig(configPath).path;
+    } catch {
+      console.error(
+        `sidecar: warning: could not read ${configPath}; remove the Sidecar checkout and ignore entries manually`,
+      );
+    }
+  } else {
+    console.error(
+      `sidecar: warning: no .sidecar config found; remove any leftover checkout and ignore entries manually`,
+    );
+  }
+
+  fs.rmSync(configPath, { force: true });
+  if (configuredPath) {
+    const checkoutPath = path.resolve(root, configuredPath);
+    if (checkoutPath !== path.resolve(root) && checkoutPath !== path.parse(checkoutPath).root) {
+      fs.rmSync(checkoutPath, { recursive: true, force: true });
+    }
+    const ignoreEntry = ignoreEntryForSidecarPath(root, configuredPath);
+    if (ignoreEntry) {
+      removeIgnoreEntry(path.join(root, ".gitignore"), ignoreEntry);
+      removeIgnoreEntry(path.join(gitCommonDir(root), "info", "exclude"), ignoreEntry);
+      removeZedInclusion(root, ignoreEntry);
+    }
+  }
+  removeLegacyGitHooks(root);
+  unregisterInstance(root);
+
+  console.log(`removed sidecar from ${root}`);
+  return 0;
 }
 
 function cmdInit(args: string[]): number {
   const parsed = parseOptions(args, {
     boolean: new Set(["--no-clone", "--no-bootstrap-main"]),
-    value: new Set(["--path", "--branch", "--inbox"]),
+    value: new Set(["--path", "--branch", "--inbox", "--redaction"]),
   });
   if (parsed.positional.length > 1) {
-    throw new SidecarError("usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template]");
+    throw new SidecarError(
+      "usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction mode]",
+    );
   }
 
   const remote = parsed.positional[0];
@@ -192,11 +255,15 @@ function cmdInit(args: string[]): number {
   const configPath = path.join(root, ".sidecar");
   if (remote && fs.existsSync(configPath)) {
     const existing = readConfig(configPath);
+    // Omitted flags fall back to the EXISTING values, not the defaults — a
+    // plain re-init must not read as a request to reset settings (a non-TTY
+    // re-init would fail, and a prompted "y" would silently flip redaction).
     const unchanged =
       existing.remote === remote &&
-      existing.path === getValue(parsed, "--path", DEFAULT_PATH) &&
-      existing.branch === getValue(parsed, "--branch", DEFAULT_BRANCH) &&
-      existing.inbox === getValue(parsed, "--inbox", DEFAULT_INBOX);
+      existing.path === getValue(parsed, "--path", existing.path) &&
+      existing.branch === getValue(parsed, "--branch", existing.branch) &&
+      existing.inbox === getValue(parsed, "--inbox", existing.inbox) &&
+      existing.redaction === getValue(parsed, "--redaction", existing.redaction);
     if (unchanged || !promptOverwriteConfig(configPath, existing.remote, remote)) {
       existingRoot = root;
     }
@@ -209,6 +276,10 @@ function cmdInit(args: string[]): number {
         path: getValue(parsed, "--path", DEFAULT_PATH),
         branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
         inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
+        redaction: redactionModeConfigValue(
+          getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE),
+          "--redaction",
+        ),
       };
   if (!existingRoot) {
     validateRemote(config.remote);
@@ -822,7 +893,13 @@ function cmdSnapshot(args: string[]): number {
     const inbox = expandInbox(config, sidecarPath);
     ensureCommitIdentity(sidecarPath);
     ensureInboxBranch(sidecarPath, config, inbox);
-    const committed = snapshot(sidecarPath, root, inbox, getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined);
+    const committed = snapshot(
+      sidecarPath,
+      root,
+      inbox,
+      getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined,
+      config.redaction,
+    );
     if (committed && parsed.flags.has("--push")) {
       syncBranchBeforePush(sidecarPath, inbox);
       pushBranch(sidecarPath, inbox);
@@ -862,7 +939,11 @@ function syncProject(root: string, config: SidecarConfig, options: { snapshot: b
   fetch(sidecarPath, true, false);
   ensureInboxBranch(sidecarPath, config, inbox);
   if (options.snapshot) {
-    snapshot(sidecarPath, root, inbox, options.message);
+    snapshot(sidecarPath, root, inbox, options.message, config.redaction);
+  } else {
+    // Without a snapshot nothing else repairs a stale filter command, and
+    // required=true would fail every git status until one runs.
+    ensureRedactionFilter(sidecarPath, config.redaction);
   }
   syncBranchBeforePush(sidecarPath, inbox);
   pushBranch(sidecarPath, inbox);
@@ -888,6 +969,9 @@ function cmdMerge(args: string[]): number {
 
   const [root, config] = loadProject();
   const sidecarPath = requireSidecarCheckout(root, config);
+  // Merging runs git status against the checkout; repair a stale filter
+  // command first so required=true doesn't wedge it.
+  ensureRedactionFilter(sidecarPath, config.redaction);
   mergeInboxBranches(sidecarPath, config, {
     forkFiles: parsed.flags.has("--fork-files"),
     push: !parsed.flags.has("--no-push"),
@@ -903,19 +987,40 @@ export function mergeInboxBranches(
   ensureClean(sidecarPath);
   ensureCommitIdentity(sidecarPath);
 
+  // Most syncs have no merge work. Detect that from refs alone — local main
+  // matching origin and every inbox branch already merged — before paying
+  // for a worktree checkout.
+  fetch(sidecarPath, false);
+  if (mainMatchesRemote(sidecarPath, config) && !hasPendingInboxWork(sidecarPath, config)) {
+    console.log("no inbox branches to merge");
+    return 0;
+  }
+
   // Merging switches branches, which rewrites working-tree files from
   // committed (redacted) blobs. The user's checkout keeps the unredacted
   // originals, so the branch dance happens in a throwaway linked worktree
   // and the checkout never leaves the inbox branch.
-  // No commits means no worktree to protect; a checkout already on the main
-  // branch would block the worktree from switching to it, and its files are
-  // committed blobs anyway.
+  // No commits means no worktree to protect (`worktree add` refuses an
+  // unborn HEAD). A checkout already sitting on the main branch would block
+  // the worktree from switching to it, so that unusual state keeps the old
+  // in-place behavior — including its rewrite of checkout files from
+  // committed blobs.
   const current = git(sidecarPath, ["branch", "--show-current"]).stdout.trim();
   if (!hasAnyCommit(sidecarPath) || current === config.branch) {
     return mergeInboxBranchesAt(sidecarPath, config, options);
   }
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-merge-"));
+  // A deterministic path (rather than mkdtemp) lets a new sync reclaim the
+  // worktree a killed sync left behind; a stale registration would otherwise
+  // block `git switch <main>` in every future merge. The sync lock prevents
+  // two live syncs from colliding on it.
+  const scratch = path.join(
+    os.tmpdir(),
+    `sidecar-merge-${crypto.createHash("sha1").update(sidecarPath).digest("hex").slice(0, 12)}`,
+  );
   const worktree = path.join(scratch, "checkout");
+  git(sidecarPath, ["worktree", "remove", "--force", worktree], { check: false });
+  fs.rmSync(scratch, { recursive: true, force: true });
+  git(sidecarPath, ["worktree", "prune", "--expire", "now"], { check: false });
   try {
     git(sidecarPath, ["worktree", "add", "--detach", worktree]);
     return mergeInboxBranchesAt(worktree, config, options);
@@ -923,6 +1028,18 @@ export function mergeInboxBranches(
     git(sidecarPath, ["worktree", "remove", "--force", worktree], { check: false });
     fs.rmSync(scratch, { recursive: true, force: true });
   }
+}
+
+function mainMatchesRemote(repo: string, config: SidecarConfig): boolean {
+  if (!branchExists(repo, config.branch) || !remoteRefExists(repo, config.branch)) return false;
+  const local = git(repo, ["rev-parse", `refs/heads/${config.branch}`]).stdout.trim();
+  const remote = git(repo, ["rev-parse", `refs/remotes/origin/${config.branch}`]).stdout.trim();
+  return local === remote;
+}
+
+function hasPendingInboxWork(repo: string, config: SidecarConfig): boolean {
+  const remoteMain = `origin/${config.branch}`;
+  return pendingInboxBranches(repo, config).some((branch) => !isAncestor(repo, branch, remoteMain));
 }
 
 function mergeInboxBranchesAt(
@@ -936,7 +1053,9 @@ function mergeInboxBranchesAt(
   // pending, so a lost race heals instead of wedging every later sync.
   const maxAttempts = 3;
   for (let attempt = 1; ; attempt += 1) {
-    fetch(sidecarPath, false);
+    // The wrapper fetched just before the first attempt; refetch on retries
+    // to pick up whatever the winning machine pushed.
+    if (attempt > 1) fetch(sidecarPath, false);
     ensureMainBranch(sidecarPath, config);
 
     const inboxBranches = pendingInboxBranches(sidecarPath, config).filter(
@@ -995,11 +1114,86 @@ function mergeInboxBranchesAt(
   }
 }
 
+// Previews exactly what the clean filter rewrites on the next push. The
+// worktree keeps originals and redaction is deterministic, so this is always
+// recomputable — no redaction log to store or dedupe.
+function cmdRedactions(args: string[]): number {
+  const parsed = parseOptions(args, { boolean: new Set(), value: new Set() });
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar redactions");
+  const [root, config] = loadProject();
+  const sidecarPath = requireSidecarCheckout(root, config);
+  if (config.redaction === "none") {
+    console.log('redaction is disabled (redaction = "none" in .sidecar)');
+    return 0;
+  }
+
+  // quotePath off so non-ASCII names come back verbatim; unmerged entries
+  // repeat per stage, hence the Set.
+  const files = [
+    ...new Set(
+      git(sidecarPath, ["-c", "core.quotePath=false", "ls-files", "--cached", "--others", "--exclude-standard"])
+        .stdout.split("\n")
+        .filter(Boolean),
+    ),
+  ];
+  let shown = 0;
+  let items = 0;
+  for (const relPath of files) {
+    const delta = fileRedactionDelta(path.join(sidecarPath, relPath), config.redaction);
+    if (!delta) continue;
+    if (shown) console.log("");
+    console.log(`${relPath}:`);
+    printRedactionDiff(delta.text, delta.redacted);
+    shown += 1;
+    items += delta.items;
+  }
+
+  if (!shown) {
+    console.log(`no redactions pending (mode: ${config.redaction})`);
+    return 0;
+  }
+  console.log(
+    `\n${items} redaction(s) in ${shown} file(s) will be pushed this way (mode: ${config.redaction}).`,
+  );
+  console.log(
+    `local files are untouched; add "${NO_REDACT_PRAGMA}" to a file's first lines to push it verbatim`,
+  );
+  return 0;
+}
+
+function printRedactionDiff(original: string, redacted: string): void {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-redactions-"));
+  try {
+    const localPath = path.join(scratch, "local");
+    const pushedPath = path.join(scratch, "pushed");
+    fs.writeFileSync(localPath, original, "utf8");
+    fs.writeFileSync(pushedPath, redacted, "utf8");
+    const diff = gitRaw(["diff", "--no-index", "--", localPath, pushedPath], { check: false });
+    // Keep only the hunks: removed/added content lines can legitimately start
+    // with "---"/"+++" inside a hunk, so filtering by prefix would drop them.
+    const lines = diff.stdout.split("\n");
+    const firstHunk = lines.findIndex((line) => line.startsWith("@@"));
+    const body = firstHunk === -1 ? "" : lines.slice(firstHunk).join("\n").trimEnd();
+    if (body) console.log(body);
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 // Invoked by git as the sidecar checkout's clean filter: one file's content
-// on stdin, redacted content on stdout. Binary and non-UTF-8 input passes
-// through untouched.
-function cmdRedact(): number {
-  process.stdout.write(redactBuffer(fs.readFileSync(0)));
+// on stdin, redacted content on stdout. Binary and non-UTF-8 input, and files
+// carrying the no-redact pragma, pass through untouched.
+function cmdRedact(args: string[]): number {
+  const parsed = parseOptions(args, { boolean: new Set(), value: new Set(["--mode"]) });
+  const mode = redactionModeConfigValue(getValue(parsed, "--mode", DEFAULT_REDACTION_MODE), "--mode");
+  const output = redactBuffer(fs.readFileSync(0), mode);
+  // stdout is a pipe to git, and pipe writes are async on macOS — a buffered
+  // process.stdout.write can be truncated by process.exit, committing a
+  // corrupted blob. Write synchronously.
+  let offset = 0;
+  while (offset < output.length) {
+    offset += fs.writeSync(1, output, offset, output.length - offset);
+  }
   return 0;
 }
 
@@ -1027,7 +1221,7 @@ export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain
   }
 
   ensureCommitIdentity(sidecarPath);
-  ensureRedactionFilter(sidecarPath);
+  ensureRedactionFilter(sidecarPath, config.redaction);
   if (bootstrapMain) bootstrapMainBranch(sidecarPath, config);
 
   const inbox = expandInbox(config, sidecarPath);
@@ -1125,13 +1319,27 @@ export function ensureInboxBranch(repo: string, config: SidecarConfig, inbox: st
   git(repo, ["switch", "-c", inbox, config.branch]);
 }
 
-export function snapshot(repo: string, mainRoot: string, inbox: string, message = "sidecar snapshot"): boolean {
-  ensureRedactionFilter(repo);
+export function snapshot(
+  repo: string,
+  mainRoot: string,
+  inbox: string,
+  message = "sidecar snapshot",
+  redactionMode: RedactionMode = DEFAULT_REDACTION_MODE,
+): boolean {
+  // A filter change (new mode, moved node/CLI) doesn't invalidate git's stat
+  // cache, so already-committed files would keep their old redaction state
+  // forever; renormalize forces every tracked file back through the filter.
+  if (ensureRedactionFilter(repo, redactionMode) && hasAnyCommit(repo)) {
+    git(repo, ["add", "--renormalize", "."]);
+  }
   git(repo, ["add", "-A"]);
   if (git(repo, ["diff", "--cached", "--quiet"], { check: false }).status === 0) {
     console.log("no sidecar changes to snapshot");
     return false;
   }
+  const staged = git(repo, ["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--diff-filter=d"])
+    .stdout.split("\n")
+    .filter(Boolean);
 
   const mainHead = git(mainRoot, ["rev-parse", "--short", "HEAD"], { check: false });
   const mainHeadText = mainHead.status === 0 ? mainHead.stdout.trim() : "unborn";
@@ -1145,7 +1353,51 @@ export function snapshot(repo: string, mainRoot: string, inbox: string, message 
   ];
   git(repo, ["commit", "-m", body.join("\n")]);
   console.log(`committed sidecar snapshot to ${inbox}`);
+  reportRedactions(repo, staged, redactionMode);
   return true;
+}
+
+// Surfaces what the clean filter changed in this snapshot, so redaction is
+// never silent: false positives are only reviewable if the user knows they
+// happened.
+function reportRedactions(repo: string, staged: string[], mode: RedactionMode): void {
+  if (mode === "none") return;
+  let files = 0;
+  let items = 0;
+  for (const relPath of staged) {
+    const delta = fileRedactionDelta(path.join(repo, relPath), mode);
+    if (!delta) continue;
+    files += 1;
+    items += delta.items;
+  }
+  if (!files) return;
+  console.log(
+    `redacted ${items} item(s) in ${files} file(s); review with \`sidecar redactions\`, or add "${NO_REDACT_PRAGMA}" to a file's first lines to opt it out`,
+  );
+  logSidecarEvent("redaction", { files, items });
+}
+
+// What redaction changes for one file, or undefined when it leaves the file
+// alone (binary, pragma opt-out, or nothing matched).
+function fileRedactionDelta(
+  filePath: string,
+  mode: RedactionMode,
+): { text: string; redacted: string; items: number } | undefined {
+  let data: Buffer;
+  try {
+    data = fs.readFileSync(filePath);
+  } catch {
+    return undefined;
+  }
+  const text = decodeUtf8Text(data);
+  if (text === undefined || hasNoRedactPragma(text)) return undefined;
+  const redacted = redactText(text, mode);
+  if (redacted === text) return undefined;
+  const items = Math.max(
+    1,
+    countRedactionPlaceholders(redacted) - countRedactionPlaceholders(text),
+  );
+  return { text, redacted, items };
 }
 
 const REDACTION_FILTER_NAME = "sidecar-redact";
@@ -1153,26 +1405,65 @@ const REDACTION_FILTER_NAME = "sidecar-redact";
 // Redaction happens in a git clean filter, so secrets never reach committed
 // blobs while the working tree keeps the user's original text. `required`
 // makes staging fail closed if the filter command can't run.
-export function ensureRedactionFilter(repo: string): void {
-  const command = `${filterCommandQuote(process.execPath)} ${filterCommandQuote(redactCliPath())} redact`;
-  git(repo, ["config", `filter.${REDACTION_FILTER_NAME}.clean`, command]);
-  // `required` applies to both directions, so checkout needs an identity
-  // smudge command to succeed.
-  git(repo, ["config", `filter.${REDACTION_FILTER_NAME}.smudge`, "cat"]);
-  git(repo, ["config", `filter.${REDACTION_FILTER_NAME}.required`, "true"]);
-
-  const attributesPath = path.join(gitDir(repo), "info", "attributes");
+// Returns true when it had to (re)write any part of the wiring — the signal
+// that staged content may predate the current filter and needs renormalizing.
+export function ensureRedactionFilter(repo: string, mode: RedactionMode = DEFAULT_REDACTION_MODE): boolean {
+  // Mode "none" keeps the filter wiring in place (so switching back needs no
+  // attribute changes) but stages content untouched without a node spawn.
+  const command =
+    mode === "none"
+      ? "cat"
+      : `${filterCommandQuote(process.execPath)} ${filterCommandQuote(redactCliPath())} redact --mode=${mode}`;
+  const wanted: Array<[string, string]> = [
+    [`filter.${REDACTION_FILTER_NAME}.clean`, command],
+    // `required` applies to both directions, so checkout needs an identity
+    // smudge command to succeed.
+    [`filter.${REDACTION_FILTER_NAME}.smudge`, "cat"],
+    [`filter.${REDACTION_FILTER_NAME}.required`, "true"],
+  ];
+  // info/attributes lives in the shared git dir; the worktree-local git dir
+  // differs from it inside linked worktrees (which merging uses).
+  const attributesPath = path.join(gitCommonDir(repo), "info", "attributes");
   const line = `* filter=${REDACTION_FILTER_NAME}`;
-  let existing = "";
+
+  // The command embeds absolute paths that go stale when node or the CLI
+  // moves, so every caller re-checks. Verify every piece, not just the clean
+  // command — a partial write (killed daemon) or a lost attributes file must
+  // fail closed by repairing, never by early-exiting.
+  const configured = git(repo, ["config", "--get-regexp", `^filter\\.${REDACTION_FILTER_NAME}\\.`], {
+    check: false,
+  });
+  const current = new Map(
+    configured.stdout
+      .split("\n")
+      .filter(Boolean)
+      .map((entry) => {
+        const space = entry.indexOf(" ");
+        return [entry.slice(0, space), entry.slice(space + 1)] as [string, string];
+      }),
+  );
+  const configOk = wanted.every(([key, value]) => current.get(key) === value);
+  let attributes = "";
   try {
-    existing = fs.readFileSync(attributesPath, "utf8");
+    attributes = fs.readFileSync(attributesPath, "utf8");
   } catch {
-    // Missing attributes file: created below.
+    // Missing attributes file: created by the append below.
   }
-  if (existing.split(/\r?\n/).includes(line)) return;
-  fs.mkdirSync(path.dirname(attributesPath), { recursive: true });
-  const prefix = existing && !existing.endsWith("\n") ? `${existing}\n` : existing;
-  fs.writeFileSync(attributesPath, `${prefix}${line}\n`, "utf8");
+  const attributesOk = attributes.split(/\r?\n/).includes(line);
+  if (configOk && attributesOk) return false;
+
+  for (const [key, value] of wanted) {
+    git(repo, ["config", key, value]);
+  }
+  if (!attributesOk) {
+    fs.mkdirSync(path.dirname(attributesPath), { recursive: true });
+    fs.appendFileSync(
+      attributesPath,
+      attributes && !attributes.endsWith("\n") ? `\n${line}\n` : `${line}\n`,
+      "utf8",
+    );
+  }
+  return true;
 }
 
 // The filter must be runnable by plain git, outside this process: point it at
@@ -1189,16 +1480,20 @@ function filterCommandQuote(value: string): string {
   return `"${value.replace(/([\\"$`])/g, "\\$1")}"`;
 }
 
-export function redactBuffer(data: Buffer): Buffer {
-  if (data.includes(0)) return data;
-  let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(data);
-  } catch {
-    return data;
-  }
-  const redacted = redactText(text);
+function redactBuffer(data: Buffer, mode: RedactionMode): Buffer {
+  const text = decodeUtf8Text(data);
+  if (text === undefined || hasNoRedactPragma(text)) return data;
+  const redacted = redactText(text, mode);
   return redacted === text ? data : Buffer.from(redacted, "utf8");
+}
+
+function decodeUtf8Text(data: Buffer): string | undefined {
+  if (data.includes(0)) return undefined;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(data);
+  } catch {
+    return undefined;
+  }
 }
 
 export function syncBranchBeforePush(repo: string, branch: string): void {
@@ -1525,6 +1820,12 @@ export function readInstances(): SidecarInstance[] {
 export function writeInstances(instances: SidecarInstance[]): void {
   ensureStateDir();
   fs.writeFileSync(instancesPath(), `${JSON.stringify(instances, null, 2)}\n`, "utf8");
+}
+
+function unregisterInstance(root: string): void {
+  const instances = readInstances();
+  const remaining = instances.filter((instance) => realpathOr(instance.root) !== realpathOr(root));
+  if (remaining.length !== instances.length) writeInstances(remaining);
 }
 
 export function registerCurrentInstance(
@@ -1886,6 +2187,19 @@ function escapeXml(value: string): string {
 
 const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
 
+// Logged fields can carry secrets from the outside world — git error output
+// quotes remote URLs, which may embed access tokens. Redacting the values
+// (rather than the serialized record) keeps replacements from ever spanning
+// JSON structure.
+function redactLogValue(value: unknown): unknown {
+  if (typeof value === "string") return redactText(value);
+  if (Array.isArray(value)) return value.map(redactLogValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactLogValue(entry)]));
+  }
+  return value;
+}
+
 export function logSidecarEvent(event: string, fields: Record<string, unknown> = {}): void {
   try {
     ensureStateDir();
@@ -1900,11 +2214,9 @@ export function logSidecarEvent(event: string, fields: Record<string, unknown> =
     const record = {
       timestamp: nowIso(),
       event,
-      ...fields,
+      ...(redactLogValue(fields) as Record<string, unknown>),
     };
-    // Logged fields can carry secrets from the outside world — git error
-    // output quotes remote URLs, which may embed access tokens.
-    fs.appendFileSync(sidecarLogPath(), `${redactText(JSON.stringify(record))}\n`, "utf8");
+    fs.appendFileSync(logPath, `${JSON.stringify(record)}\n`, "utf8");
   } catch {
     // Logging must never make the primary sidecar command fail.
   }
@@ -2193,8 +2505,14 @@ function findConfigRootOptional(start: string): string | undefined {
 }
 
 export function gitToplevel(cwd: string): string {
+  const root = gitToplevelOptional(cwd);
+  if (!root) throw new SidecarError("not inside a Git repository");
+  return root;
+}
+
+function gitToplevelOptional(cwd: string): string | undefined {
   const result = gitRaw(["-C", cwd, "rev-parse", "--show-toplevel"], { check: false });
-  if (result.status !== 0) throw new SidecarError("not inside a Git repository");
+  if (result.status !== 0) return undefined;
   return result.stdout.trim();
 }
 
@@ -2227,6 +2545,7 @@ export function writeConfig(configPath: string, config: SidecarConfig): void {
     `path = ${JSON.stringify(config.path)}`,
     `branch = ${JSON.stringify(config.branch)}`,
     `inbox = ${JSON.stringify(config.inbox)}`,
+    `redaction = ${JSON.stringify(config.redaction ?? DEFAULT_REDACTION_MODE)}`,
     "",
   ].join("\n");
   fs.writeFileSync(configPath, text, "utf8");
@@ -2254,11 +2573,22 @@ export function readConfig(configPath: string): SidecarConfig {
     path: stringConfigValue(configPath, values, "path", DEFAULT_PATH),
     branch: stringConfigValue(configPath, values, "branch", DEFAULT_BRANCH),
     inbox: stringConfigValue(configPath, values, "inbox", DEFAULT_INBOX),
+    redaction: redactionModeConfigValue(
+      stringConfigValue(configPath, values, "redaction", DEFAULT_REDACTION_MODE),
+      configPath,
+    ),
   };
   validateRemote(config.remote);
   validateBranch(config.branch);
   validateInboxTemplate(config.inbox);
   return config;
+}
+
+function redactionModeConfigValue(value: string, source: string): RedactionMode {
+  if ((REDACTION_MODES as readonly string[]).includes(value)) return value as RedactionMode;
+  throw new SidecarError(
+    `${source}: invalid redaction mode ${JSON.stringify(value)}; expected one of ${REDACTION_MODES.join(", ")}`,
+  );
 }
 
 // Earlier sidecar versions installed background-sync git hooks in local
@@ -2437,6 +2767,29 @@ export function ensureZedInclusion(root: string, sidecarPath: string): boolean {
     fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
   }
   return true;
+}
+
+export function removeZedInclusion(root: string, sidecarPath: string): void {
+  const settingsPath = path.join(root, ".zed", "settings.json");
+  if (!fs.existsSync(settingsPath)) return;
+  try {
+    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+    if (!settings || typeof settings !== "object" || Array.isArray(settings)) return;
+    const inclusions = settings.file_scan_inclusions;
+    if (!Array.isArray(inclusions)) return;
+    const glob = zedInclusionGlob(sidecarPath);
+    const remaining = inclusions.filter((entry) => entry !== glob);
+    if (remaining.length === inclusions.length) return;
+    if (remaining.length) {
+      settings.file_scan_inclusions = remaining;
+    } else {
+      delete settings.file_scan_inclusions;
+    }
+    fs.writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  } catch {
+    // Zed settings may be JSONC. Leave files we cannot safely round-trip alone.
+    console.error(`sidecar: warning: could not safely remove the Zed inclusion from ${settingsPath}`);
+  }
 }
 
 export function ignoreEntryForSidecarPath(root: string, sidecarPath: string): string | undefined {

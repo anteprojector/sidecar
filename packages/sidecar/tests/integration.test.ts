@@ -135,6 +135,79 @@ describe("sidecar CLI integration", () => {
     expect(fs.readFileSync(excludePath, "utf8")).not.toContain("/sidecar/");
   });
 
+  test("deinit deletes artifacts created by init while preserving unrelated project configuration", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    const stateDir = path.join(main, ".sidecar-state");
+    runSidecar(["init", remote], main, { SIDECAR_STATE_DIR: stateDir });
+    fs.writeFileSync(path.join(main, ".gitignore"), "node_modules/\n/sidecar/\n", "utf8");
+    fs.mkdirSync(path.join(main, ".zed"), { recursive: true });
+    fs.writeFileSync(
+      path.join(main, ".zed", "settings.json"),
+      `${JSON.stringify({ theme: "One Dark", file_scan_inclusions: [".env*", "sidecar/**", "docs/**"] }, null, 2)}\n`,
+      "utf8",
+    );
+    fs.writeFileSync(
+      path.join(main, "package.json"),
+      `${JSON.stringify(
+        {
+          name: "app",
+          devDependencies: { "@projectors/sidecar": "0.6.0", vitest: "3.2.7" },
+          dependencies: { react: "19.0.0" },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+
+    const output = runSidecar(["deinit"], main, { SIDECAR_STATE_DIR: stateDir });
+
+    expect(output).toContain(`removed sidecar from ${fs.realpathSync(main)}`);
+    expect(fs.existsSync(path.join(main, ".sidecar"))).toBe(false);
+    expect(fs.existsSync(path.join(main, "sidecar"))).toBe(false);
+    expect(fs.readFileSync(path.join(main, ".gitignore"), "utf8")).toBe("node_modules/\n");
+    expect(JSON.parse(fs.readFileSync(path.join(main, ".zed", "settings.json"), "utf8"))).toEqual({
+      theme: "One Dark",
+      file_scan_inclusions: [".env*", "docs/**"],
+    });
+    expect(JSON.parse(fs.readFileSync(path.join(main, "package.json"), "utf8"))).toEqual({
+      name: "app",
+      devDependencies: { "@projectors/sidecar": "0.6.0", vitest: "3.2.7" },
+      dependencies: { react: "19.0.0" },
+    });
+    expect(JSON.parse(fs.readFileSync(path.join(stateDir, "instances.json"), "utf8"))).toEqual([]);
+  });
+
+  test("deinit outside a Git repository warns and exits successfully", () => {
+    const outside = tempDir();
+    const result = spawnSync(process.execPath, [cliPath, "deinit"], {
+      cwd: outside,
+      encoding: "utf8",
+      env: { ...process.env, SIDECAR_STATE_DIR: path.join(outside, "state") },
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("warning: not inside a Git repository; nothing to remove");
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
+  test("deinit does not guess checkout ownership when config is missing", () => {
+    const main = initMainRepo();
+    fs.mkdirSync(path.join(main, "sidecar"));
+    fs.writeFileSync(path.join(main, "sidecar", "keep.txt"), "not managed by Sidecar\n", "utf8");
+
+    const result = spawnSync(process.execPath, [cliPath, "deinit"], {
+      cwd: main,
+      encoding: "utf8",
+      env: { ...process.env, SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state") },
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("no .sidecar config found");
+    expect(fs.readFileSync(path.join(main, "sidecar", "keep.txt"), "utf8")).toBe("not managed by Sidecar\n");
+  });
+
   test("init does not install git hooks and sync removes hooks left by old versions", () => {
     const { main } = initSidecarProject();
     const hooksDir = path.join(main, ".git", "hooks");
@@ -887,8 +960,14 @@ describe("sidecar CLI integration", () => {
     const original = "OPENAI_API_KEY=sk-test1234567890abcdef\nemail alice@example.com\n";
     fs.writeFileSync(path.join(sidecar, "notes.md"), original, "utf8");
 
+    const preview = runSidecar(["redactions"], main);
+    expect(preview).toContain("notes.md:");
+    expect(preview).toContain("-OPENAI_API_KEY=sk-test1234567890abcdef");
+    expect(preview).toContain("+OPENAI_API_KEY=<API_KEY>");
+
     const output = runSidecar(["sync"], main);
 
+    expect(output).toContain("redacted 2 item(s) in 1 file(s)");
     expect(output).toContain(`pushed ${inbox}`);
     const pushed = gitRaw(["--git-dir", remote, "show", `${inbox}:notes.md`]).stdout;
     expect(pushed).toContain("OPENAI_API_KEY=<API_KEY>");
@@ -901,6 +980,38 @@ describe("sidecar CLI integration", () => {
 
     const merged = gitRaw(["--git-dir", remote, "show", "main:notes.md"]).stdout;
     expect(merged).toBe(pushed);
+  });
+
+  test("large files survive the clean filter without truncation", () => {
+    const { main, remote, sidecar } = initSidecarProject();
+    const inbox = git(sidecar, ["branch", "--show-current"]).stdout.trim();
+    // Well past the ~64KB pipe buffer, with the secret at the very end so
+    // truncation would also silently skip the redaction.
+    const big = `${"an ordinary line of scratchpad text\n".repeat(8000)}OPENAI_API_KEY=sk-test1234567890abcdef\n`;
+    fs.writeFileSync(path.join(sidecar, "big.md"), big, "utf8");
+
+    runSidecar(["sync"], main);
+
+    const pushed = gitRaw(["--git-dir", remote, "show", `${inbox}:big.md`]).stdout;
+    expect(pushed.length).toBe(big.length - "sk-test1234567890abcdef".length + "<API_KEY>".length);
+    expect(pushed.endsWith("OPENAI_API_KEY=<API_KEY>\n")).toBe(true);
+  });
+
+  test("--redaction secrets flows through init, config, and the git filter", () => {
+    const { main, remote, sidecar } = initSidecarProject(["--redaction", "secrets"]);
+    const inbox = git(sidecar, ["branch", "--show-current"]).stdout.trim();
+    expect(fs.readFileSync(path.join(main, ".sidecar"), "utf8")).toContain('redaction = "secrets"');
+    fs.writeFileSync(
+      path.join(sidecar, "notes.md"),
+      "OPENAI_API_KEY=sk-test1234567890abcdef\nemail alice@example.com\n",
+      "utf8",
+    );
+
+    runSidecar(["sync"], main);
+
+    const pushed = gitRaw(["--git-dir", remote, "show", `${inbox}:notes.md`]).stdout;
+    expect(pushed).toContain("OPENAI_API_KEY=<API_KEY>");
+    expect(pushed).toContain("alice@example.com");
   });
 
   test("sync clones the sidecar checkout when it is missing", () => {
@@ -1119,10 +1230,10 @@ describe("sidecar CLI integration", () => {
   });
 });
 
-function initSidecarProject(): { main: string; remote: string; sidecar: string } {
+function initSidecarProject(initArgs: string[] = []): { main: string; remote: string; sidecar: string } {
   const main = initMainRepo();
   const remote = initBareRemote();
-  runSidecar(["init", remote], main);
+  runSidecar(["init", remote, ...initArgs], main);
   return { main, remote, sidecar: path.join(main, "sidecar") };
 }
 

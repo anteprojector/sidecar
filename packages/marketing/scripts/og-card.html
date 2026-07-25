@@ -1,0 +1,169 @@
+<!doctype html>
+<!--
+  The social preview card (og:image), drawn to a 1200x630 canvas.
+
+  This is a page rather than a script because the card needs real type, and the
+  package has no rasterizer: canvas draws text with the very same webfonts the
+  site loads, so the card and the page can't drift apart. The mark is the site's
+  logo.svg, tinted to the theme's ink the same way style.css masks it.
+
+  Regenerate after changing the wording, the palette, or the art:
+
+    bun run --cwd packages/marketing og
+    # then open http://127.0.0.1:4330/scripts/og-card.html,
+    # click Download, and save over site/assets/og.png
+
+  Keep the yellow colorway: it is the site's default theme and the one the
+  favicon and README hero already use, so a shared link matches the page it
+  opens.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>og card — sidecar</title>
+<style>
+  /* Point at the site's own font files so the card can never fall out of sync
+     with the page's type. */
+  @font-face {
+    font-family: "Schibsted Grotesk";
+    font-style: normal;
+    font-weight: 400 700;
+    src: url("../site/assets/schibsted-grotesk.woff2") format("woff2");
+  }
+  body {
+    margin: 0;
+    padding: 2rem;
+    background: #2a2a2a;
+    color: #eee;
+    font: 14px ui-monospace, SFMono-Regular, Menlo, monospace;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    align-items: flex-start;
+  }
+  canvas { width: 600px; height: 315px; box-shadow: 0 2px 24px #0008; }
+  a { color: #ffc61e; }
+</style>
+</head>
+<body>
+
+<canvas id="c" width="1200" height="630"></canvas>
+<a id="dl" download="og.png">Download og.png</a>
+
+<script type="module">
+// The yellow colorway, lifted from style.css's :root[data-theme="yellow"].
+const PAPER = '#ffe9a3';
+const INK = '#1c1607';
+const MUTED = '#6b5b28';
+const RULE = '#e2c86d';
+
+const W = 1200;
+const H = 630;
+const PAD = 78;
+
+const SANS = '"Schibsted Grotesk", system-ui, sans-serif';
+const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// The mark's paths are black at varying fill-opacity; the site masks a themed
+// colour through them. Tinting a scratch canvas with source-in reproduces that
+// exactly — the alpha (and so the art's shading) survives, recoloured to INK.
+async function tintedMark(src, w, h) {
+  const img = new Image();
+  img.src = src;
+  await img.decode();
+
+  const off = document.createElement('canvas');
+  off.width = w;
+  off.height = h;
+  const o = off.getContext('2d');
+
+  const scale = Math.min(w / img.naturalWidth, h / img.naturalHeight);
+  const dw = img.naturalWidth * scale;
+  const dh = img.naturalHeight * scale;
+  o.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+
+  o.globalCompositeOperation = 'source-in';
+  o.fillStyle = INK;
+  o.fillRect(0, 0, w, h);
+  return off;
+}
+
+// Every element is placed against these two columns rather than by eye, so a
+// wording change can only ever run out of room — never silently overlap.
+const TEXT_RIGHT = 660;
+const MARK = { x: 690, y: 105, w: 430, h: 430 };
+
+function fits(label, right) {
+  if (right > TEXT_RIGHT) {
+    console.warn(`og-card: ${label} overruns the text column by ${Math.ceil(right - TEXT_RIGHT)}px`);
+  }
+}
+
+async function draw() {
+  await document.fonts.ready;
+
+  ctx.fillStyle = PAPER;
+  ctx.fillRect(0, 0, W, H);
+
+  // The mark sits right, at the size the hero gives it: with the headline down
+  // to two short lines, the art carries the rest of the card.
+  const mark = await tintedMark('../site/assets/logo.svg', MARK.w, MARK.h);
+  ctx.drawImage(mark, MARK.x, MARK.y);
+
+  ctx.textBaseline = 'alphabetic';
+
+  // Headline, stacked to two lines: set on one line it would either overrun the
+  // card or shrink below the mark's visual weight.
+  ctx.fillStyle = INK;
+  ctx.font = `500 86px ${SANS}`;
+  ctx.letterSpacing = '-0.035em';
+  ctx.fillText('a child repo', PAD, 268);
+  ctx.fillText('for your repo', PAD, 362);
+  fits('headline', PAD + Math.max(
+    ctx.measureText('a child repo').width,
+    ctx.measureText('for your repo').width
+  ));
+  ctx.letterSpacing = '0px';
+
+  // Install line, boxed like the hero's copy steps.
+  const cmd = 'npm i -g @projectors/sidecar';
+  ctx.font = `400 27px ${MONO}`;
+  const cw = ctx.measureText(cmd).width;
+  fits('install command', PAD + cw + 52);
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(PAD, 438, cw + 52, 64, 10);
+  ctx.stroke();
+  ctx.fillStyle = INK;
+  ctx.fillText(cmd, PAD + 26, 479);
+
+  // Footer rule and wordmark.
+  ctx.strokeStyle = RULE;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(PAD, H - 96);
+  ctx.lineTo(W - PAD, H - 96);
+  ctx.stroke();
+
+  ctx.fillStyle = INK;
+  ctx.font = `600 28px ${SANS}`;
+  ctx.fillText('sidecar', PAD, H - 52);
+  ctx.fillStyle = MUTED;
+  ctx.font = `400 22px ${MONO}`;
+  const url = 'anteprojector.github.io/sidecar';
+  ctx.fillText(url, W - PAD - ctx.measureText(url).width, H - 52);
+
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+  document.getElementById('dl').href = URL.createObjectURL(blob);
+  window.__ogBlob = blob;
+  return blob.size;
+}
+
+window.__ogReady = draw();
+</script>
+</body>
+</html>
