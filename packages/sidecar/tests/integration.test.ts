@@ -1341,6 +1341,11 @@ describe("sidecar CLI integration", () => {
     expect(fs.existsSync(path.join(repo, ".gitignore"))).toBe(false);
     expect(fs.existsSync(path.join(repo, ".zed"))).toBe(false);
     expect(git(repo, ["branch", "--show-current"]).stdout.trim()).toMatch(/^sidecar-inbox\//);
+    // Init itself changed the tree it syncs, and the daemon's watcher only
+    // sees changes made after it attaches — so init ends with a sync and the
+    // committed .sidecar is already on the remote for the next machine.
+    const mainFiles = gitRaw(["--git-dir", remote, "ls-tree", "-r", "--name-only", "main"]).stdout;
+    expect(mainFiles).toContain(".sidecar");
   });
 
   test("init treats any path spelling of the repo root as standalone", () => {

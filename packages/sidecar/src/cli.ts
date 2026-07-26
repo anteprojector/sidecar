@@ -405,6 +405,17 @@ function cmdInit(args: string[]): number {
     registerInstallWithGlobalSidecar(globalSidecar, root);
     ensureDaemonSetup(globalSidecar);
   }
+  // Standalone init just changed the tree it syncs — .sidecar at minimum —
+  // and the daemon's watcher only sees changes made after it attaches, so
+  // nothing would push this until the interval tick minutes from now. Sync
+  // before returning; "skip" because a daemon that beat us to the lock is
+  // already doing this exact work.
+  if (isStandalone(config) && !parsed.flags.has("--no-clone")) {
+    const synced = withSyncLock(root, "skip", () => {
+      syncProject(root, config, { snapshot: true });
+    });
+    if (synced) registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
+  }
   return 0;
 }
 

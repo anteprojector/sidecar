@@ -30,6 +30,10 @@ sidecar init --path .
 The remote is the repo's own `origin` — sidecar doesn't create or ask for a
 second repo. If the repo has no origin yet, `init` says so and stops.
 
+`init` finishes with a first sync: the committed `.sidecar` — and anything
+else uncommitted, per the snapshot rule below — lands on the remote
+immediately instead of waiting for the daemon's next pass.
+
 On every other machine, clone the repo and run `init` with no arguments. The
 `.sidecar` config is committed, so there's nothing to answer:
 
@@ -65,6 +69,21 @@ unrecoverable:
 ```sh
 git for-each-ref refs/sidecar-discarded/
 ```
+
+## Tell your agents
+
+Coding agents reach for git by habit — committing, branching, pushing to
+"save" work. In a standalone repo that fights the daemon. Recommended
+AGENTS.md snippet:
+
+````markdown
+This repo is auto-synced by sidecar: every change is committed, merged
+across machines, and pushed automatically. Saving a file is the whole job —
+do not commit, push, or switch branches. The checkout lives on a
+sidecar-owned `sidecar-inbox/*` branch; manual git mutations race the
+daemon, and the next sync reverts them. Read-only git (log, diff, show) is
+fine.
+````
 
 ## Redaction defaults to none
 

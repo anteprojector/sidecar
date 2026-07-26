@@ -31,7 +31,9 @@ remote URL (or creates one with `gh`); pass the remote to run
 non-interactively.
 
 Answering `.` to the path question — or passing `--path .` — makes the repo
-itself the sidecar. See [standalone.md](standalone.md).
+itself the sidecar; that init ends with a first sync, so `.sidecar` and any
+uncommitted files land on the remote immediately. See
+[standalone.md](standalone.md).
 
 | flag | effect |
 |---|---|
@@ -153,7 +155,7 @@ remote:        https://github.com/you/your-repo-sidecar.git
 main branch:   main
 inbox branch:  sidecar-inbox/zack/79ffcdaf92aa
 checkout:      present
-branch:        main
+branch:        sidecar-inbox/zack/79ffcdaf92aa
 dirty:         no
 daemon:        running
 last sync:     4 minutes ago (2026-07-25 11:58)
@@ -168,7 +170,7 @@ colored is worth reading:
 | dim | labels, and values that mean "nothing here" (`no`, `none`, `never`) |
 | purple | your repo |
 | yellow | the sidecar — its checkout path and the remote it syncs with |
-| **bold yellow** | something is waiting on you: `dirty: yes`, a pending inbox count, a detached checkout |
+| **bold yellow** | something is waiting on you: `dirty: yes`, a pending inbox count, a detached checkout, or a checkout parked off its inbox branch |
 | green | `daemon: running` |
 | red | the daemon should be running and isn't, or the checkout is missing |
 

@@ -1955,6 +1955,13 @@ function cmdInit(args) {
     registerInstallWithGlobalSidecar(globalSidecar, root);
     ensureDaemonSetup(globalSidecar);
   }
+  if (isStandalone(config) && !parsed.flags.has("--no-clone")) {
+    const synced = withSyncLock(root, "skip", () => {
+      syncProject(root, config, { snapshot: true });
+    });
+    if (synced)
+      registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
+  }
   return 0;
 }
 function buildInitConfig(root, remote, parsed) {
