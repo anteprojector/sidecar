@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Draw the favicon: a diagonally split square with a happy face in the yellow half.
 
-The bottom-right triangle is the brand yellow, the top-left is transparent, so the
-mark keeps its wedge silhouette on a light or dark tab strip. Geometry lives here
-once and is emitted twice — as SVG for browsers that take it, and as a supersampled
-RGBA PNG for the ones that don't.
+The bottom-right wedge is gold with its diagonal edge gently bowed outward, the
+top-left is transparent, so the mark keeps its wedge silhouette on a light or dark
+tab strip. Geometry lives here once and is emitted twice — as SVG for browsers that
+take it, and as a supersampled RGBA PNG for the ones that don't.
 
 The face sits at the triangle's incenter (~0.707, 0.707) rather than its centroid —
 equidistant from all three edges, which is what actually looks centered in a wedge.
@@ -32,20 +32,27 @@ SS = 4  # supersampling factor per axis
 
 YELLOW = (0xFF, 0xC6, 0x1E)  # --accent, the yellow from branding/color.png
 PALE = (0xFF, 0xE9, 0xA3)  # the paper of the site's yellow theme
+GOLD = (0xFF, 0xDD, 0x66)  # between the two — opaque enough to read as brand
 INK = (0x1A, 0x1A, 0x1A)
 SHINE = (0xFF, 0xFF, 0xFF)
 WHITE = (0xFF, 0xFF, 0xFF)
+
+# Control point of the diagonal edge, as a fraction of the icon edge. The edge is
+# a quadratic Bézier from the top-right corner to the bottom-left one; pulling the
+# control toward the origin bows the edge outward. 0.5 would be a straight line.
+DIAG_C = 0.40625
 
 # Every length is a fraction of the icon edge; y points down. An eye is a tall oval
 # with a smaller oval of shine near its top, as on the headlight in the branding art.
 BASE = dict(
     cx=0.695,
-    cy=0.65,  # eye centerline
+    cy=0.65,  # face centerline; the rotation pivot and what the smile hangs from
     rot=9.0,  # whole-face tilt, degrees clockwise; the lean reads as motion
-    paper=PALE,  # the triangle behind the face
+    paper=GOLD,  # the wedge behind the face
     ink=INK,  # eyes and smile
     shine=SHINE,  # the highlight inside each eye
     eye_dx=0.143,  # half the distance between the eyes
+    eye_dy=-0.0625,  # both eyes ride this far above the centerline
     eye_rx=0.082,
     eye_ry=0.14,
     eye_r_dy=0.0,  # right eye pushed down relative to the left
@@ -58,25 +65,26 @@ BASE = dict(
     smile_r=0.173,
     smile_arc=0.68,  # radians either side of straight down
     smile_rot=0.0,  # smile rotated on its own, degrees clockwise
-    smile_w=0.098,  # stroke width, round caps
+    smile_w=0.071875,  # stroke width, round caps
 )
 
 # Named explorations for review. Each is BASE plus the listed overrides. The
 # geometry is settled — these are the same face in three colorways.
 VARIANTS = {
     "a-yellow": dict(paper=YELLOW),
-    "b-pale": {},  # the chosen face — BASE as-is
+    "b-pale": dict(paper=PALE),  # what shipped before the gold wedge
     "c-mono": dict(paper=INK, ink=WHITE, shine=INK),
 }
 
 
 def eyes(p):
     """(center_x, center_y, rx, ry) for the left and right eye."""
+    ey = p["cy"] + p["eye_dy"]
     return (
-        (p["cx"] - p["eye_dx"], p["cy"], p["eye_rx"], p["eye_ry"]),
+        (p["cx"] - p["eye_dx"], ey, p["eye_rx"], p["eye_ry"]),
         (
             p["cx"] + p["eye_dx"],
-            p["cy"] + p["eye_r_dy"],
+            ey + p["eye_r_dy"],
             p["eye_rx"] * p["eye_r_scale"],
             p["eye_ry"] * p["eye_r_scale"],
         ),
@@ -100,7 +108,11 @@ def smile_ends(p):
 
 def sample(px, py, p):
     """The color at a point, or None where the icon is transparent."""
-    if px + py < 1.0:
+    # The wedge boundary is the bowed diagonal: a quadratic Bézier from (1, 0)
+    # to (0, 1) with control (DIAG_C, DIAG_C). The curve is symmetric across
+    # y = x, so px - py pins the curve parameter and px + py tests the side.
+    t = (1.0 - (px - py)) / 2.0
+    if px + py < 1.0 - 2.0 * t * (1.0 - t) * (1.0 - 2.0 * DIAG_C):
         return None
 
     # Undo the whole-face tilt, so the face geometry below is always upright.
@@ -201,7 +213,7 @@ def svg(p):
     # width/height as well as viewBox: without an intrinsic size, an SVG drawn
     # into a <canvas> renders as nothing in some browsers.
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{S}" height="{S}" viewBox="0 0 {S} {S}">
-  <path fill="{hex_(p["paper"])}" d="M0 {S}H{S}V0Z"/>
+  <path fill="{hex_(p["paper"])}" d="M0 {S}H{S}V0Q{u(DIAG_C)} {u(DIAG_C)} 0 {S}Z"/>
   <g{tilt}>
 {chr(10).join(eye_svg)}
     <path d="M{u(lx)} {u(ly)}A{u(p["smile_r"])} {u(p["smile_r"])} 0 0 0 {u(rx_)} {u(ry_)}"

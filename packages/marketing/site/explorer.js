@@ -1,17 +1,17 @@
 // ---------------------------------------------------------------------------
 // Theme explorer. A paintbrush in the bottom-right corner opens a panel with
-// three carousels: theme, typeface, favicon. Deliberately shipping while the
-// design settles — visitors can play with it too, and every choice is local
-// to their browser.
+// two carousels: theme and typeface. Deliberately shipping while the design
+// settles — visitors can play with it too, and every choice is local to
+// their browser. (The favicon row retired when the gold wedge shipped; the
+// faces still live in site/assets/faces/ if it ever comes back.)
 //
 // Caveat of exploration mode: the typeface row loads its candidates from the
 // Google Fonts CDN, the one exception to the page's no-third-party-requests
 // rule (see the @font-face comment in style.css).
 //
 // To retire it someday: delete this file and its <script> tag in index.html,
-// self-host the winning font the way the shipped one is handled in style.css
-// (one variable woff2, latin subset), and run scripts/make-favicon.py for the
-// winning face.
+// and self-host the winning font the way the shipped one is handled in
+// style.css (one variable woff2, latin subset).
 //
 // Keys: F / shift+F cycle the font. Every choice survives reload.
 // ---------------------------------------------------------------------------
@@ -30,13 +30,6 @@
     { name: 'Bricolage Grotesque', note: 'most expressive, odd widths' }
   ];
 
-  // Mirrors VARIANTS in scripts/make-favicon.py; "b-pale" is what ships.
-  var FACES = [
-    { file: 'a-yellow', name: 'yellow', note: 'brand yellow' },
-    { file: 'b-pale',   name: 'pale',   note: 'current — yellow-theme paper' },
-    { file: 'c-mono',   name: 'mono',   note: 'black and white' }
-  ];
-
   var THEMES = [
     { id: 'system', note: 'follows the OS' },
     { id: 'light',  note: 'white paper, black ink' },
@@ -46,14 +39,13 @@
 
   var STACK = ', -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
   var FONT_KEY = 'font-cycler-2';
-  var FACE_KEY = 'favicon-explorer';
   // Feedback on the shipped defaults lands as an issue, prefilled so the
   // reporter only has to name the combination they liked.
   var ISSUE_URL = 'https://github.com/anteprojector/sidecar/issues/new?' +
     'title=' + encodeURIComponent('Theme explorer: feedback') +
     '&labels=' + encodeURIComponent('feedback') +
     '&body=' + encodeURIComponent(
-      'Theme:\nFont:\nFavicon:\n\nWhat worked, what didn\'t:\n');
+      'Theme:\nFont:\n\nWhat worked, what didn\'t:\n');
 
   var link = document.createElement('link');
   link.rel = 'stylesheet';
@@ -69,14 +61,11 @@
     '<path d="M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 ' +
     '2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02Z"/></svg>';
 
-  function row(key, label, withSwatch) {
+  function row(key, label) {
     return '<div class="ex-row" data-row="' + key + '">' +
       '<span class="ex-key">' + label + '</span>' +
       '<button type="button" data-step="-1" aria-label="Previous ' + label + '">&larr;</button>' +
-      '<span class="ex-text">' +
-        (withSwatch ? '<img class="ex-swatch" alt="" width="16" height="16">' : '') +
-        '<span><b></b><i></i></span>' +
-      '</span>' +
+      '<span class="ex-text"><span><b></b><i></i></span></span>' +
       '<button type="button" data-step="1" aria-label="Next ' + label + '">&rarr;</button>' +
       '</div>';
   }
@@ -85,9 +74,8 @@
   root.id = 'explorer';
   root.innerHTML =
     '<div class="ex-panel" hidden>' +
-      row('theme', 'theme', false) +
-      row('font', 'font', false) +
-      row('favicon', 'favicon', true) +
+      row('theme', 'theme') +
+      row('font', 'font') +
       '<p class="ex-note"><a href="' + ISSUE_URL + '" target="_blank" ' +
         'rel="noopener">Give us feedback on github (and a star)</a></p>' +
     '</div>' +
@@ -126,21 +114,15 @@
     '#explorer button[data-step]:hover{color:var(--ink);border-color:var(--ink)}',
     '#explorer .ex-text{display:flex;align-items:center;gap:0.5rem;min-width:11.625rem}',
     '#explorer .ex-text>span{display:flex;flex-direction:column}',
-    '#explorer .ex-swatch{flex:none;border:1px solid var(--rule)}',
     '#explorer b{font-weight:600}',
     '#explorer i{font-style:normal;color:var(--faint);font-size:0.625rem}',
     '@media (prefers-reduced-motion:reduce){#explorer .ex-toggle{transition:none}}'
   ].join('');
 
   var fontIndex = 0;
-  // Default to the face that actually ships (see make-favicon.py's BASE), so
-  // the explorer's startup apply doesn't override the page's own icon links.
-  var faceIndex = FACES.findIndex(function (x) { return x.file === 'b-pale'; });
   try {
     var f = FONTS.findIndex(function (x) { return x.name === localStorage.getItem(FONT_KEY); });
     if (f > -1) fontIndex = f;
-    var v = FACES.findIndex(function (x) { return x.file === localStorage.getItem(FACE_KEY); });
-    if (v > -1) faceIndex = v;
   } catch (e) {}
 
   function paint(key, title, note) {
@@ -157,57 +139,6 @@
     paint('font', (fontIndex + 1) + '/' + FONTS.length + '  ' + font.name, font.note);
     try { localStorage.setItem(FONT_KEY, font.name); } catch (e) {}
   }
-
-  // Point every icon link at one href. Browsers ignore a plain href swap on a
-  // live <link>, so each element is replaced outright; the type is set from the
-  // href because Safari won't render an SVG favicon and needs the PNG.
-  function setIconLinks(href, type) {
-    document.querySelectorAll('link[rel~="icon"]').forEach(function (el) { el.remove(); });
-    var icon = document.createElement('link');
-    icon.rel = 'icon';
-    icon.type = type;
-    icon.href = href;
-    document.head.appendChild(icon);
-  }
-
-  // The tab icon is repainted from a raster data URI rather than the SVG file:
-  // a data URI can't be served from the favicon cache, which is what otherwise
-  // leaves the old face in the tab, and PNG works in every browser.
-  function rasterize(href, done) {
-    var img = new Image();
-    img.onload = function () {
-      try {
-        var canvas = document.createElement('canvas');
-        canvas.width = canvas.height = 64;
-        canvas.getContext('2d').drawImage(img, 0, 0, 64, 64);
-        done(canvas.toDataURL('image/png'), 'image/png');
-      } catch (e) {
-        done(null);
-      }
-    };
-    img.onerror = function () { done(null); };
-    img.src = href;
-  }
-
-  function applyFace(i) {
-    faceIndex = (i + FACES.length) % FACES.length;
-    var face = FACES[faceIndex];
-    var href = './assets/faces/' + face.file + '.svg';
-    var token = ++applyFace.token;
-
-    rasterize(href, function (dataUri, type) {
-      if (token !== applyFace.token) return;   // a later click already won
-      if (dataUri) setIconLinks(dataUri, type);
-      // Canvas failed (tainted or no 2d context) — fall back to the file
-      // itself, cache-busted so the browser can't reuse the previous icon.
-      else setIconLinks(href + '?v=' + face.file, 'image/svg+xml');
-    });
-
-    var r = paint('favicon', (faceIndex + 1) + '/' + FACES.length + '  ' + face.name, face.note);
-    r.querySelector('.ex-swatch').src = href;
-    try { localStorage.setItem(FACE_KEY, face.file); } catch (e) {}
-  }
-  applyFace.token = 0;
 
   // main.js owns the theme so the nav brush and this row can't drift apart.
   function themeIndex() {
@@ -246,7 +177,6 @@
       var step = Number(b.dataset.step);
       b.addEventListener('click', function () {
         if (key === 'font') applyFont(fontIndex + step);
-        else if (key === 'favicon') applyFace(faceIndex + step);
         else applyTheme(themeIndex() + step);
       });
     });
@@ -258,7 +188,6 @@
     });
 
     applyFont(fontIndex);
-    applyFace(faceIndex);
     applyTheme(themeIndex());
 
     // The nav brush can change the theme too; keep the row's text honest.
