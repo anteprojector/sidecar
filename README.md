@@ -54,16 +54,32 @@ sidecar init
 ```
 
 That's it. If the repo already has a committed `.sidecar` file, init joins
-the existing sidecar. If not, init walks you through it — paste a remote
-URL, or leave it blank and init creates a private repo for you with the
-GitHub CLI (`gh`).
+the existing sidecar. If not, init walks you through it — pick where the
+checkout lives, then paste a remote URL, or leave it blank and init creates
+a private repo for you with the GitHub CLI (`gh`).
 
 The daemon takes it from here. `sidecar status` shows what's happening;
 `sidecar sync` forces a sync right now.
 
+### Standalone repos
+
+Some repos have no parent — a dotfiles or machine-setup repo you keep on
+every machine, that wants auto-sync for its own sake. Answer `.` when init
+asks for the checkout path (or pass `--path .`) and the repo becomes its own
+sidecar, syncing to its own remote:
+
+```sh
+cd ~/dev/setup
+sidecar init --path .
+```
+
+Sidecar takes over branch management there, and redaction defaults to off —
+[how standalone works](docs/standalone.md).
+
 ## Learn more
 
 - [How syncing works](docs/sync.md) — the daemon, inbox branches, conflict-free merging
+- [Standalone repos](docs/standalone.md) — a repo that is its own sidecar
 - [Redaction](docs/redaction.md) — what's stripped from pushes, reviewing it, opting out
 - [Editor search visibility](docs/editors.md) — making gitignored files searchable
 - [Global vs local installs](docs/install.md) — pinning sidecar per-repo

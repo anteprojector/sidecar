@@ -234,7 +234,8 @@ function printUsage(target: "stdout" | "stderr"): void {
   write(`usage: sidecar <command> [options]
 
 ${header("common:")}
-  init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii]
+  init [remote] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii]
+                           --path . makes this repo itself the sidecar (standalone)
   status [--json]
   redactions               preview what redaction rewrites before content is pushed
 
@@ -265,28 +266,41 @@ function cmdDeinit(args: string[]): number {
   }
 
   const configPath = path.join(root, ".sidecar");
-  let configuredPath: string | undefined;
+  // Steps deinit knows it skipped. Anything here means the repo still carries
+  // sidecar traces, and the user should hear that once, plainly, at the end —
+  // not have to piece it together from scattered warnings.
+  const leftovers: string[] = [];
+  let config: SidecarConfig | undefined;
   if (fs.existsSync(configPath)) {
     try {
-      configuredPath = readConfig(configPath).path;
+      config = readConfig(configPath);
     } catch {
-      console.error(
-        `sidecar: warning: could not read ${configPath}; remove the Sidecar checkout and ignore entries manually`,
-      );
+      leftovers.push(`could not read ${configPath}, so its checkout and ignore entries were left in place`);
     }
   } else {
-    console.error(
-      `sidecar: warning: no .sidecar config found; remove any leftover checkout and ignore entries manually`,
-    );
+    leftovers.push("no .sidecar config found; a leftover checkout or ignore entries may remain");
+  }
+
+  // Standalone has no checkout to delete, so the git-level wiring that a
+  // recursive remove would have taken with it has to come out by hand.
+  if (config && isStandalone(config)) {
+    const leftover = releaseStandaloneCheckout(root, config);
+    if (leftover) leftovers.push(leftover);
+  } else if (!config) {
+    // Without a config, nested and standalone are indistinguishable — and in
+    // standalone the redaction filter is wired into this repo with
+    // required=true, where leaving it to go stale fails every future
+    // `git add`. Removing it is a no-op in a repo that never had it.
+    removeRedactionFilter(root);
   }
 
   fs.rmSync(configPath, { force: true });
-  if (configuredPath) {
-    const checkoutPath = path.resolve(root, configuredPath);
+  if (config && !isStandalone(config)) {
+    const checkoutPath = path.resolve(root, config.path);
     if (checkoutPath !== path.resolve(root) && checkoutPath !== path.parse(checkoutPath).root) {
       fs.rmSync(checkoutPath, { recursive: true, force: true });
     }
-    const ignoreEntry = ignoreEntryForSidecarPath(root, configuredPath);
+    const ignoreEntry = ignoreEntryForSidecarPath(root, config.path);
     if (ignoreEntry) {
       removeIgnoreEntry(path.join(root, ".gitignore"), ignoreEntry);
       removeIgnoreEntry(path.join(gitCommonDir(root), "info", "exclude"), ignoreEntry);
@@ -297,7 +311,40 @@ function cmdDeinit(args: string[]): number {
   unregisterInstance(root);
 
   console.log(`removed sidecar from ${paint("repo", root)}`);
+  if (leftovers.length) {
+    for (const leftover of leftovers) {
+      console.error(`sidecar: warning: ${leftover}`);
+    }
+    console.error(
+      "sidecar: deinit could not fully complete; to finish removal, ask your agent to scrub any remaining traces of sidecar",
+    );
+  }
   return 0;
+}
+
+/**
+ * Hands a standalone repo back to its owner, returning a description of any
+ * step it had to skip. Removing the redaction filter is the part that
+ * matters: `required = true` fails every `git add` if its command ever goes
+ * stale, and deinit is the user saying they want sidecar out of this repo —
+ * leaving that behind would break the repo for good.
+ */
+function releaseStandaloneCheckout(root: string, config: SidecarConfig): string | undefined {
+  removeRedactionFilter(root);
+  const current = git(root, ["branch", "--show-current"], { check: false }).stdout.trim();
+  if (current === config.branch) return undefined;
+
+  // Switching materializes committed blobs. Under redaction those are the
+  // redacted versions, and the working tree is still holding the originals —
+  // so that switch destroys local content. Leave the call to the user.
+  if (config.redaction !== "none") {
+    return `the repo is still on ${current || "a detached HEAD"}: switching to ${config.branch} would replace local files with their redacted pushed contents`;
+  }
+  if (git(root, ["switch", config.branch], { check: false }).status === 0) {
+    console.log(`switched back to ${config.branch}`);
+    return undefined;
+  }
+  return `could not switch to ${config.branch}; the repo is still on ${current || "a detached HEAD"}`;
 }
 
 function cmdInit(args: string[]): number {
@@ -330,40 +377,20 @@ function cmdInit(args: string[]): number {
       existingRoot = root;
     }
   }
-  const config = existingRoot
-    ? readConfig(configPath)
-    : {
-        remote: remote ?? promptRemote(root),
-        version: 1,
-        path: getValue(parsed, "--path", DEFAULT_PATH),
-        branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
-        inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
-        redaction: parsed.values.has("--redaction")
-          ? redactionModeConfigValue(getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE), "--redaction")
-          : promptRedactionMode(),
-      };
+  const config = existingRoot ? readConfig(configPath) : buildInitConfig(root, remote, parsed);
   if (!existingRoot) {
     validateRemote(config.remote);
     validateBranch(config.branch);
     validateInboxTemplate(config.inbox);
     writeConfig(configPath, config);
   }
-  const ignoreEntry = ensureSidecarIgnored(root, config.path);
   console.log(`${existingRoot ? "using" : "wrote"} ${paint("brand", configPath)}`);
-  if (ignoreEntry) {
-    const name = ignoreEntry.replace(/\/+$/, "");
-    console.log(`ignored ${name}/ via .gitignore`);
-    if (hasZedInclusion(root, ignoreEntry)) {
-      console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
-    } else if (promptYesNo(`include ${name}/ in Zed file search via .zed/settings.json?`)) {
-      if (ensureZedInclusion(root, ignoreEntry)) {
-        console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
-      } else {
-        console.log(`could not parse .zed/settings.json; add "${name}/**" to file_scan_inclusions manually`);
-      }
-    }
+  if (isStandalone(config)) {
+    // Nothing to ignore or make searchable: the repo is the sidecar, so its
+    // files are already tracked and already visible to every tool.
+    console.log(`standalone: ${paint("repo", root)} is the sidecar`);
   } else {
-    console.log(`sidecar path outside repo; not updating .gitignore`);
+    printCheckoutVisibility(root, config);
   }
   if (removeLegacyGitHooks(root)) {
     console.log("removed legacy sidecar git hooks; syncing is manual or via the global daemon");
@@ -379,6 +406,56 @@ function cmdInit(args: string[]): number {
     ensureDaemonSetup(globalSidecar);
   }
   return 0;
+}
+
+// Question order matters: the checkout path decides whether this is a
+// standalone sidecar, and that in turn changes the default answer to both of
+// the questions after it.
+function buildInitConfig(root: string, remote: string | undefined, parsed: ParsedOptions): SidecarConfig {
+  const rawPath = parsed.values.has("--path")
+    ? getValue(parsed, "--path", DEFAULT_PATH)
+    : promptSidecarPath(root);
+  // `--path $PWD` and `--path foo/..` mean the same thing as `--path .`;
+  // store them as "." so standalone detection — a string check on the config
+  // — can't be dodged by spelling the root differently and land the repo in
+  // the nested code path, pointed at itself with a second remote.
+  const sidecarPath = pathIsRepoRoot(root, rawPath) ? "." : rawPath;
+  const standalone = isStandalonePath(sidecarPath);
+  return {
+    // A standalone sidecar syncs a repo to its own remote, so origin is the
+    // answer — prompting for a URL (or offering to create a second repo with
+    // gh) would only invite a wrong one.
+    remote: remote ?? (standalone ? standaloneRemote(root) : promptRemote(root)),
+    version: 1,
+    path: sidecarPath,
+    branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
+    inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
+    redaction: parsed.values.has("--redaction")
+      ? redactionModeConfigValue(getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE), "--redaction")
+      // Redaction rewrites pushed content, and a standalone repo's content is
+      // the artifact you clone onto the next machine and run — a false
+      // positive there ships a broken file, not a mangled note.
+      : promptRedactionMode(standalone ? "none" : DEFAULT_REDACTION_MODE),
+  };
+}
+
+function printCheckoutVisibility(root: string, config: SidecarConfig): void {
+  const ignoreEntry = ensureSidecarIgnored(root, config.path);
+  if (!ignoreEntry) {
+    console.log(`sidecar path outside repo; not updating .gitignore`);
+    return;
+  }
+  const name = ignoreEntry.replace(/\/+$/, "");
+  console.log(`ignored ${name}/ via .gitignore`);
+  if (hasZedInclusion(root, ignoreEntry)) {
+    console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
+  } else if (promptYesNo(`include ${name}/ in Zed file search via .zed/settings.json?`)) {
+    if (ensureZedInclusion(root, ignoreEntry)) {
+      console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
+    } else {
+      console.log(`could not parse .zed/settings.json; add "${name}/**" to file_scan_inclusions manually`);
+    }
+  }
 }
 
 // Package managers don't reliably run the postinstall that enables the daemon
@@ -563,8 +640,12 @@ function cmdStatus(args: string[]): number {
   const sidecarPath = resolveSidecarPath(root, config);
   const checkoutPresent = hasGitMetadata(sidecarPath);
   const inbox = expandInbox(config, checkoutPresent ? sidecarPath : undefined);
-  statusLine("main repo", root, "repo");
-  statusLine("sidecar path", sidecarPath, "brand");
+  if (isStandalone(config)) {
+    statusLine("standalone", root, "repo");
+  } else {
+    statusLine("main repo", root, "repo");
+    statusLine("sidecar path", sidecarPath, "brand");
+  }
   statusLine("remote", config.remote, "brand");
   statusLine("main branch", config.branch);
   statusLine("inbox branch", inbox);
@@ -579,8 +660,11 @@ function cmdStatus(args: string[]): number {
   const branch = git(sidecarPath, ["branch", "--show-current"]).stdout.trim();
   const dirty = Boolean(git(sidecarPath, ["status", "--porcelain"]).stdout.trim());
   statusLine("checkout", "present");
-  if (branch) statusLine("branch", branch);
-  else statusLine("branch", "(detached)", "attn");
+  // Sidecar keeps the checkout on its inbox branch; anywhere else is either a
+  // sync mid-flight or a hand-made switch, and the next sync moves it back.
+  if (!branch) statusLine("branch", "(detached)", "attn");
+  else if (branch === inbox) statusLine("branch", branch);
+  else statusLine("branch", `${branch} — not the inbox branch; sync will switch back`, "attn");
   statusLine("dirty", dirty ? "yes" : "no", dirty ? "attn" : "quiet");
   printDaemonLine();
   printLastSyncLine(root);
@@ -604,6 +688,7 @@ function cmdStatusJson(): number {
   const payload = {
     root,
     sidecarPath,
+    standalone: isStandalone(config),
     remote: config.remote,
     branch: config.branch,
     inbox,
@@ -1115,13 +1200,16 @@ export function mergeInboxBranches(
   // originals, so the branch dance happens in a throwaway linked worktree
   // and the checkout never leaves the inbox branch.
   // No commits means no worktree to protect (`worktree add` refuses an
-  // unborn HEAD). A checkout already sitting on the main branch would block
-  // the worktree from switching to it, so that unusual state keeps the old
-  // in-place behavior — including its rewrite of checkout files from
-  // committed blobs.
-  const current = git(sidecarPath, ["branch", "--show-current"]).stdout.trim();
-  if (!hasAnyCommit(sidecarPath) || current === config.branch) {
+  // unborn HEAD), and nothing to rewrite either.
+  if (!hasAnyCommit(sidecarPath)) {
     return mergeInboxBranchesAt(sidecarPath, config, options);
+  }
+  // A checkout parked on the main branch would block the worktree from
+  // switching to it. Sidecar owns this checkout's branch, and ensureClean
+  // above proved there is no uncommitted work, so move back to the inbox
+  // branch rather than merging in place and rewriting the user's files.
+  if (git(sidecarPath, ["branch", "--show-current"]).stdout.trim() === config.branch) {
+    ensureInboxBranch(sidecarPath, config, expandInbox(config, sidecarPath));
   }
   // A deterministic path (rather than mkdtemp) lets a new sync reclaim the
   // worktree a killed sync left behind; a stale registration would otherwise
@@ -1330,7 +1418,16 @@ export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain
     if (existing.status !== 0) {
       git(sidecarPath, ["remote", "add", "origin", config.remote]);
     } else if (existing.stdout.trim() !== config.remote) {
-      throw new SidecarError(`sidecar origin is ${existing.stdout.trim()}; expected ${config.remote}`);
+      // A standalone sidecar syncs to "this repo's origin" by definition; the
+      // URL in the committed .sidecar is just how the machine that wrote it
+      // reached the same repo. A clone made over another scheme (ssh vs
+      // https) is not a conflict — origin wins.
+      if (!isStandalone(config)) {
+        throw new SidecarError(`sidecar origin is ${existing.stdout.trim()}; expected ${config.remote}`);
+      }
+      console.log(
+        `using origin ${paint("brand", existing.stdout.trim())} ${paint("quiet", `(.sidecar says ${config.remote})`)}`,
+      );
     }
     fetch(sidecarPath, true);
   } else {
@@ -1363,6 +1460,14 @@ export function bootstrapMainBranch(repo: string, config: SidecarConfig): void {
   }
 
   git(repo, ["switch", "--orphan", config.branch]);
+  // A standalone repo is the user's own; seeding it with a scratchpad README
+  // would be putting our furniture in their house. An empty commit is enough
+  // to give the branch a root.
+  if (isStandalone(config)) {
+    git(repo, ["commit", "--allow-empty", "-m", "Initialize sidecar"]);
+    pushBranch(repo, config.branch);
+    return;
+  }
   fs.writeFileSync(
     path.join(repo, "README.md"),
     `# Sidecar
@@ -1400,6 +1505,17 @@ export function ensureMainBranch(repo: string, config: SidecarConfig): void {
   // Diverged: another machine won a push race. Local commits beyond the
   // remote are only sidecar-generated inbox merges, so the remote side wins
   // and any still-pending inbox branches get re-merged on top of it.
+  // This reset is the one destructive step in a sync, so park the discarded
+  // tip under refs/sidecar-discarded/ first. It costs one ref write, never
+  // leaves the machine (pushes and fetches only touch refs/heads/*), and
+  // turns "gone" into "findable" if that invariant ever fails to hold.
+  // The tip's own hash in the name keeps two same-second resets from
+  // overwriting each other: a collision then requires the same tip, where
+  // both writes record the same thing anyway.
+  const tip = git(repo, ["rev-parse", "--short", "HEAD"]).stdout.trim();
+  const discarded = `refs/sidecar-discarded/${config.branch}/${utcTimestamp()}-${tip}`;
+  git(repo, ["update-ref", discarded, "HEAD"], { check: false });
+  console.log(`${config.branch} diverged from ${remoteBranch}; old tip kept at ${paint("brand", discarded)}`);
   git(repo, ["reset", "--hard", remoteBranch]);
 }
 
@@ -1414,6 +1530,17 @@ export function ensureInboxBranch(repo: string, config: SidecarConfig, inbox: st
 
   if (remoteRefExists(repo, inbox)) {
     git(repo, ["switch", "-c", inbox, "--track", `origin/${inbox}`]);
+    return;
+  }
+
+  // A standalone checkout is the user's live working tree, and a dotfiles
+  // repo routinely sits ahead of its origin. Fork its inbox from HEAD:
+  // creating a branch in place never rewrites files, where starting from an
+  // older origin/<main> rolls the tree back to the pushed state — or refuses
+  // to overwrite dirty files and kills init halfway. Anything HEAD is missing
+  // comes back through the first inbox merge.
+  if (isStandalone(config) && hasAnyCommit(repo)) {
+    git(repo, ["switch", "-c", inbox]);
     return;
   }
 
@@ -1458,16 +1585,16 @@ export function snapshot(
     .stdout.split("\n")
     .filter(Boolean);
 
-  const mainHead = git(mainRoot, ["rev-parse", "--short", "HEAD"], { check: false });
-  const mainHeadText = mainHead.status === 0 ? mainHead.stdout.trim() : "unborn";
   const source = `${currentUser()}@${currentHost()}`;
-  const body = [
-    message,
-    "",
-    `source: ${source}`,
-    `main-head: ${mainHeadText}`,
-    `inbox: ${inbox}`,
-  ];
+  const body = [message, "", `source: ${source}`];
+  // main-head pins a snapshot to the code it was taken against. Standalone has
+  // no separate code repo — mainRoot is this repo — so the trailer would just
+  // record the commit this snapshot is about to sit on.
+  if (path.resolve(repo) !== path.resolve(mainRoot)) {
+    const mainHead = git(mainRoot, ["rev-parse", "--short", "HEAD"], { check: false });
+    body.push(`main-head: ${mainHead.status === 0 ? mainHead.stdout.trim() : "unborn"}`);
+  }
+  body.push(`inbox: ${inbox}`);
   git(repo, ["commit", "-m", body.join("\n")]);
   console.log(`committed sidecar snapshot to ${paint("brand", inbox)}`);
   reportRedactions(repo, staged, redactionMode);
@@ -1581,6 +1708,29 @@ export function ensureRedactionFilter(repo: string, mode: RedactionMode = DEFAUL
     );
   }
   return true;
+}
+
+// The inverse of ensureRedactionFilter, for the one case where the checkout
+// outlives sidecar's interest in it.
+export function removeRedactionFilter(repo: string): void {
+  git(repo, ["config", "--remove-section", `filter.${REDACTION_FILTER_NAME}`], { check: false });
+
+  const attributesPath = path.join(gitCommonDir(repo), "info", "attributes");
+  const line = `* filter=${REDACTION_FILTER_NAME}`;
+  let contents: string;
+  try {
+    contents = fs.readFileSync(attributesPath, "utf8");
+  } catch {
+    return;
+  }
+  const lines = contents.split(/\r?\n/);
+  const kept = lines.filter((entry) => entry !== line);
+  if (kept.length === lines.length) return;
+  if (kept.every((entry) => !entry.trim())) {
+    fs.rmSync(attributesPath, { force: true });
+  } else {
+    fs.writeFileSync(attributesPath, `${kept.join("\n").replace(/\s+$/g, "")}\n`, "utf8");
+  }
 }
 
 // The filter must be runnable by plain git, outside this process: point it at
@@ -2497,6 +2647,37 @@ export function projectDependsOnSidecar(projectRoot: string): boolean {
   }
 }
 
+// Standalone is reachable but never accidental: you have to type "." and then
+// confirm it. Scripts say the same thing with `--path .`, which skips both.
+function promptSidecarPath(root: string): string {
+  if (!process.stdin.isTTY) return DEFAULT_PATH;
+
+  console.log(`sidecar keeps its files in a directory inside this repo — "." makes this repo itself the sidecar.`);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const answer = promptLine(`sidecar path ${paint("quiet", `[${DEFAULT_PATH}]`)}: `) || DEFAULT_PATH;
+    if (!isStandalonePath(answer)) return answer;
+    console.log(`standalone mode makes ${paint("repo", root)} itself the sidecar:`);
+    console.log("  sidecar owns this repo's branches, commits every change, and syncs it to its own remote.");
+    console.log("  your own commits still work; leave branch management to sidecar.");
+    if (promptYesNoDefaultNo("use standalone mode?")) return ".";
+  }
+  console.log(`keeping the default (${DEFAULT_PATH})`);
+  return DEFAULT_PATH;
+}
+
+function standaloneRemote(root: string): string {
+  const origin = git(root, ["remote", "get-url", "origin"], { check: false });
+  const remote = origin.status === 0 ? origin.stdout.trim() : "";
+  if (!remote) {
+    throw new SidecarError(
+      "standalone mode syncs this repo to its own origin, but it has none; add one with `git remote add origin <url>`, or name a remote with `sidecar init <remote> --path .`",
+    );
+  }
+  validateRemote(remote);
+  console.log(`standalone remote: ${paint("brand", remote)} ${paint("quiet", "(this repo's origin)")}`);
+  return remote;
+}
+
 function promptRemote(root: string): string {
   if (!process.stdin.isTTY) {
     throw new SidecarError("remote URL is required when no .sidecar config exists");
@@ -2517,23 +2698,27 @@ function promptRemote(root: string): string {
   throw new SidecarError("no valid remote URL provided");
 }
 
-// Non-interactive inits keep the default (the strictest mode): scripts must
-// never end up with weaker redaction than an unattended `sidecar init` implies.
-function promptRedactionMode(): RedactionMode {
-  if (!process.stdin.isTTY) return DEFAULT_REDACTION_MODE;
+// Non-interactive inits keep the caller's default rather than asking. For a
+// nested sidecar that default is the strictest mode, so a script never ends up
+// leakier than an unattended `sidecar init` implies; for a standalone repo it
+// is "none", because there the greater risk is redacting a file you then run.
+function promptRedactionMode(defaultMode: RedactionMode): RedactionMode {
+  if (!process.stdin.isTTY) return defaultMode;
 
   console.log("redaction rewrites sensitive values out of pushed content; your local files are never touched.");
-  console.log(`  secrets+pii  redact API keys, tokens, emails, and other PII ${paint("quiet", "(recommended)")}`);
-  console.log("  secrets      redact API keys and tokens only");
-  console.log("  none         push content verbatim");
+  const describe = (mode: RedactionMode, text: string): string =>
+    `  ${mode.padEnd(11)}  ${text}${mode === defaultMode ? ` ${paint("quiet", "(recommended)")}` : ""}`;
+  console.log(describe("secrets+pii", "redact API keys, tokens, emails, and other PII"));
+  console.log(describe("secrets", "redact API keys and tokens only"));
+  console.log(describe("none", "push content verbatim"));
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const answer = promptLine(`redaction mode ${paint("quiet", `[${DEFAULT_REDACTION_MODE}]`)}: `).toLowerCase();
-    if (!answer) return DEFAULT_REDACTION_MODE;
+    const answer = promptLine(`redaction mode ${paint("quiet", `[${defaultMode}]`)}: `).toLowerCase();
+    if (!answer) return defaultMode;
     if ((REDACTION_MODES as readonly string[]).includes(answer)) return answer as RedactionMode;
     console.log(`invalid redaction mode; expected one of ${REDACTION_MODES.join(", ")}`);
   }
-  console.log(`keeping the default (${DEFAULT_REDACTION_MODE})`);
-  return DEFAULT_REDACTION_MODE;
+  console.log(`keeping the default (${defaultMode})`);
+  return defaultMode;
 }
 
 function createRemoteWithGh(root: string): string {
@@ -2606,6 +2791,13 @@ function promptYesNo(question: string): boolean {
   if (!process.stdin.isTTY) return false;
   const answer = promptLine(`${question} ${paint("quiet", "[Y/n]")} `).toLowerCase();
   return answer === "" || answer === "y" || answer === "yes";
+}
+
+// For choices that should never be arrived at by holding Enter.
+function promptYesNoDefaultNo(question: string): boolean {
+  if (!process.stdin.isTTY) return false;
+  const answer = promptLine(`${question} ${paint("quiet", "[y/N]")} `).toLowerCase();
+  return answer === "y" || answer === "yes";
 }
 
 function promptLine(prompt: string): string {
@@ -3073,6 +3265,36 @@ function getValue(parsed: ParsedOptions, name: string, fallback: string): string
 
 function resolveSidecarPath(root: string, config: SidecarConfig): string {
   return path.resolve(root, config.path);
+}
+
+/**
+ * A standalone sidecar is one whose checkout *is* the repo (`path = "."`):
+ * there is no parent to gitignore it from, and the tree the daemon syncs is
+ * the tree the user works in. Everything else follows from that one fact, so
+ * standalone needs no config key of its own.
+ */
+export function isStandalone(config: SidecarConfig): boolean {
+  return isStandalonePath(config.path);
+}
+
+// Matches resolveSidecarPath's view of the same string: ".", "./" and "" all
+// resolve to the root itself.
+function isStandalonePath(sidecarPath: string): boolean {
+  return path.normalize(sidecarPath).replace(/[/\\]+$/, "") === ".";
+}
+
+// Realpath catches symlinked spellings of the root — git reports toplevel as
+// /private/var/... on macOS while the user types /var/... — that string
+// resolution alone would miss.
+function pathIsRepoRoot(root: string, candidate: string): boolean {
+  const resolved = path.resolve(root, candidate);
+  if (resolved === path.resolve(root)) return true;
+  try {
+    return fs.realpathSync(resolved) === fs.realpathSync(root);
+  } catch {
+    // Unresolvable paths cannot be the root.
+    return false;
+  }
 }
 
 function hasGitMetadata(repo: string): boolean {

@@ -1,0 +1,103 @@
+# Standalone repos
+
+Some repos don't belong to a parent. A dotfiles or machine-setup repo lives on
+every machine you own, has no code repo to hang off, and wants exactly what
+sidecar gives a scratchpad: auto-sync, no merge conflicts, no ceremony.
+
+Standalone mode points sidecar at such a repo directly. Instead of a child
+checkout inside a parent, the repo *is* the sidecar:
+
+```text
+~/dev/setup/
+  |-- .sidecar       # committed, path = "."
+  |-- install.sh     # your files, auto-synced
+```
+
+## Setup
+
+```sh
+cd ~/dev/setup
+sidecar init
+```
+
+`init` asks where the checkout should live. Answer `.` and confirm, and the
+repo adopts itself. Scripts skip both questions with `--path .`:
+
+```sh
+sidecar init --path .
+```
+
+The remote is the repo's own `origin` — sidecar doesn't create or ask for a
+second repo. If the repo has no origin yet, `init` says so and stops.
+
+On every other machine, clone the repo and run `init` with no arguments. The
+`.sidecar` config is committed, so there's nothing to answer:
+
+```sh
+git clone git@github.com:you/setup.git ~/dev/setup
+cd ~/dev/setup && sidecar init
+```
+
+## Sidecar owns the branches
+
+This is the one rule standalone asks you to accept. Sidecar keeps the checkout
+on a per-machine inbox branch (`sidecar-inbox/{user}/{random}`), snapshots your
+changes onto it, and merges every machine's inbox into `main` — which exists on
+the remote and in sidecar's own bookkeeping, not as a branch you sit on.
+
+In practice:
+
+- **Your own commits work fine.** Commit on the inbox branch whenever you want
+  a real message; those commits flow into `main` like any snapshot. Everything
+  uncommitted gets swept into a snapshot commit on the next sync.
+- **Don't manage branches by hand.** Switching to `main`, rebasing, or
+  committing there fights the daemon. `sidecar status` flags a checkout that
+  has wandered off its inbox branch, and the next sync moves it back.
+- **`git log` is noisy.** History interleaves your commits with snapshot and
+  merge commits from every machine. That's the trade for never resolving a
+  conflict.
+
+If you lose a push race on `main`, sidecar resets local `main` to the remote
+and re-merges — but it parks the discarded tip under
+`refs/sidecar-discarded/main/<timestamp>-<tip>` first, so nothing is
+unrecoverable:
+
+```sh
+git for-each-ref refs/sidecar-discarded/
+```
+
+## Redaction defaults to none
+
+A standalone repo's files are the artifact. You clone them onto a new machine
+and *run* them, so a redaction false positive doesn't mangle a note — it ships
+a broken script, and silently, because the machine that wrote the file still
+has the original in its working tree.
+
+So standalone `init` defaults to `redaction = "none"` where a nested sidecar
+defaults to `secrets+pii`. Turn it on if you want it, but review
+`sidecar redactions` before trusting it with content you execute. See
+[redaction.md](redaction.md).
+
+## Removing it
+
+```sh
+sidecar deinit
+```
+
+Nothing deletes the repo — it's yours. `deinit` removes `.sidecar`, unwires the
+redaction git filter, unregisters the repo from the daemon, and switches back
+to `main`. If redaction was on, it leaves the branch alone and tells you why:
+switching would replace your local files with their redacted pushed contents.
+
+You're left with a normal git repo holding a `.sidecar` deletion to commit.
+
+## Known rough edges
+
+- The repo sits on a `sidecar-inbox/...` branch, so GitHub's default-branch
+  view, `gh`, and editor branch indicators show something unfamiliar.
+- Conflicts fork into files like `install.conflict.main.abc1234.sh` alongside a
+  `.sidecar-conflicts/` manifest, in a repo you actually use.
+- Sync pushes to `main` automatically. Don't point standalone at a repo with
+  branch protection or a CI trigger you care about.
+- The daemon's watch filter reads only the top-level `.gitignore`, so a repo
+  with nested ignore files watches more than it needs to.

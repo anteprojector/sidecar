@@ -30,6 +30,17 @@ resolve a conflict: when two machines edited the same file, `sync` keeps every
 version as separate forked files instead of blocking. (A manual `sidecar
 merge` stops on conflict unless you pass `--fork-files`.)
 
+The checkout stays on its inbox branch the whole time: merging happens in a
+throwaway linked worktree, so switching to the canonical branch never rewrites
+the files you are working in. A checkout found parked somewhere else is moved
+back to its inbox branch before the merge, and `sidecar status` flags it.
+
+If two machines merge at once, the loser's push of the canonical branch is
+rejected; it refetches, resets local `main` to the remote, and re-merges what
+is still pending. That reset is the only destructive step in a sync, so the
+discarded tip is parked at `refs/sidecar-discarded/<branch>/<timestamp>-<tip>` first
+(local only — it is never pushed or fetched).
+
 A per-repo lock serializes syncs, and the two kinds of sync react differently
 to finding it held. A manual `sidecar sync` (or `sidecar snapshot`) is a
 demand: it fails immediately with "another sidecar sync is already running" —

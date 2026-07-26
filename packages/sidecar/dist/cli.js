@@ -1825,7 +1825,8 @@ function printUsage(target) {
   write(`usage: sidecar <command> [options]
 
 ${header("common:")}
-  init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii]
+  init [remote] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii]
+                           --path . makes this repo itself the sidecar (standalone)
   status [--json]
   redactions               preview what redaction rewrites before content is pushed
 
@@ -1854,23 +1855,31 @@ function cmdDeinit(args) {
     return 0;
   }
   const configPath = path2.join(root, ".sidecar");
-  let configuredPath;
+  const leftovers = [];
+  let config;
   if (fs2.existsSync(configPath)) {
     try {
-      configuredPath = readConfig(configPath).path;
+      config = readConfig(configPath);
     } catch {
-      console.error(`sidecar: warning: could not read ${configPath}; remove the Sidecar checkout and ignore entries manually`);
+      leftovers.push(`could not read ${configPath}, so its checkout and ignore entries were left in place`);
     }
   } else {
-    console.error(`sidecar: warning: no .sidecar config found; remove any leftover checkout and ignore entries manually`);
+    leftovers.push("no .sidecar config found; a leftover checkout or ignore entries may remain");
+  }
+  if (config && isStandalone(config)) {
+    const leftover = releaseStandaloneCheckout(root, config);
+    if (leftover)
+      leftovers.push(leftover);
+  } else if (!config) {
+    removeRedactionFilter(root);
   }
   fs2.rmSync(configPath, { force: true });
-  if (configuredPath) {
-    const checkoutPath = path2.resolve(root, configuredPath);
+  if (config && !isStandalone(config)) {
+    const checkoutPath = path2.resolve(root, config.path);
     if (checkoutPath !== path2.resolve(root) && checkoutPath !== path2.parse(checkoutPath).root) {
       fs2.rmSync(checkoutPath, { recursive: true, force: true });
     }
-    const ignoreEntry = ignoreEntryForSidecarPath(root, configuredPath);
+    const ignoreEntry = ignoreEntryForSidecarPath(root, config.path);
     if (ignoreEntry) {
       removeIgnoreEntry(path2.join(root, ".gitignore"), ignoreEntry);
       removeIgnoreEntry(path2.join(gitCommonDir(root), "info", "exclude"), ignoreEntry);
@@ -1880,7 +1889,27 @@ function cmdDeinit(args) {
   removeLegacyGitHooks(root);
   unregisterInstance(root);
   console.log(`removed sidecar from ${paint("repo", root)}`);
+  if (leftovers.length) {
+    for (const leftover of leftovers) {
+      console.error(`sidecar: warning: ${leftover}`);
+    }
+    console.error("sidecar: deinit could not fully complete; to finish removal, ask your agent to scrub any remaining traces of sidecar");
+  }
   return 0;
+}
+function releaseStandaloneCheckout(root, config) {
+  removeRedactionFilter(root);
+  const current = git(root, ["branch", "--show-current"], { check: false }).stdout.trim();
+  if (current === config.branch)
+    return;
+  if (config.redaction !== "none") {
+    return `the repo is still on ${current || "a detached HEAD"}: switching to ${config.branch} would replace local files with their redacted pushed contents`;
+  }
+  if (git(root, ["switch", config.branch], { check: false }).status === 0) {
+    console.log(`switched back to ${config.branch}`);
+    return;
+  }
+  return `could not switch to ${config.branch}; the repo is still on ${current || "a detached HEAD"}`;
 }
 function cmdInit(args) {
   const parsed = parseOptions(args, {
@@ -1901,36 +1930,18 @@ function cmdInit(args) {
       existingRoot = root;
     }
   }
-  const config = existingRoot ? readConfig(configPath) : {
-    remote: remote ?? promptRemote(root),
-    version: 1,
-    path: getValue(parsed, "--path", DEFAULT_PATH),
-    branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
-    inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
-    redaction: parsed.values.has("--redaction") ? redactionModeConfigValue(getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE), "--redaction") : promptRedactionMode()
-  };
+  const config = existingRoot ? readConfig(configPath) : buildInitConfig(root, remote, parsed);
   if (!existingRoot) {
     validateRemote(config.remote);
     validateBranch(config.branch);
     validateInboxTemplate(config.inbox);
     writeConfig(configPath, config);
   }
-  const ignoreEntry = ensureSidecarIgnored(root, config.path);
   console.log(`${existingRoot ? "using" : "wrote"} ${paint("brand", configPath)}`);
-  if (ignoreEntry) {
-    const name = ignoreEntry.replace(/\/+$/, "");
-    console.log(`ignored ${name}/ via .gitignore`);
-    if (hasZedInclusion(root, ignoreEntry)) {
-      console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
-    } else if (promptYesNo(`include ${name}/ in Zed file search via .zed/settings.json?`)) {
-      if (ensureZedInclusion(root, ignoreEntry)) {
-        console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
-      } else {
-        console.log(`could not parse .zed/settings.json; add "${name}/**" to file_scan_inclusions manually`);
-      }
-    }
+  if (isStandalone(config)) {
+    console.log(`standalone: ${paint("repo", root)} is the sidecar`);
   } else {
-    console.log(`sidecar path outside repo; not updating .gitignore`);
+    printCheckoutVisibility(root, config);
   }
   if (removeLegacyGitHooks(root)) {
     console.log("removed legacy sidecar git hooks; syncing is manual or via the global daemon");
@@ -1945,6 +1956,37 @@ function cmdInit(args) {
     ensureDaemonSetup(globalSidecar);
   }
   return 0;
+}
+function buildInitConfig(root, remote, parsed) {
+  const rawPath = parsed.values.has("--path") ? getValue(parsed, "--path", DEFAULT_PATH) : promptSidecarPath(root);
+  const sidecarPath = pathIsRepoRoot(root, rawPath) ? "." : rawPath;
+  const standalone = isStandalonePath(sidecarPath);
+  return {
+    remote: remote ?? (standalone ? standaloneRemote(root) : promptRemote(root)),
+    version: 1,
+    path: sidecarPath,
+    branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
+    inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
+    redaction: parsed.values.has("--redaction") ? redactionModeConfigValue(getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE), "--redaction") : promptRedactionMode(standalone ? "none" : DEFAULT_REDACTION_MODE)
+  };
+}
+function printCheckoutVisibility(root, config) {
+  const ignoreEntry = ensureSidecarIgnored(root, config.path);
+  if (!ignoreEntry) {
+    console.log(`sidecar path outside repo; not updating .gitignore`);
+    return;
+  }
+  const name = ignoreEntry.replace(/\/+$/, "");
+  console.log(`ignored ${name}/ via .gitignore`);
+  if (hasZedInclusion(root, ignoreEntry)) {
+    console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
+  } else if (promptYesNo(`include ${name}/ in Zed file search via .zed/settings.json?`)) {
+    if (ensureZedInclusion(root, ignoreEntry)) {
+      console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
+    } else {
+      console.log(`could not parse .zed/settings.json; add "${name}/**" to file_scan_inclusions manually`);
+    }
+  }
 }
 function ensureDaemonSetup(globalSidecar) {
   if (process.env[SKIP_SERVICE_ENV] === "1")
@@ -2112,8 +2154,12 @@ function cmdStatus(args) {
   const sidecarPath = resolveSidecarPath(root, config);
   const checkoutPresent = hasGitMetadata(sidecarPath);
   const inbox = expandInbox(config, checkoutPresent ? sidecarPath : undefined);
-  statusLine("main repo", root, "repo");
-  statusLine("sidecar path", sidecarPath, "brand");
+  if (isStandalone(config)) {
+    statusLine("standalone", root, "repo");
+  } else {
+    statusLine("main repo", root, "repo");
+    statusLine("sidecar path", sidecarPath, "brand");
+  }
   statusLine("remote", config.remote, "brand");
   statusLine("main branch", config.branch);
   statusLine("inbox branch", inbox);
@@ -2126,10 +2172,12 @@ function cmdStatus(args) {
   const branch = git(sidecarPath, ["branch", "--show-current"]).stdout.trim();
   const dirty = Boolean(git(sidecarPath, ["status", "--porcelain"]).stdout.trim());
   statusLine("checkout", "present");
-  if (branch)
+  if (!branch)
+    statusLine("branch", "(detached)", "attn");
+  else if (branch === inbox)
     statusLine("branch", branch);
   else
-    statusLine("branch", "(detached)", "attn");
+    statusLine("branch", `${branch} — not the inbox branch; sync will switch back`, "attn");
   statusLine("dirty", dirty ? "yes" : "no", dirty ? "attn" : "quiet");
   printDaemonLine();
   printLastSyncLine(root);
@@ -2152,6 +2200,7 @@ function cmdStatusJson() {
   const payload = {
     root,
     sidecarPath,
+    standalone: isStandalone(config),
     remote: config.remote,
     branch: config.branch,
     inbox,
@@ -2571,9 +2620,11 @@ function mergeInboxBranches(sidecarPath, config, options) {
     console.log("no inbox branches to merge");
     return 0;
   }
-  const current = git(sidecarPath, ["branch", "--show-current"]).stdout.trim();
-  if (!hasAnyCommit(sidecarPath) || current === config.branch) {
+  if (!hasAnyCommit(sidecarPath)) {
     return mergeInboxBranchesAt(sidecarPath, config, options);
+  }
+  if (git(sidecarPath, ["branch", "--show-current"]).stdout.trim() === config.branch) {
+    ensureInboxBranch(sidecarPath, config, expandInbox(config, sidecarPath));
   }
   const scratch = path2.join(os.tmpdir(), `sidecar-merge-${crypto.createHash("sha1").update(sidecarPath).digest("hex").slice(0, 12)}`);
   const worktree = path2.join(scratch, "checkout");
@@ -2725,7 +2776,10 @@ function cloneOrUpdate(root, config, bootstrapMain) {
     if (existing.status !== 0) {
       git(sidecarPath, ["remote", "add", "origin", config.remote]);
     } else if (existing.stdout.trim() !== config.remote) {
-      throw new SidecarError(`sidecar origin is ${existing.stdout.trim()}; expected ${config.remote}`);
+      if (!isStandalone(config)) {
+        throw new SidecarError(`sidecar origin is ${existing.stdout.trim()}; expected ${config.remote}`);
+      }
+      console.log(`using origin ${paint("brand", existing.stdout.trim())} ${paint("quiet", `(.sidecar says ${config.remote})`)}`);
     }
     fetch(sidecarPath, true);
   } else {
@@ -2755,6 +2809,11 @@ function bootstrapMainBranch(repo, config) {
     return;
   }
   git(repo, ["switch", "--orphan", config.branch]);
+  if (isStandalone(config)) {
+    git(repo, ["commit", "--allow-empty", "-m", "Initialize sidecar"]);
+    pushBranch(repo, config.branch);
+    return;
+  }
   fs2.writeFileSync(path2.join(repo, "README.md"), `# Sidecar
 
 Scratch space for a code repository: plans, notes, and agent context.
@@ -2785,6 +2844,10 @@ function ensureMainBranch(repo, config) {
     git(repo, ["merge", "--ff-only", remoteBranch]);
     return;
   }
+  const tip = git(repo, ["rev-parse", "--short", "HEAD"]).stdout.trim();
+  const discarded = `refs/sidecar-discarded/${config.branch}/${utcTimestamp()}-${tip}`;
+  git(repo, ["update-ref", discarded, "HEAD"], { check: false });
+  console.log(`${config.branch} diverged from ${remoteBranch}; old tip kept at ${paint("brand", discarded)}`);
   git(repo, ["reset", "--hard", remoteBranch]);
 }
 function ensureInboxBranch(repo, config, inbox) {
@@ -2797,6 +2860,10 @@ function ensureInboxBranch(repo, config, inbox) {
   }
   if (remoteRefExists(repo, inbox)) {
     git(repo, ["switch", "-c", inbox, "--track", `origin/${inbox}`]);
+    return;
+  }
+  if (isStandalone(config) && hasAnyCommit(repo)) {
+    git(repo, ["switch", "-c", inbox]);
     return;
   }
   if (remoteRefExists(repo, config.branch)) {
@@ -2825,16 +2892,13 @@ function snapshot(repo, mainRoot, inbox, message = "sidecar snapshot", redaction
   }
   const staged = git(repo, ["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--diff-filter=d"]).stdout.split(`
 `).filter(Boolean);
-  const mainHead = git(mainRoot, ["rev-parse", "--short", "HEAD"], { check: false });
-  const mainHeadText = mainHead.status === 0 ? mainHead.stdout.trim() : "unborn";
   const source = `${currentUser()}@${currentHost()}`;
-  const body = [
-    message,
-    "",
-    `source: ${source}`,
-    `main-head: ${mainHeadText}`,
-    `inbox: ${inbox}`
-  ];
+  const body = [message, "", `source: ${source}`];
+  if (path2.resolve(repo) !== path2.resolve(mainRoot)) {
+    const mainHead = git(mainRoot, ["rev-parse", "--short", "HEAD"], { check: false });
+    body.push(`main-head: ${mainHead.status === 0 ? mainHead.stdout.trim() : "unborn"}`);
+  }
+  body.push(`inbox: ${inbox}`);
   git(repo, ["commit", "-m", body.join(`
 `)]);
   console.log(`committed sidecar snapshot to ${paint("brand", inbox)}`);
@@ -2911,6 +2975,28 @@ ${line}
 `, "utf8");
   }
   return true;
+}
+function removeRedactionFilter(repo) {
+  git(repo, ["config", "--remove-section", `filter.${REDACTION_FILTER_NAME}`], { check: false });
+  const attributesPath = path2.join(gitCommonDir(repo), "info", "attributes");
+  const line = `* filter=${REDACTION_FILTER_NAME}`;
+  let contents;
+  try {
+    contents = fs2.readFileSync(attributesPath, "utf8");
+  } catch {
+    return;
+  }
+  const lines = contents.split(/\r?\n/);
+  const kept = lines.filter((entry) => entry !== line);
+  if (kept.length === lines.length)
+    return;
+  if (kept.every((entry) => !entry.trim())) {
+    fs2.rmSync(attributesPath, { force: true });
+  } else {
+    fs2.writeFileSync(attributesPath, `${kept.join(`
+`).replace(/\s+$/g, "")}
+`, "utf8");
+  }
 }
 function redactCliPath() {
   const self = fileURLToPath2(import.meta.url);
@@ -3678,6 +3764,33 @@ function projectDependsOnSidecar(projectRoot) {
     return false;
   }
 }
+function promptSidecarPath(root) {
+  if (!process.stdin.isTTY)
+    return DEFAULT_PATH;
+  console.log(`sidecar keeps its files in a directory inside this repo — "." makes this repo itself the sidecar.`);
+  for (let attempt = 0;attempt < 3; attempt += 1) {
+    const answer = promptLine(`sidecar path ${paint("quiet", `[${DEFAULT_PATH}]`)}: `) || DEFAULT_PATH;
+    if (!isStandalonePath(answer))
+      return answer;
+    console.log(`standalone mode makes ${paint("repo", root)} itself the sidecar:`);
+    console.log("  sidecar owns this repo's branches, commits every change, and syncs it to its own remote.");
+    console.log("  your own commits still work; leave branch management to sidecar.");
+    if (promptYesNoDefaultNo("use standalone mode?"))
+      return ".";
+  }
+  console.log(`keeping the default (${DEFAULT_PATH})`);
+  return DEFAULT_PATH;
+}
+function standaloneRemote(root) {
+  const origin = git(root, ["remote", "get-url", "origin"], { check: false });
+  const remote = origin.status === 0 ? origin.stdout.trim() : "";
+  if (!remote) {
+    throw new SidecarError("standalone mode syncs this repo to its own origin, but it has none; add one with `git remote add origin <url>`, or name a remote with `sidecar init <remote> --path .`");
+  }
+  validateRemote(remote);
+  console.log(`standalone remote: ${paint("brand", remote)} ${paint("quiet", "(this repo's origin)")}`);
+  return remote;
+}
 function promptRemote(root) {
   if (!process.stdin.isTTY) {
     throw new SidecarError("remote URL is required when no .sidecar config exists");
@@ -3696,23 +3809,24 @@ function promptRemote(root) {
   }
   throw new SidecarError("no valid remote URL provided");
 }
-function promptRedactionMode() {
+function promptRedactionMode(defaultMode) {
   if (!process.stdin.isTTY)
-    return DEFAULT_REDACTION_MODE;
+    return defaultMode;
   console.log("redaction rewrites sensitive values out of pushed content; your local files are never touched.");
-  console.log(`  secrets+pii  redact API keys, tokens, emails, and other PII ${paint("quiet", "(recommended)")}`);
-  console.log("  secrets      redact API keys and tokens only");
-  console.log("  none         push content verbatim");
+  const describe = (mode, text) => `  ${mode.padEnd(11)}  ${text}${mode === defaultMode ? ` ${paint("quiet", "(recommended)")}` : ""}`;
+  console.log(describe("secrets+pii", "redact API keys, tokens, emails, and other PII"));
+  console.log(describe("secrets", "redact API keys and tokens only"));
+  console.log(describe("none", "push content verbatim"));
   for (let attempt = 0;attempt < 3; attempt += 1) {
-    const answer = promptLine(`redaction mode ${paint("quiet", `[${DEFAULT_REDACTION_MODE}]`)}: `).toLowerCase();
+    const answer = promptLine(`redaction mode ${paint("quiet", `[${defaultMode}]`)}: `).toLowerCase();
     if (!answer)
-      return DEFAULT_REDACTION_MODE;
+      return defaultMode;
     if (REDACTION_MODES.includes(answer))
       return answer;
     console.log(`invalid redaction mode; expected one of ${REDACTION_MODES.join(", ")}`);
   }
-  console.log(`keeping the default (${DEFAULT_REDACTION_MODE})`);
-  return DEFAULT_REDACTION_MODE;
+  console.log(`keeping the default (${defaultMode})`);
+  return defaultMode;
 }
 function createRemoteWithGh(root) {
   const gh = findExecutableOnPath(process.platform === "win32" ? "gh.exe" : "gh");
@@ -3769,6 +3883,12 @@ function promptYesNo(question) {
     return false;
   const answer = promptLine(`${question} ${paint("quiet", "[Y/n]")} `).toLowerCase();
   return answer === "" || answer === "y" || answer === "yes";
+}
+function promptYesNoDefaultNo(question) {
+  if (!process.stdin.isTTY)
+    return false;
+  const answer = promptLine(`${question} ${paint("quiet", "[y/N]")} `).toLowerCase();
+  return answer === "y" || answer === "yes";
 }
 function promptLine(prompt) {
   fs2.writeSync(1, prompt);
@@ -4199,6 +4319,22 @@ function getValue(parsed, name, fallback) {
 }
 function resolveSidecarPath(root, config) {
   return path2.resolve(root, config.path);
+}
+function isStandalone(config) {
+  return isStandalonePath(config.path);
+}
+function isStandalonePath(sidecarPath) {
+  return path2.normalize(sidecarPath).replace(/[/\\]+$/, "") === ".";
+}
+function pathIsRepoRoot(root, candidate) {
+  const resolved = path2.resolve(root, candidate);
+  if (resolved === path2.resolve(root))
+    return true;
+  try {
+    return fs2.realpathSync(resolved) === fs2.realpathSync(root);
+  } catch {
+    return false;
+  }
 }
 function hasGitMetadata(repo) {
   return fs2.existsSync(path2.join(repo, ".git"));

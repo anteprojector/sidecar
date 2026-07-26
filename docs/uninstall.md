@@ -11,6 +11,7 @@ files. This page lists where each lives and how to remove or debug it.
 | daemon service | `~/Library/LaunchAgents/com.anteprojector.sidecar.plist` | `~/.config/systemd/user/com.anteprojector.sidecar.service` |
 | state dir (registry, settings, log, daemon pid) | `~/Library/Application Support/sidecar` | `~/.local/state/sidecar` (or `$XDG_STATE_HOME/sidecar`) |
 | per-repo | `.sidecar` config, the checkout (default `sidecar/`), a `.gitignore` entry, an optional `.zed/settings.json` inclusion | same |
+| per-repo ([standalone](standalone.md)) | `.sidecar` config, a `sidecar-redact` git filter in `.git/config` and `.git/info/attributes` | same |
 
 `sidecar instances` prints the exact registry and log paths on your machine;
 `sidecar daemon status` prints the settings path and service state.

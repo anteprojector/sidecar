@@ -16,6 +16,7 @@ import {
   forkPath,
   git,
   gitRaw,
+  isStandalone,
   mergeInboxBranches,
   pidIsSidecarDaemon,
   readConfig,
@@ -705,6 +706,26 @@ describe("remote validation", () => {
   });
 });
 
+describe("isStandalone", () => {
+  const base: SidecarConfig = {
+    remote: "x",
+    version: 1,
+    path: "sidecar",
+    branch: "main",
+    inbox: DEFAULT_INBOX,
+    redaction: "none",
+  };
+
+  test("recognizes the checkout-is-the-repo paths and nothing else", () => {
+    expect(isStandalone({ ...base, path: "." })).toBe(true);
+    expect(isStandalone({ ...base, path: "./" })).toBe(true);
+    expect(isStandalone({ ...base, path: "sidecar" })).toBe(false);
+    expect(isStandalone({ ...base, path: "./sidecar" })).toBe(false);
+    expect(isStandalone({ ...base, path: ".sidecar-notes" })).toBe(false);
+    expect(isStandalone({ ...base, path: ".." })).toBe(false);
+  });
+});
+
 describe("main branch reconciliation", () => {
   const config: SidecarConfig = {
     remote: "x",
@@ -728,6 +749,17 @@ describe("main branch reconciliation", () => {
     );
   });
 
+  test("parks the discarded tip before resetting a diverged main", () => {
+    const { loser } = divergedClones();
+    const before = git(loser, ["rev-parse", "HEAD"]).stdout.trim();
+
+    fetch(loser, true);
+    ensureMainBranch(loser, config);
+
+    const parked = git(loser, ["for-each-ref", "--format=%(objectname)", "refs/sidecar-discarded/"]).stdout.trim();
+    expect(parked).toBe(before);
+  });
+
   test("merge recovers after losing a push race", () => {
     const { loser } = divergedClones();
     git(loser, ["switch", "-c", "sidecar-inbox/test/r1"]);
@@ -740,8 +772,11 @@ describe("main branch reconciliation", () => {
     const merged = mergeInboxBranches(loser, config, { forkFiles: true, push: true });
 
     expect(merged).toBe(1);
+    // The checkout never merges in place: it moves back to its inbox branch
+    // and the merge runs in a throwaway worktree, which advances main there.
+    expect(git(loser, ["branch", "--show-current"]).stdout.trim()).toMatch(/^sidecar-inbox\//);
     const remoteMain = git(loser, ["rev-parse", "origin/main"]).stdout.trim();
-    expect(git(loser, ["rev-parse", "HEAD"]).stdout.trim()).toBe(remoteMain);
+    expect(git(loser, ["rev-parse", "main"]).stdout.trim()).toBe(remoteMain);
     // The pushed main contains both the winner's commit and the inbox merge.
     expect(git(loser, ["log", "origin/main", "--pretty=%s"]).stdout).toContain("winner");
     expect(isAncestor(loser, "origin/sidecar-inbox/test/r1", "origin/main")).toBe(true);

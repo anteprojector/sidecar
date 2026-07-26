@@ -26,15 +26,19 @@ sidecar version            # print the installed version
 ### `sidecar init [remote] [options]`
 
 Sets up sidecar in the current repo, or joins an existing `.sidecar` config.
-With no remote and no config it prompts for a remote URL (or creates one with
-`gh`); pass the remote to run non-interactively.
+With no config it asks where the checkout should live, then prompts for a
+remote URL (or creates one with `gh`); pass the remote to run
+non-interactively.
+
+Answering `.` to the path question — or passing `--path .` — makes the repo
+itself the sidecar. See [standalone.md](standalone.md).
 
 | flag | effect |
 |---|---|
-| `--path <dir>` | where the sidecar checkout lives (default `sidecar`) |
+| `--path <dir>` | where the sidecar checkout lives (default `sidecar`); `.` means standalone |
 | `--branch <name>` | canonical branch in the sidecar repo (default `main`) |
 | `--inbox <template>` | inbox branch template (default `sidecar-inbox/{user}/{random}`) |
-| `--redaction <mode>` | what gets redacted on push: `secrets+pii` (default), `secrets`, or `none` — see [redaction.md](redaction.md) |
+| `--redaction <mode>` | what gets redacted on push: `secrets+pii`, `secrets`, or `none` — defaults to `secrets+pii`, or `none` for standalone; see [redaction.md](redaction.md) |
 | `--no-clone` | write config and registration only; skip cloning |
 | `--no-bootstrap-main` | don't create the canonical branch on an empty remote |
 
@@ -53,6 +57,14 @@ configured checkout, Sidecar-owned `.gitignore`, Git exclude, Zed search, and
 daemon registry entries. It preserves unrelated settings and does not touch
 `package.json` or installed dependencies. Outside a Git repository it warns,
 does nothing, and exits successfully.
+
+In a [standalone](standalone.md) repo there is no checkout to delete, so
+`deinit` instead unwires the redaction git filter and switches back to the
+canonical branch, leaving the repo intact.
+
+Any step `deinit` cannot complete — an unreadable config, a standalone repo
+it won't switch off its inbox branch — is listed in a closing warning so
+nothing is left behind silently.
 
 ### `sidecar status`
 

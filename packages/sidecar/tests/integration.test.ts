@@ -205,6 +205,9 @@ describe("sidecar CLI integration", () => {
 
     expect(result.status).toBe(0);
     expect(result.stderr).toContain("no .sidecar config found");
+    // Skipped steps roll up into one closing summary the user can act on.
+    expect(result.stderr).toContain("deinit could not fully complete");
+    expect(result.stderr).toContain("ask your agent to scrub any remaining traces of sidecar");
     expect(fs.readFileSync(path.join(main, "sidecar", "keep.txt"), "utf8")).toBe("not managed by Sidecar\n");
   });
 
@@ -1145,13 +1148,16 @@ describe("sidecar CLI integration", () => {
       0,
     );
 
-    const conflictFiles = fs
-      .readdirSync(path.join(sidecar, "notes"))
-      .filter((name) => name.includes(".conflict."));
+    // The fixture parks the checkout on main; merging moves it back to its
+    // inbox branch and does the branch dance in a throwaway worktree, so the
+    // forks land in the pushed main instead of rewriting the user's files.
+    expect(git(sidecar, ["branch", "--show-current"]).stdout.trim()).toMatch(/^sidecar-inbox\//);
+    const mergedFiles = gitRaw(["--git-dir", remote, "ls-tree", "-r", "--name-only", "main"]).stdout.split("\n");
+    const conflictFiles = mergedFiles.filter((name) => name.startsWith("notes/") && name.includes(".conflict."));
     expect(conflictFiles).toHaveLength(2);
-    const manifestDir = path.join(sidecar, ".sidecar-conflicts");
-    const manifestPath = path.join(manifestDir, fs.readdirSync(manifestDir)[0]);
-    const manifestText = fs.readFileSync(manifestPath, "utf8");
+    const manifestPath = mergedFiles.find((name) => name.startsWith(".sidecar-conflicts/"));
+    expect(manifestPath).toBeDefined();
+    const manifestText = gitRaw(["--git-dir", remote, "show", `main:${manifestPath}`]).stdout;
     expect(manifestText).not.toContain("content_base64");
     expect(manifestText).toContain("sidecar-inbox/test/conflict");
 
@@ -1318,6 +1324,211 @@ describe("sidecar CLI integration", () => {
     expect(result.stderr).toContain("another sidecar sync is already running");
     expect(git(sidecar, ["status", "--porcelain"]).stdout).toContain("held.md");
   });
+
+  test("init --path . adopts the repo itself as the sidecar", () => {
+    const { repo, remote, state } = initStandaloneRepo();
+
+    const output = runSidecar(["init", "--path", "."], repo, { SIDECAR_STATE_DIR: state });
+
+    expect(output).toContain("standalone:");
+    const config = fs.readFileSync(path.join(repo, ".sidecar"), "utf8");
+    expect(config).toContain('path = "."');
+    expect(config).toContain(`remote = ${JSON.stringify(remote)}`);
+    // A standalone repo's files get run, not read, so a false positive would
+    // ship a broken file rather than mangle a note.
+    expect(config).toContain('redaction = "none"');
+    // Nothing to hide from itself: no ignore entry, no editor inclusion.
+    expect(fs.existsSync(path.join(repo, ".gitignore"))).toBe(false);
+    expect(fs.existsSync(path.join(repo, ".zed"))).toBe(false);
+    expect(git(repo, ["branch", "--show-current"]).stdout.trim()).toMatch(/^sidecar-inbox\//);
+  });
+
+  test("init treats any path spelling of the repo root as standalone", () => {
+    const { repo, remote, state } = initStandaloneRepo();
+
+    // An absolute path to the root would otherwise dodge the "." string
+    // check and land in the nested code path, pointed at the repo itself.
+    runSidecar(["init", "--path", repo], repo, { SIDECAR_STATE_DIR: state });
+
+    const config = fs.readFileSync(path.join(repo, ".sidecar"), "utf8");
+    expect(config).toContain('path = "."');
+    expect(config).toContain(`remote = ${JSON.stringify(remote)}`);
+    expect(git(repo, ["branch", "--show-current"]).stdout.trim()).toMatch(/^sidecar-inbox\//);
+  });
+
+  test("init --path . refuses a repo with no origin to sync to", () => {
+    const repo = initMainRepo();
+
+    const result = spawnSync(process.execPath, [cliPath, "init", "--path", "."], {
+      cwd: repo,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        SIDECAR_STATE_DIR: path.join(repo, ".sidecar-test-state"),
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/its own origin, but it has none/);
+    expect(fs.existsSync(path.join(repo, ".sidecar"))).toBe(false);
+  });
+
+  test("a standalone repo round-trips edits between two machines", () => {
+    const { repo, remote, state } = initStandaloneRepo();
+    runSidecar(["init", "--path", "."], repo, { SIDECAR_STATE_DIR: state });
+    fs.writeFileSync(path.join(repo, "install.sh"), "#!/bin/sh\necho updated\n", "utf8");
+    runSidecar(["sync"], repo, { SIDECAR_STATE_DIR: state });
+
+    // A second machine joins by cloning the repo: .sidecar rode along in the
+    // sync, so init has everything it needs and never prompts.
+    const second = cloneRemoteMain(remote);
+    runSidecar(["init"], second, { SIDECAR_STATE_DIR: state });
+
+    expect(fs.readFileSync(path.join(second, "install.sh"), "utf8")).toContain("updated");
+    const secondInbox = git(second, ["branch", "--show-current"]).stdout.trim();
+    expect(secondInbox).toMatch(/^sidecar-inbox\//);
+    expect(secondInbox).not.toBe(git(repo, ["branch", "--show-current"]).stdout.trim());
+
+    fs.writeFileSync(path.join(second, "aliases.sh"), "alias g=git\n", "utf8");
+    runSidecar(["sync"], second, { SIDECAR_STATE_DIR: state });
+    runSidecar(["sync"], repo, { SIDECAR_STATE_DIR: state });
+
+    expect(fs.readFileSync(path.join(repo, "aliases.sh"), "utf8")).toBe("alias g=git\n");
+  });
+
+  test("standalone init forks the inbox from HEAD on a repo ahead of its origin", () => {
+    const { repo, remote, state } = initStandaloneRepo();
+    // The shape a dotfiles repo is usually in: a commit origin hasn't seen,
+    // plus an uncommitted edit on top. Forking the inbox from origin/main
+    // would roll the tree back to the pushed state — or refuse to overwrite
+    // install.sh and kill init after .sidecar was already written.
+    fs.writeFileSync(path.join(repo, "install.sh"), "#!/bin/sh\necho v2\n", "utf8");
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-m", "v2 unpushed"]);
+    fs.appendFileSync(path.join(repo, "install.sh"), "echo wip\n");
+
+    runSidecar(["init", "--path", "."], repo, { SIDECAR_STATE_DIR: state });
+
+    expect(git(repo, ["branch", "--show-current"]).stdout.trim()).toMatch(/^sidecar-inbox\//);
+    expect(fs.readFileSync(path.join(repo, "install.sh"), "utf8")).toBe("#!/bin/sh\necho v2\necho wip\n");
+
+    // The first sync carries both the unpushed commit and the dirty edit home.
+    runSidecar(["sync"], repo, { SIDECAR_STATE_DIR: state });
+    const pushed = gitRaw(["--git-dir", remote, "show", "main:install.sh"]).stdout;
+    expect(pushed).toContain("echo v2");
+    expect(pushed).toContain("echo wip");
+  });
+
+  test("a standalone clone reached over a different origin URL still inits", () => {
+    const { repo, remote, state } = initStandaloneRepo();
+    runSidecar(["init", "--path", "."], repo, { SIDECAR_STATE_DIR: state });
+    runSidecar(["sync"], repo, { SIDECAR_STATE_DIR: state });
+
+    // Machine two reaches the same repo by another URL form (ssh vs https in
+    // real life; file:// vs a plain path here). The committed .sidecar
+    // records machine one's URL; for a standalone repo, origin wins.
+    const second = cloneRemoteMain(`file://${remote}`);
+    const output = runSidecar(["init"], second, { SIDECAR_STATE_DIR: state });
+
+    expect(output).toContain("using origin");
+    expect(git(second, ["branch", "--show-current"]).stdout.trim()).toMatch(/^sidecar-inbox\//);
+
+    fs.writeFileSync(path.join(second, "aliases.sh"), "alias g=git\n", "utf8");
+    runSidecar(["sync"], second, { SIDECAR_STATE_DIR: state });
+    runSidecar(["sync"], repo, { SIDECAR_STATE_DIR: state });
+    expect(fs.readFileSync(path.join(repo, "aliases.sh"), "utf8")).toBe("alias g=git\n");
+  });
+
+  test("deinit releases a standalone repo instead of deleting it", () => {
+    const { repo, state } = initStandaloneRepo();
+    runSidecar(["init", "--path", "."], repo, { SIDECAR_STATE_DIR: state });
+    expect(git(repo, ["config", "--get", "filter.sidecar-redact.clean"]).stdout.trim()).toBeTruthy();
+
+    const output = runSidecar(["deinit"], repo, { SIDECAR_STATE_DIR: state });
+
+    expect(output).toContain("switched back to main");
+    expect(fs.existsSync(path.join(repo, ".sidecar"))).toBe(false);
+    expect(fs.existsSync(path.join(repo, "install.sh"))).toBe(true);
+    expect(git(repo, ["branch", "--show-current"]).stdout.trim()).toBe("main");
+    // Nothing deleted the checkout here, so the wiring a recursive remove
+    // would have taken with it has to be gone on its own — a leftover
+    // required=true filter would fail every later `git add`.
+    expect(git(repo, ["config", "--get", "filter.sidecar-redact.clean"], { check: false }).status).not.toBe(0);
+    const attributes = path.join(repo, ".git", "info", "attributes");
+    const attributesText = fs.existsSync(attributes) ? fs.readFileSync(attributes, "utf8") : "";
+    expect(attributesText).not.toContain("sidecar-redact");
+    expect(git(repo, ["status", "--porcelain"], { check: false }).status).toBe(0);
+  });
+
+  test("deinit under redaction reports the branch it refused to switch", () => {
+    const { repo, state } = initStandaloneRepo();
+    runSidecar(["init", "--path", ".", "--redaction", "secrets"], repo, { SIDECAR_STATE_DIR: state });
+
+    const result = spawnSync(process.execPath, [cliPath, "deinit"], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", SIDECAR_STATE_DIR: state },
+    });
+
+    expect(result.status).toBe(0);
+    // The filter still comes out — that's the trace that breaks git add if
+    // it goes stale — but the branch switch is left to the user, and deinit
+    // says so instead of quietly stopping short.
+    expect(git(repo, ["config", "--get", "filter.sidecar-redact.clean"], { check: false }).status).not.toBe(0);
+    expect(git(repo, ["branch", "--show-current"]).stdout.trim()).toMatch(/^sidecar-inbox\//);
+    expect(result.stderr).toContain("redacted pushed contents");
+    expect(result.stderr).toContain("deinit could not fully complete");
+    expect(result.stderr).toContain("ask your agent to scrub any remaining traces of sidecar");
+  });
+
+  test("deinit with an unreadable config still unwires the redaction filter", () => {
+    const { repo, state } = initStandaloneRepo();
+    runSidecar(["init", "--path", ".", "--redaction", "secrets"], repo, { SIDECAR_STATE_DIR: state });
+    fs.writeFileSync(path.join(repo, ".sidecar"), "not [ valid { toml\n", "utf8");
+
+    const result = spawnSync(process.execPath, [cliPath, "deinit"], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", SIDECAR_STATE_DIR: state },
+    });
+
+    expect(result.status).toBe(0);
+    // A corrupt config hides whether this repo is standalone, so the one
+    // trace deinit can still safely take out is the required=true filter —
+    // leaving it wired would fail every future `git add` here.
+    expect(git(repo, ["config", "--get", "filter.sidecar-redact.clean"], { check: false }).status).not.toBe(0);
+    const attributes = path.join(repo, ".git", "info", "attributes");
+    const attributesText = fs.existsSync(attributes) ? fs.readFileSync(attributes, "utf8") : "";
+    expect(attributesText).not.toContain("sidecar-redact");
+    expect(result.stderr).toContain("could not read");
+    expect(result.stderr).toContain("deinit could not fully complete");
+    expect(result.stderr).toContain("ask your agent to scrub any remaining traces of sidecar");
+  });
+
+  test("status reports a standalone sidecar as a single repo", () => {
+    const { repo, state } = initStandaloneRepo();
+    runSidecar(["init", "--path", "."], repo, { SIDECAR_STATE_DIR: state });
+
+    const output = runSidecar(["status"], repo, { SIDECAR_STATE_DIR: state });
+
+    expect(output).toMatch(/standalone:\s+\S/);
+    expect(output).not.toContain("main repo:");
+    expect(output).not.toContain("sidecar path:");
+
+    const payload = JSON.parse(runSidecar(["status", "--json"], repo, { SIDECAR_STATE_DIR: state }));
+    expect(payload.standalone).toBe(true);
+    expect(payload.root).toBe(payload.sidecarPath);
+  });
+
+  test("status flags a checkout parked off its inbox branch", () => {
+    const { main, sidecar } = initSidecarProject();
+    git(sidecar, ["switch", "main"]);
+
+    const output = runSidecar(["status"], main);
+
+    expect(output).toMatch(/branch:\s+main — not the inbox branch/);
+  });
 });
 
 function initSidecarProject(initArgs: string[] = []): { main: string; remote: string; sidecar: string } {
@@ -1363,6 +1574,21 @@ function initMainRepo(): string {
   git(repo, ["add", "README.md"]);
   git(repo, ["commit", "-m", "Initial main"]);
   return repo;
+}
+
+// A repo that lives on every machine and belongs to no parent — the shape
+// standalone mode exists for. `state` has to sit outside the repo: the default
+// test state dir is a child of cwd, which in standalone mode is inside the tree
+// being snapshotted, so the registry and log would sync themselves.
+function initStandaloneRepo(): { repo: string; remote: string; state: string } {
+  const remote = initBareRemote();
+  const repo = initMainRepo();
+  git(repo, ["remote", "add", "origin", remote]);
+  fs.writeFileSync(path.join(repo, "install.sh"), "#!/bin/sh\necho setup\n", "utf8");
+  git(repo, ["add", "."]);
+  git(repo, ["commit", "-m", "Add setup script"]);
+  git(repo, ["push", "-u", "origin", "main"]);
+  return { repo, remote, state: tempDir() };
 }
 
 function initBareRemote(): string {
