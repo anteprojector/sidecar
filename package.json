@@ -1,6 +1,7 @@
 {
   "name": "@projectors/sidecar-mono",
   "private": true,
+  "version": "0.7.0",
   "type": "module",
   "workspaces": [
     "packages/*"
