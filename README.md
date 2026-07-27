@@ -39,8 +39,8 @@ while a background daemon keeps every clone in sync.
   You never commit, pull, or push it by hand.
 - **Found by default.** It lives inside your working tree, so agents and
   tools pick it up with no configuration at all.
-- **Secrets stay home.** Pasted API keys, tokens, and PII are redacted from
-  pushes while your local files stay untouched —
+- **Secrets stay home.** Pasted API keys and tokens are redacted from pushes
+  while your local files stay untouched; PII redaction is one flag away —
   [how redaction works](docs/redaction.md).
 
 ## Quickstart
@@ -73,7 +73,7 @@ cd ~/dev/setup
 sidecar init --path .
 ```
 
-Sidecar takes over branch management there, and redaction defaults to off —
+Sidecar takes over branch management there —
 [how standalone works](docs/standalone.md).
 
 ## Learn more

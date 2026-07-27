@@ -958,7 +958,9 @@ describe("sidecar CLI integration", () => {
   });
 
   test("sync snapshots, pushes the inbox branch, and merges it into main", () => {
-    const { main, remote, sidecar } = initSidecarProject();
+    // secrets+pii pinned: the <EMAIL> and item-count assertions below
+    // exercise the PII rules, which the default mode no longer runs.
+    const { main, remote, sidecar } = initSidecarProject(["--redaction", "secrets+pii"]);
     const inbox = git(sidecar, ["branch", "--show-current"]).stdout.trim();
     const original = "OPENAI_API_KEY=sk-test1234567890abcdef\nemail alice@example.com\n";
     fs.writeFileSync(path.join(sidecar, "notes.md"), original, "utf8");
@@ -1408,9 +1410,10 @@ describe("sidecar CLI integration", () => {
     const config = fs.readFileSync(path.join(repo, ".sidecar"), "utf8");
     expect(config).toContain('path = "."');
     expect(config).toContain(`remote = ${JSON.stringify(remote)}`);
-    // A standalone repo's files get run, not read, so a false positive would
-    // ship a broken file rather than mangle a note.
-    expect(config).toContain('redaction = "none"');
+    // One default everywhere: secrets. PII rules carry most of the false
+    // positives, so the default mode is never the one most likely to mangle
+    // a file — standalone or nested.
+    expect(config).toContain('redaction = "secrets"');
     // Nothing to hide from itself: no ignore entry, no editor inclusion.
     expect(fs.existsSync(path.join(repo, ".gitignore"))).toBe(false);
     expect(fs.existsSync(path.join(repo, ".zed"))).toBe(false);
@@ -1521,7 +1524,9 @@ describe("sidecar CLI integration", () => {
 
   test("deinit releases a standalone repo instead of deleting it", () => {
     const { repo, state } = initStandaloneRepo();
-    runSidecar(["init", "--path", "."], repo, { SIDECAR_STATE_DIR: state });
+    // Explicit "none": the branch-switch below is deinit's redaction-off
+    // behavior; under the default (secrets) it stays parked and says why.
+    runSidecar(["init", "--path", ".", "--redaction", "none"], repo, { SIDECAR_STATE_DIR: state });
     expect(git(repo, ["config", "--get", "filter.sidecar-redact.clean"]).stdout.trim()).toBeTruthy();
 
     const output = runSidecar(["deinit"], repo, { SIDECAR_STATE_DIR: state });

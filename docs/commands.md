@@ -40,7 +40,7 @@ uncommitted files land on the remote immediately. See
 | `--path <dir>` | where the sidecar checkout lives (default `sidecar`); `.` means standalone |
 | `--branch <name>` | canonical branch in the sidecar repo (default `main`) |
 | `--inbox <template>` | inbox branch template (default `sidecar-inbox/{user}/{random}`) |
-| `--redaction <mode>` | what gets redacted on push: `secrets+pii`, `secrets`, or `none` — defaults to `secrets+pii`, or `none` for standalone; see [redaction.md](redaction.md) |
+| `--redaction <mode>` | what gets redacted on push: `secrets+pii`, `secrets`, or `none` — defaults to `secrets`; see [redaction.md](redaction.md) |
 | `--no-clone` | write config and registration only; skip cloning |
 | `--no-bootstrap-main` | don't create the canonical branch on an empty remote |
 | `--local-install` | add `@projectors/sidecar` to `devDependencies` (plus the bun/pnpm trust entry) so fresh clones self-register on install |

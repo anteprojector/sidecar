@@ -1127,7 +1127,7 @@ function isLikelyCreditCard(value) {
   }
   return sum % 10 === 0;
 }
-var DEFAULT_REDACTION_MODE = "secrets+pii", REDACTION_MODES, NO_REDACT_PRAGMA = "sidecar:no-redact", PRAGMA_SCAN_LINES = 30, NO_REDACT_PRAGMA_REGEX, KEY_NAME_PATTERN, QUOTED_SECRET_REGEX, BARE_ASSIGNMENT_SECRET_REGEX, AUTHORIZATION_HEADER_REGEX, PEM_PRIVATE_KEY_REGEX, URL_CREDENTIALS_REGEX, BARE_BEARER_TOKEN_REGEX, TOKEN_PATTERNS, EMAIL_REGEX, PHONE_REGEX, SSN_REGEX, CREDIT_CARD_CANDIDATE_REGEX, PLACEHOLDER_REGEX, COMPACT_SENSITIVE_KEYS;
+var DEFAULT_REDACTION_MODE = "secrets", REDACTION_MODES, NO_REDACT_PRAGMA = "sidecar:no-redact", PRAGMA_SCAN_LINES = 30, NO_REDACT_PRAGMA_REGEX, KEY_NAME_PATTERN, QUOTED_SECRET_REGEX, BARE_ASSIGNMENT_SECRET_REGEX, AUTHORIZATION_HEADER_REGEX, PEM_PRIVATE_KEY_REGEX, URL_CREDENTIALS_REGEX, BARE_BEARER_TOKEN_REGEX, TOKEN_PATTERNS, EMAIL_REGEX, PHONE_REGEX, SSN_REGEX, CREDIT_CARD_CANDIDATE_REGEX, PLACEHOLDER_REGEX, COMPACT_SENSITIVE_KEYS;
 var init_redaction = __esm(() => {
   REDACTION_MODES = ["none", "secrets", "secrets+pii"];
   NO_REDACT_PRAGMA_REGEX = new RegExp(String.raw`^\s*[^\w\s]{0,4}\s*${NO_REDACT_PRAGMA}\b`);
@@ -1976,7 +1976,7 @@ function buildInitConfig(root, remote, parsed) {
     path: sidecarPath,
     branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
     inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
-    redaction: parsed.values.has("--redaction") ? redactionModeConfigValue(getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE), "--redaction") : promptRedactionMode(standalone ? "none" : DEFAULT_REDACTION_MODE)
+    redaction: parsed.values.has("--redaction") ? redactionModeConfigValue(getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE), "--redaction") : promptRedactionMode()
   };
 }
 function printCheckoutVisibility(root, config) {
@@ -3886,24 +3886,24 @@ function promptRemote(root) {
   }
   throw new SidecarError("no valid remote URL provided");
 }
-function promptRedactionMode(defaultMode) {
+function promptRedactionMode() {
   if (!process.stdin.isTTY)
-    return defaultMode;
+    return DEFAULT_REDACTION_MODE;
   console.log("redaction rewrites sensitive values out of pushed content; your local files are never touched.");
-  const describe = (mode, text) => `  ${mode.padEnd(11)}  ${text}${mode === defaultMode ? ` ${paint("quiet", "(recommended)")}` : ""}`;
+  const describe = (mode, text) => `  ${mode.padEnd(11)}  ${text}${mode === DEFAULT_REDACTION_MODE ? ` ${paint("quiet", "(recommended)")}` : ""}`;
   console.log(describe("secrets+pii", "redact API keys, tokens, emails, and other PII"));
   console.log(describe("secrets", "redact API keys and tokens only"));
   console.log(describe("none", "push content verbatim"));
   for (let attempt = 0;attempt < 3; attempt += 1) {
-    const answer = promptLine(`redaction mode ${paint("quiet", `[${defaultMode}]`)}: `).toLowerCase();
+    const answer = promptLine(`redaction mode ${paint("quiet", `[${DEFAULT_REDACTION_MODE}]`)}: `).toLowerCase();
     if (!answer)
-      return defaultMode;
+      return DEFAULT_REDACTION_MODE;
     if (REDACTION_MODES.includes(answer))
       return answer;
     console.log(`invalid redaction mode; expected one of ${REDACTION_MODES.join(", ")}`);
   }
-  console.log(`keeping the default (${defaultMode})`);
-  return defaultMode;
+  console.log(`keeping the default (${DEFAULT_REDACTION_MODE})`);
+  return DEFAULT_REDACTION_MODE;
 }
 function createRemoteWithGh(root) {
   const gh = findExecutableOnPath(process.platform === "win32" ? "gh.exe" : "gh");

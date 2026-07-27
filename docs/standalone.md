@@ -92,17 +92,17 @@ daemon, and the next sync reverts them. Read-only git (log, diff, show) is
 fine.
 ````
 
-## Redaction defaults to none
+## Redaction and executed files
 
 A standalone repo's files are the artifact. You clone them onto a new machine
 and *run* them, so a redaction false positive doesn't mangle a note — it ships
 a broken script, and silently, because the machine that wrote the file still
 has the original in its working tree.
 
-So standalone `init` defaults to `redaction = "none"` where a nested sidecar
-defaults to `secrets+pii`. Turn it on if you want it, but review
-`sidecar redactions` before trusting it with content you execute. See
-[redaction.md](redaction.md).
+The default is `secrets` (credentials only — the PII rules are where most
+false positives live), same as everywhere. Review `sidecar redactions` before
+trusting any mode with content you execute, or init with `--redaction none`.
+See [redaction.md](redaction.md).
 
 ## Removing it
 

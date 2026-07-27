@@ -331,7 +331,7 @@ describe("redaction", () => {
       "On May 20, 2026, update apps/backend/convex/messages.ts for Acme Corp.",
     ].join("\n");
 
-    const redacted = redactText(input);
+    const redacted = redactText(input, "secrets+pii");
 
     expect(redacted).toContain("OPENAI_API_KEY=<API_KEY>");
     expect(redacted).toContain("Authorization: Bearer <TOKEN>");
@@ -419,17 +419,19 @@ describe("redaction", () => {
       "tracking id 1234-5678-9012-3456",
     ].join("\n");
 
-    expect(redactText(input)).toBe(input);
+    // Pinned to secrets+pii: these non-matches guard the PII rules, which
+    // the default mode no longer runs.
+    expect(redactText(input, "secrets+pii")).toBe(input);
   });
 
   test("redacts valid credit-card-looking numbers", () => {
-    expect(redactText("card: 4111 1111 1111 1111")).toBe("card: <CREDITCARD>");
-    expect(redactText("card 4111111111111111")).toBe("card <CREDITCARD>");
+    expect(redactText("card: 4111 1111 1111 1111", "secrets+pii")).toBe("card: <CREDITCARD>");
+    expect(redactText("card 4111111111111111", "secrets+pii")).toBe("card <CREDITCARD>");
   });
 
   test("does not treat bare digit runs as phone numbers or card numbers", () => {
     const input = ["released 1234567890 units", "order 79927398713"].join("\n");
-    expect(redactText(input)).toBe(input);
+    expect(redactText(input, "secrets+pii")).toBe(input);
   });
 
   test("redacts quoted values containing spaces and the other quote char", () => {

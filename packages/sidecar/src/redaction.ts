@@ -1,6 +1,8 @@
 export type RedactionMode = "none" | "secrets" | "secrets+pii";
 
-export const DEFAULT_REDACTION_MODE: RedactionMode = "secrets+pii";
+// "secrets" over "secrets+pii": most false positives live in the PII rules,
+// and a default should never be the mode most likely to mangle content.
+export const DEFAULT_REDACTION_MODE: RedactionMode = "secrets";
 export const REDACTION_MODES: readonly RedactionMode[] = ["none", "secrets", "secrets+pii"];
 
 // Files carrying this marker near the top opt out of redaction entirely; the

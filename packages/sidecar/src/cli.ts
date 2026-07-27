@@ -445,10 +445,7 @@ function buildInitConfig(root: string, remote: string | undefined, parsed: Parse
     inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
     redaction: parsed.values.has("--redaction")
       ? redactionModeConfigValue(getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE), "--redaction")
-      // Redaction rewrites pushed content, and a standalone repo's content is
-      // the artifact you clone onto the next machine and run — a false
-      // positive there ships a broken file, not a mangled note.
-      : promptRedactionMode(standalone ? "none" : DEFAULT_REDACTION_MODE),
+      : promptRedactionMode(),
   };
 }
 
@@ -2803,27 +2800,26 @@ function promptRemote(root: string): string {
   throw new SidecarError("no valid remote URL provided");
 }
 
-// Non-interactive inits keep the caller's default rather than asking. For a
-// nested sidecar that default is the strictest mode, so a script never ends up
-// leakier than an unattended `sidecar init` implies; for a standalone repo it
-// is "none", because there the greater risk is redacting a file you then run.
-function promptRedactionMode(defaultMode: RedactionMode): RedactionMode {
-  if (!process.stdin.isTTY) return defaultMode;
+// Non-interactive inits keep the default rather than asking, so a script
+// never ends up with a different redaction mode than an unattended
+// `sidecar init` implies.
+function promptRedactionMode(): RedactionMode {
+  if (!process.stdin.isTTY) return DEFAULT_REDACTION_MODE;
 
   console.log("redaction rewrites sensitive values out of pushed content; your local files are never touched.");
   const describe = (mode: RedactionMode, text: string): string =>
-    `  ${mode.padEnd(11)}  ${text}${mode === defaultMode ? ` ${paint("quiet", "(recommended)")}` : ""}`;
+    `  ${mode.padEnd(11)}  ${text}${mode === DEFAULT_REDACTION_MODE ? ` ${paint("quiet", "(recommended)")}` : ""}`;
   console.log(describe("secrets+pii", "redact API keys, tokens, emails, and other PII"));
   console.log(describe("secrets", "redact API keys and tokens only"));
   console.log(describe("none", "push content verbatim"));
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const answer = promptLine(`redaction mode ${paint("quiet", `[${defaultMode}]`)}: `).toLowerCase();
-    if (!answer) return defaultMode;
+    const answer = promptLine(`redaction mode ${paint("quiet", `[${DEFAULT_REDACTION_MODE}]`)}: `).toLowerCase();
+    if (!answer) return DEFAULT_REDACTION_MODE;
     if ((REDACTION_MODES as readonly string[]).includes(answer)) return answer as RedactionMode;
     console.log(`invalid redaction mode; expected one of ${REDACTION_MODES.join(", ")}`);
   }
-  console.log(`keeping the default (${defaultMode})`);
-  return defaultMode;
+  console.log(`keeping the default (${DEFAULT_REDACTION_MODE})`);
+  return DEFAULT_REDACTION_MODE;
 }
 
 function createRemoteWithGh(root: string): string {
