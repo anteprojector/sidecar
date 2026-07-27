@@ -8,6 +8,7 @@ sidecar init               # set up or join sidecar in a repo; prompts for a
 sidecar init <remote>      # set up sidecar non-interactively with a known remote
 sidecar deinit             # remove files and configuration created by sidecar init
 sidecar status             # show checkout, daemon health, last sync, pending work
+sidecar health             # show how every machine sharing this sidecar is syncing
 sidecar sync               # snapshot, push, merge, and push canonical state
 sidecar snapshot           # commit local changes to the inbox branch, nothing else
 sidecar clone              # clone or update the configured sidecar repo
@@ -43,12 +44,12 @@ uncommitted files land on the remote immediately. See
 | `--redaction <mode>` | what gets redacted on push: `secrets+pii`, `secrets`, or `none` — defaults to `secrets`; see [redaction.md](redaction.md) |
 | `--no-clone` | write config and registration only; skip cloning |
 | `--no-bootstrap-main` | don't create the canonical branch on an empty remote |
-| `--local-install` | add `@projectors/sidecar` to `devDependencies` (plus the bun/pnpm trust entry) so fresh clones self-register on install |
+| `--local-install` | add `sidecarsync` to `devDependencies` (plus the bun/pnpm trust entry) so fresh clones self-register on install |
 
 `init` also adds the checkout to `.gitignore`, registers the repo with the
 global daemon, and (interactively) offers to install a missing global sidecar
 and to make the checkout searchable in Zed. When the repo has a
-`package.json`, it offers to add the `@projectors/sidecar` devDependency —
+`package.json`, it offers to add the `sidecarsync` devDependency —
 the package's postinstall is what makes a fresh clone self-register with the
 machine's daemon on plain install (see [install.md](install.md)). It never
 edits `package.json` without asking. When not attached to a terminal, every
@@ -74,6 +75,14 @@ nothing is left behind silently.
 
 Shows checkout, daemon health, last sync time, and pending inbox branches.
 See [Reading `sidecar status`](#reading-sidecar-status) below.
+
+### `sidecar health [--json] [--no-fetch]`
+
+Shows how every machine sharing this sidecar is syncing — not just this one.
+Each checkout publishes a heartbeat on every sync, so a laptop that quietly
+stopped contributing is visible from any other machine. `--json` prints the
+raw records; `--no-fetch` reads the refs already on disk instead of fetching
+first. See [Fleet health](#fleet-health) below.
 
 ### `sidecar sync [--no-snapshot] [--soft] [-m|--message <text>]`
 
@@ -184,3 +193,94 @@ by age: a sidecar only syncs when something changed, so a quiet week is normal.
 Color is off automatically when output is not a terminal, so `sidecar status |
 grep dirty` stays clean. `NO_COLOR=1` (or `FORCE_COLOR=0`, or `TERM=dumb`) turns
 it off on a terminal too, and `FORCE_COLOR=1` keeps it on through a pipe.
+
+## Fleet health
+
+`status` answers "how is this checkout"; `health` answers "how is every machine
+sharing this sidecar". A sync can fail for reasons only the failing machine
+witnesses — a redaction filter that has gone unrunnable, a remote that rejects
+its push, a checkout left mid-rebase — and without this those failures reach
+only that machine's local log.
+
+```
+remote: https://github.com/you/your-repo-sidecar.git
+fleet:  1 ok, 1 failed
+
+zack@stout
+  status:   failed at snapshot
+  detail:   external filter 'sidecar redact' failed
+  failures: 4 in a row
+  checkout: ~/dev/your-repo
+  inbox:    sidecar-inbox/zack/1c0de4a19b3f
+  reported: 9 minutes ago (2026-07-26 11:41)
+  last ok:  2 days ago (2026-07-24 08:20)
+  version:  0.9.0
+
+zack@fox  (this checkout)
+  status:   ok
+  checkout: ~/dev/your-repo
+  inbox:    sidecar-inbox/zack/79ffcdaf92aa
+  reported: just now (2026-07-26 11:50)
+  version:  0.9.0
+```
+
+Machines are listed worst first, so the one that needs you is at the top. Red is
+a machine reporting its own failure; bold yellow is one that has gone quiet.
+
+### How it works
+
+Every sync — successful or not — publishes a single `health.json` to a branch
+that checkout alone writes:
+
+```
+sidecar-inbox/zack/79ffcdaf92aa    your notes, merged into the canonical branch
+sidecar-health/zack/79ffcdaf92aa   this checkout's heartbeat, never merged
+```
+
+Three properties come out of that layout:
+
+- **No conflicts.** A checkout writes only its own branch, so two machines
+  failing at once never contend. The alert mechanism can't become a source of
+  alerts.
+- **Your notes stay notes.** The health namespace sits outside the inbox one, so
+  `merge` passes over it and nothing appears in your canonical branch or your
+  working tree. `health` reads the refs directly.
+- **It survives what it reports.** The heartbeat is written with git plumbing —
+  no working tree, no index, no branch checkout, and no clean filter. A machine
+  whose `git add` fails can still say so.
+
+Each heartbeat is a fresh root commit, force-pushed over the last one: liveness
+history has no value worth its unbounded growth, and being a branch's only
+writer means a force push can never lose anyone's work.
+
+### Retiring a machine
+
+A checkout that stops syncing keeps its last heartbeat, so a laptop you have
+stopped using reads as `stale` indefinitely — correct, but noise once it's
+deliberate. Nothing deletes it for you: `deinit` never touches the remote. Drop
+the branch by hand when you retire a machine:
+
+```sh
+sidecar health --json | grep '"branch"'          # find the one to remove
+git -C <sidecar-checkout> push origin --delete sidecar-health/zack/1c0de4a19b3f
+```
+
+Deleting it is always safe. A health branch holds one generated file and no
+notes, and if that machine ever syncs again it simply republishes.
+
+### Why a heartbeat and not an alert file
+
+Because absence has to mean something. A file that only appears on failure can't
+distinguish "everything is fine" from "that machine has been shut for a week" —
+and the silent stop is the failure most worth catching. A machine that reports
+`ok` on a schedule makes its own silence legible: after 24 hours without a
+report it reads as `stale` rather than `ok`.
+
+Healthy machines refresh hourly rather than on every sync, so a repo synced on
+the 10-minute daemon cycle doesn't push 144 times a day to say nothing new.
+Failures and recoveries publish immediately, whatever the interval.
+
+Failure messages are git's own, which means they can quote a remote URL with a
+token in it. They go through [redaction](redaction.md) before they are published,
+independently of the repo's redaction mode — the health branch deliberately
+bypasses the clean filter, so nothing downstream would catch it.

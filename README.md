@@ -6,14 +6,14 @@
   <a href="https://anteprojector.github.io/sidecar/">Website</a> ·
   <a href="#quickstart">Quickstart</a> ·
   <a href="docs/commands.md">Commands</a> ·
-  <a href="https://www.npmjs.com/package/@projectors/sidecar">npm</a>
+  <a href="https://www.npmjs.com/package/sidecarsync">npm</a>
 </p>
 
 # sidecar
 
-[![npm](https://img.shields.io/npm/v/%40projectors%2Fsidecar)](https://www.npmjs.com/package/@projectors/sidecar)
-[![license](https://img.shields.io/npm/l/%40projectors%2Fsidecar)](LICENSE)
-[![node](https://img.shields.io/node/v/%40projectors%2Fsidecar)](https://nodejs.org)
+[![npm](https://img.shields.io/npm/v/sidecarsync)](https://www.npmjs.com/package/sidecarsync)
+[![license](https://img.shields.io/npm/l/sidecarsync)](LICENSE)
+[![node](https://img.shields.io/node/v/sidecarsync)](https://nodejs.org)
 
 Sidecar is a child repo — *not a submodule* — for your repo. Gitignored,
 shared, auto-synced, and never a merge conflict: give your agents a
@@ -48,7 +48,7 @@ while a background daemon keeps every clone in sync.
 Requires Node.js 20+ and git, on macOS or Linux. (Windows is coming soon.)
 
 ```sh
-npm install -g @projectors/sidecar
+npm install -g sidecarsync
 cd ~/dev/your-repo
 sidecar init
 ```
@@ -59,7 +59,10 @@ checkout lives, then paste a remote URL, or leave it blank and init creates
 a private repo for you with the GitHub CLI (`gh`).
 
 The daemon takes it from here. `sidecar status` shows what's happening;
-`sidecar sync` forces a sync right now.
+`sidecar sync` forces a sync right now. Once a second machine joins,
+[`sidecar health`](docs/commands.md#fleet-health) shows whether all of them are
+still syncing — a sync can fail on one laptop for reasons the others would
+otherwise never hear about.
 
 ### Standalone repos
 

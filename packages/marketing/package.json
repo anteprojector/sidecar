@@ -10,6 +10,7 @@
     "stamp-stars": "node scripts/stamp-stars.mjs",
     "favicon": "python3 scripts/make-favicon.py && python3 scripts/make-favicon.py --variants",
     "og": "node scripts/serve-site.mjs --root . --port 4330",
+    "og:render": "node scripts/make-og.mjs",
     "readme-hero": "python3 scripts/make-readme-hero-masks.py && node scripts/make-readme-hero-svg.mjs"
   }
 }

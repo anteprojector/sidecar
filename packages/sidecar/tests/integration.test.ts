@@ -19,11 +19,11 @@ afterEach(() => {
 describe("sidecar CLI integration", () => {
   test("global executable delegates to a project-local sidecar dependency", () => {
     const project = tempDir();
-    const localBin = path.join(project, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+    const localBin = path.join(project, "node_modules", "sidecarsync", "dist", "cli.js");
     fs.mkdirSync(path.dirname(localBin), { recursive: true });
     fs.writeFileSync(
       path.join(project, "package.json"),
-      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.1.0" } }),
+      JSON.stringify({ dependencies: { "sidecarsync": "0.1.0" } }),
       "utf8",
     );
     fs.writeFileSync(
@@ -152,7 +152,7 @@ describe("sidecar CLI integration", () => {
       `${JSON.stringify(
         {
           name: "app",
-          devDependencies: { "@projectors/sidecar": "0.6.0", vitest: "3.2.7" },
+          devDependencies: { "sidecarsync": "0.6.0", vitest: "3.2.7" },
           dependencies: { react: "19.0.0" },
         },
         null,
@@ -173,7 +173,7 @@ describe("sidecar CLI integration", () => {
     });
     expect(JSON.parse(fs.readFileSync(path.join(main, "package.json"), "utf8"))).toEqual({
       name: "app",
-      devDependencies: { "@projectors/sidecar": "0.6.0", vitest: "3.2.7" },
+      devDependencies: { "sidecarsync": "0.6.0", vitest: "3.2.7" },
       dependencies: { react: "19.0.0" },
     });
     expect(JSON.parse(fs.readFileSync(path.join(stateDir, "instances.json"), "utf8"))).toEqual([]);
@@ -243,11 +243,11 @@ describe("sidecar CLI integration", () => {
 
   test("global executable runs daemon commands itself instead of delegating locally", () => {
     const project = tempDir();
-    const localBin = path.join(project, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+    const localBin = path.join(project, "node_modules", "sidecarsync", "dist", "cli.js");
     fs.mkdirSync(path.dirname(localBin), { recursive: true });
     fs.writeFileSync(
       path.join(project, "package.json"),
-      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.1.0" } }),
+      JSON.stringify({ dependencies: { "sidecarsync": "0.1.0" } }),
       "utf8",
     );
     fs.writeFileSync(localBin, "console.log(JSON.stringify({ local: true }))\n", "utf8");
@@ -269,11 +269,11 @@ describe("sidecar CLI integration", () => {
 
   test("daemon commands refuse to run from a project-local executable", () => {
     const project = tempDir();
-    const localBin = path.join(project, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+    const localBin = path.join(project, "node_modules", "sidecarsync", "dist", "cli.js");
     fs.mkdirSync(path.dirname(localBin), { recursive: true });
     fs.writeFileSync(
       path.join(project, "package.json"),
-      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.1.0" } }),
+      JSON.stringify({ dependencies: { "sidecarsync": "0.1.0" } }),
       "utf8",
     );
     fs.copyFileSync(cliPath, localBin);
@@ -413,7 +413,7 @@ describe("sidecar CLI integration", () => {
     fs.symlinkSync(findExecutable("git"), path.join(pathWithoutSidecar, "git"));
     fs.writeFileSync(
       path.join(main, "package.json"),
-      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.1.0" } }),
+      JSON.stringify({ dependencies: { "sidecarsync": "0.1.0" } }),
       "utf8",
     );
 
@@ -433,7 +433,7 @@ describe("sidecar CLI integration", () => {
     const stateDir = tempDir();
     fs.writeFileSync(
       path.join(main, "package.json"),
-      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.2.0" } }),
+      JSON.stringify({ dependencies: { "sidecarsync": "0.2.0" } }),
       "utf8",
     );
 
@@ -475,7 +475,7 @@ describe("sidecar CLI integration", () => {
     fs.symlinkSync(findExecutable("git"), path.join(pathWithoutSidecar, "git"));
     fs.writeFileSync(
       path.join(main, "package.json"),
-      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.1.0" } }),
+      JSON.stringify({ dependencies: { "sidecarsync": "0.1.0" } }),
       "utf8",
     );
     runSidecar(["init", remote, "--no-clone"], main, {
@@ -604,8 +604,8 @@ describe("sidecar CLI integration", () => {
     expect(output).toContain("updated sidecar");
     expect(output).toContain("-> v9.9.9");
     const calls = fs.readFileSync(marker, "utf8");
-    expect(calls).toContain("view @projectors/sidecar version");
-    expect(calls).toContain("install -g @projectors/sidecar@9.9.9");
+    expect(calls).toContain("view sidecarsync version");
+    expect(calls).toContain("install -g sidecarsync@9.9.9");
     expect(fs.readFileSync(path.join(stateDir, "sidecar.log"), "utf8")).toContain('"event":"manual-update"');
   });
 
@@ -781,10 +781,10 @@ describe("sidecar CLI integration", () => {
     // whose local sidecar version must own its own sync.
     fs.writeFileSync(
       path.join(main, "package.json"),
-      JSON.stringify({ devDependencies: { "@projectors/sidecar": "0.2.0" } }),
+      JSON.stringify({ devDependencies: { "sidecarsync": "0.2.0" } }),
       "utf8",
     );
-    const localCli = path.join(main, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+    const localCli = path.join(main, "node_modules", "sidecarsync", "dist", "cli.js");
     fs.mkdirSync(path.dirname(localCli), { recursive: true });
     fs.writeFileSync(
       localCli,
@@ -860,7 +860,7 @@ describe("sidecar CLI integration", () => {
       const manifestPath = path.join(pkgRoot, "package.json");
       fs.writeFileSync(
         manifestPath,
-        JSON.stringify({ name: "@projectors/sidecar", version: "9.9.9", type: "module" }),
+        JSON.stringify({ name: "sidecarsync", version: "9.9.9", type: "module" }),
         "utf8",
       );
       fs.copyFileSync(cliPath, path.join(pkgRoot, "dist", "cli.js"));
@@ -897,7 +897,7 @@ describe("sidecar CLI integration", () => {
         );
         fs.writeFileSync(
           manifestPath,
-          JSON.stringify({ name: "@projectors/sidecar", version: "9.9.10", type: "module" }),
+          JSON.stringify({ name: "sidecarsync", version: "9.9.10", type: "module" }),
           "utf8",
         );
 
@@ -937,7 +937,7 @@ describe("sidecar CLI integration", () => {
     const stateDir = tempDir();
     fs.writeFileSync(
       path.join(project, "package.json"),
-      JSON.stringify({ dependencies: { "@projectors/sidecar": "0.1.0" } }),
+      JSON.stringify({ dependencies: { "sidecarsync": "0.1.0" } }),
       "utf8",
     );
 
@@ -1235,11 +1235,11 @@ describe("sidecar CLI integration", () => {
   test("set-install-source runs globally even inside a repo that depends on sidecar", () => {
     const project = tempDir();
     const stateDir = tempDir();
-    const localBin = path.join(project, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+    const localBin = path.join(project, "node_modules", "sidecarsync", "dist", "cli.js");
     fs.mkdirSync(path.dirname(localBin), { recursive: true });
     fs.writeFileSync(
       path.join(project, "package.json"),
-      JSON.stringify({ devDependencies: { "@projectors/sidecar": "0.1.0" } }),
+      JSON.stringify({ devDependencies: { "sidecarsync": "0.1.0" } }),
       "utf8",
     );
     fs.writeFileSync(localBin, "console.log('delegated to local')\n", "utf8");
@@ -1336,10 +1336,10 @@ describe("sidecar CLI integration", () => {
     runSidecar(["init", remote, "--redaction", "none", "--local-install"], main);
 
     const manifest = JSON.parse(fs.readFileSync(path.join(main, "package.json"), "utf8"));
-    expect(Object.keys(manifest.devDependencies)).toContain("@projectors/sidecar");
+    expect(Object.keys(manifest.devDependencies)).toContain("sidecarsync");
     // The dependency without the trust entry would register nothing: bun
     // blocks lifecycle scripts by default, and the postinstall is the point.
-    expect(manifest.trustedDependencies).toContain("@projectors/sidecar");
+    expect(manifest.trustedDependencies).toContain("sidecarsync");
     expect(manifest.pnpm).toBeUndefined();
   });
 
@@ -1352,7 +1352,7 @@ describe("sidecar CLI integration", () => {
     runSidecar(["init", remote, "--redaction", "none", "--local-install"], main);
 
     const manifest = JSON.parse(fs.readFileSync(path.join(main, "package.json"), "utf8"));
-    expect(manifest.pnpm.onlyBuiltDependencies).toContain("@projectors/sidecar");
+    expect(manifest.pnpm.onlyBuiltDependencies).toContain("sidecarsync");
     expect(manifest.trustedDependencies).toBeUndefined();
   });
 
@@ -1374,7 +1374,7 @@ describe("sidecar CLI integration", () => {
     expect(result.status).toBe(0);
     expect(result.stderr).toContain("the package manager is unknown");
     const manifest = JSON.parse(fs.readFileSync(path.join(main, "package.json"), "utf8"));
-    expect(Object.keys(manifest.devDependencies)).toContain("@projectors/sidecar");
+    expect(Object.keys(manifest.devDependencies)).toContain("sidecarsync");
   });
 
   test("standalone init --local-install syncs the edit and warns about node_modules", () => {
@@ -1397,8 +1397,8 @@ describe("sidecar CLI integration", () => {
     expect(result.stderr).toContain("node_modules is not gitignored");
     // The edit rides init's ending sync, so other machines get it for free.
     const pushed = JSON.parse(gitRaw(["--git-dir", remote, "show", "main:package.json"]).stdout);
-    expect(Object.keys(pushed.devDependencies)).toContain("@projectors/sidecar");
-    expect(pushed.trustedDependencies).toContain("@projectors/sidecar");
+    expect(Object.keys(pushed.devDependencies)).toContain("sidecarsync");
+    expect(pushed.trustedDependencies).toContain("sidecarsync");
   });
 
   test("init --path . adopts the repo itself as the sidecar", () => {
@@ -1613,7 +1613,172 @@ describe("sidecar CLI integration", () => {
 
     expect(output).toMatch(/branch:\s+main — not the inbox branch/);
   });
+
+  test("sync publishes a heartbeat that the main branch never absorbs", () => {
+    const { main, remote } = initSidecarProject();
+
+    runSidecar(["sync"], main);
+
+    const healthBranches = remoteBranches(remote).filter((branch) => branch.startsWith("sidecar-health/"));
+    expect(healthBranches).toHaveLength(1);
+    expect(healthBranches[0]).toMatch(/^sidecar-health\/.+\/[a-f0-9]{12}$/);
+
+    const record = JSON.parse(
+      gitRaw(["--git-dir", remote, "show", `${healthBranches[0]}:health.json`]).stdout,
+    );
+    expect(record.status).toBe("ok");
+    expect(record.consecutiveFailures).toBe(0);
+    expect(record.lastSuccessAt).toBe(record.updatedAt);
+    expect(record.inbox).toMatch(/^sidecar-inbox\//);
+
+    // The whole reason for a separate namespace: the merge must pass over it,
+    // so notes stay notes.
+    expect(gitRaw(["--git-dir", remote, "cat-file", "-e", "main:health.json"], { check: false }).status).not.toBe(0);
+    // And a root commit each time, so liveness pings never accumulate history.
+    expect(gitRaw(["--git-dir", remote, "rev-list", "--count", healthBranches[0]]).stdout.trim()).toBe("1");
+  });
+
+  test("a failing sync reports the stage it broke at, then clears on recovery", () => {
+    const { main, remote, sidecar } = initSidecarProject();
+    runSidecar(["sync"], main);
+
+    // A remote that refuses the inbox push but still accepts the heartbeat —
+    // the exact split the separate write path exists to survive.
+    rejectPushesTo(remote, "refs/heads/sidecar-inbox/");
+    fs.writeFileSync(path.join(sidecar, "note.md"), "note\n", "utf8");
+    const failed = spawnSync(process.execPath, [cliPath, "sync"], {
+      cwd: main,
+      encoding: "utf8",
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state") },
+    });
+    expect(failed.status).toBe(1);
+
+    const broken = healthEntries(main)[0];
+    expect(broken.state).toBe("failed");
+    expect(broken.record.status).toBe("failed");
+    expect(broken.record.stage).toBe("push-inbox");
+    expect(broken.record.consecutiveFailures).toBe(1);
+    // The last good sync survives the failure, so "working until when" is answerable.
+    expect(broken.record.lastSuccessAt).toBeTruthy();
+    expect(broken.record.lastSuccessAt).not.toBe(broken.record.updatedAt);
+
+    allowAllPushes(remote);
+    runSidecar(["sync"], main);
+
+    const recovered = healthEntries(main)[0];
+    expect(recovered.state).toBe("ok");
+    expect(recovered.record.consecutiveFailures).toBe(0);
+    expect(recovered.record.stage).toBeUndefined();
+    expect(recovered.record.message).toBeUndefined();
+  });
+
+  test("health reports every checkout sharing the remote, worst first", () => {
+    const remote = initBareRemote();
+    const firstMain = initMainRepo();
+    const secondMain = initMainRepo();
+    runSidecar(["init", remote], firstMain);
+    runSidecar(["init", remote], secondMain);
+    runSidecar(["sync"], firstMain);
+
+    // Break only the second checkout, so the two machines disagree.
+    rejectPushesTo(remote, "refs/heads/sidecar-inbox/");
+    fs.writeFileSync(path.join(secondMain, "sidecar", "note.md"), "note\n", "utf8");
+    spawnSync(process.execPath, [cliPath, "sync"], {
+      cwd: secondMain,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        SIDECAR_STATE_DIR: path.join(secondMain, ".sidecar-test-state"),
+      },
+    });
+    allowAllPushes(remote);
+
+    // Read the fleet from the checkout that never broke: the point of the
+    // heartbeat is that a healthy machine can see an unhealthy one.
+    const entries = healthEntries(firstMain);
+    expect(entries).toHaveLength(2);
+    expect(entries[0].state).toBe("failed");
+    expect(entries[1].state).toBe("ok");
+    expect(entries[1].self).toBe(true);
+    expect(entries[0].self).toBe(false);
+
+    const output = runSidecar(["health"], firstMain);
+    expect(output).toMatch(/fleet:\s+1 ok, 1 failed/);
+    expect(output).toMatch(/status:\s+failed at push-inbox/);
+    expect(output).toContain("(this checkout)");
+  });
+
+  // The heartbeat rides the same remote it reports on, so a remote that is
+  // wholly unreachable can't be told about. What must not happen is the
+  // reporting failure replacing the sync failure the user needs to see.
+  test("a heartbeat that cannot be published never masks the sync error", () => {
+    const { main, remote, sidecar } = initSidecarProject();
+    const stateDir = path.join(main, ".sidecar-test-state");
+    runSidecar(["sync"], main);
+
+    // Every ref rejected, so the heartbeat has nowhere to go either.
+    rejectPushesTo(remote, "refs/");
+    fs.writeFileSync(path.join(sidecar, "note.md"), "note\n", "utf8");
+
+    const result = spawnSync(process.execPath, [cliPath, "sync"], {
+      cwd: main,
+      encoding: "utf8",
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", SIDECAR_STATE_DIR: stateDir },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("rejected by test hook");
+    expect(result.stderr).not.toContain("could not publish health");
+    // The attempt is still recorded where this machine can read it.
+    const log = fs.readFileSync(path.join(stateDir, "sidecar.log"), "utf8");
+    expect(log).toContain("could not publish health");
+  });
+
+  test("init refuses an inbox namespace that would swallow the health branches", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+
+    const result = spawnSync(
+      process.execPath,
+      [cliPath, "init", remote, "--inbox", "sidecar-health/{user}/{random}"],
+      {
+        cwd: main,
+        encoding: "utf8",
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state") },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("sidecar-health/");
+  });
 });
+
+function remoteBranches(remote: string): string[] {
+  return gitRaw(["--git-dir", remote, "branch", "--format=%(refname:short)"])
+    .stdout.split("\n")
+    .map((branch) => branch.trim())
+    .filter(Boolean);
+}
+
+function healthEntries(main: string): Array<{ branch: string; self: boolean; state: string; record: Record<string, string | number> }> {
+  return JSON.parse(runSidecar(["health", "--json"], main));
+}
+
+/** An `update` hook on the bare remote, so one ref namespace can fail alone. */
+function rejectPushesTo(remote: string, refPrefix: string): void {
+  const hook = path.join(remote, "hooks", "update");
+  fs.writeFileSync(
+    hook,
+    `#!/bin/sh\ncase "$1" in\n  ${refPrefix}*) echo "rejected by test hook" >&2; exit 1 ;;\nesac\nexit 0\n`,
+    "utf8",
+  );
+  fs.chmodSync(hook, 0o755);
+}
+
+function allowAllPushes(remote: string): void {
+  fs.rmSync(path.join(remote, "hooks", "update"), { force: true });
+}
 
 function initSidecarProject(initArgs: string[] = []): { main: string; remote: string; sidecar: string } {
   const main = initMainRepo();

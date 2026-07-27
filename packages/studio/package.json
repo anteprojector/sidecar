@@ -1,0 +1,36 @@
+{
+  "name": "studio",
+  "private": true,
+  "version": "0.9.0",
+  "description": "The sidecar videos, rendered with Remotion.",
+  "type": "module",
+  "scripts": {
+    "studio": "remotion studio",
+    "typecheck": "tsc --noEmit",
+    "render:demo": "remotion render Demo out/demo/demo.mp4",
+    "gif:demo": "remotion render Demo out/demo/demo.gif --codec=gif --every-nth-frame=2 --scale=0.6666",
+    "still:demo": "remotion still Demo out/demo/still.png",
+    "render:demo-square": "remotion render DemoSquare out/demo/demo-square.mp4",
+    "render:demo-tall": "remotion render DemoTall out/demo/demo-tall.mp4",
+    "audio:demo": "node scripts/make-audio.mjs",
+    "render:no-conflicts": "remotion render NoConflicts out/no-conflicts/no-conflicts.mp4",
+    "still:no-conflicts": "remotion still NoConflicts out/no-conflicts/still.png",
+    "render:secrets": "remotion render SecretsStayHome out/secrets-stay-home/secrets-stay-home.mp4",
+    "still:secrets": "remotion still SecretsStayHome out/secrets-stay-home/still.png",
+    "render:just-git": "remotion render JustGit out/just-git/just-git.mp4",
+    "still:just-git": "remotion still JustGit out/just-git/still.png",
+    "render:fleet-health": "remotion render FleetHealth out/fleet-health/fleet-health.mp4",
+    "still:fleet-health": "remotion still FleetHealth out/fleet-health/still.png"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.0",
+    "@remotion/fonts": "^4.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "typescript": "^5.5.4"
+  }
+}

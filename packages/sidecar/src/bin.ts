@@ -8,7 +8,7 @@ import { main } from "./cli.js";
 
 const SKIP_LOCAL_EXEC_ENV = "SIDECAR_SKIP_LOCAL_EXEC";
 const GLOBAL_EXEC_ENV = "SIDECAR_GLOBAL_EXEC";
-const PACKAGE_NAME = "@projectors/sidecar";
+const PACKAGE_NAME = "sidecarsync";
 // Commands that mutate global state (launchd service, instance registry) must
 // execute in this global install, never in a project-local copy — a delegated
 // daemon command would write a launchd plist pointing at node_modules.
@@ -42,7 +42,7 @@ function findLocalExecutable(start: string, self: string): string | undefined {
   let current = path.resolve(start);
   while (true) {
     if (projectDependsOnSidecar(current)) {
-      const candidate = path.join(current, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+      const candidate = path.join(current, "node_modules", PACKAGE_NAME, "dist", "cli.js");
       if (isFile(candidate) && !sameFile(candidate, self)) {
         return candidate;
       }

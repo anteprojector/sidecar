@@ -2,9 +2,9 @@
 
 Sidecar supports macOS and Linux. Windows is coming soon.
 
-The recommended setup is a single global install (`npm install -g
-@projectors/sidecar`); it owns the background daemon that keeps every
-registered repo in sync (see [how syncing works](sync.md)). The install
+The recommended setup is a single global install (`npm install -g sidecarsync`);
+it owns the background daemon that keeps every registered repo in sync (see
+[how syncing works](sync.md)). The install
 script (`curl -fsSL https://raw.githubusercontent.com/anteprojector/sidecar/main/packages/sidecar/install.sh | sh`)
 is equivalent — it runs the npm install for you after checking prerequisites.
 
@@ -14,8 +14,8 @@ the matching update channel — so future distribution channels keep updating
 seamlessly.
 
 A repo can additionally pin sidecar as a node dependency. When a
-`package.json` is present, `sidecar init` offers to add `@projectors/sidecar`
-to `devDependencies` (`--local-install` says yes non-interactively) — and,
+`package.json` is present, `sidecar init` offers to add `sidecarsync` to
+`devDependencies` (`--local-install` says yes non-interactively) — and,
 detected from the lockfile, the trust entry bun (`trustedDependencies`) or
 pnpm (`pnpm.onlyBuiltDependencies`) needs, since both block lifecycle scripts
 by default. With no lockfile, init warns that it can't tell. The payoff is on

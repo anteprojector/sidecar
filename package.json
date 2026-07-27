@@ -1,5 +1,5 @@
 {
-  "name": "@projectors/sidecar-mono",
+  "name": "sidecarsync-mono",
   "private": true,
   "version": "0.9.0",
   "type": "module",

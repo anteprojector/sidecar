@@ -28,8 +28,8 @@ rm -f ~/.config/systemd/user/com.anteprojector.sidecar.service      # Linux
 systemctl --user daemon-reload                                      # Linux
 
 # 3. Remove the package (whichever installed it; curl installs use npm)
-npm uninstall -g @projectors/sidecar
-# or: bun remove -g @projectors/sidecar
+npm uninstall -g sidecarsync
+# or: bun remove -g sidecarsync
 
 # 4. Remove machine state
 rm -rf "$HOME/Library/Application Support/sidecar"                  # macOS
@@ -39,7 +39,10 @@ rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}/sidecar"              # Linux
 Per repo, if you want the traces gone too: delete `.sidecar`, the sidecar
 checkout directory, its line in `.gitignore`, and the `sidecar/**` entry in
 `.zed/settings.json` if you accepted that prompt. The sidecar *remote* repo
-is yours and is never touched.
+is yours and is never touched — which also means this machine's inbox branch
+and its `sidecar-health/…` heartbeat stay there until you delete them. The
+heartbeat will read as `stale` in [`sidecar health`](commands.md#retiring-a-machine)
+until you do.
 
 ## Troubleshooting
 

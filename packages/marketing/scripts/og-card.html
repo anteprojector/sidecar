@@ -9,9 +9,14 @@
 
   Regenerate after changing the wording, the palette, or the art:
 
+    bun run --cwd packages/marketing og:render
+
+  That drives this page in headless Chrome and writes site/assets/og.png for
+  you (scripts/make-og.mjs). To iterate on the design by eye instead, serve it
+  and use the Download button:
+
     bun run --cwd packages/marketing og
-    # then open http://127.0.0.1:4330/scripts/og-card.html,
-    # click Download, and save over site/assets/og.png
+    # then open http://127.0.0.1:4330/scripts/og-card.html
 
   Keep the yellow colorway: it is the site's default theme and the one the
   favicon and README hero already use, so a shared link matches the page it
@@ -129,7 +134,7 @@ async function draw() {
   ctx.letterSpacing = '0px';
 
   // Install line, boxed like the hero's copy steps.
-  const cmd = 'npm i -g @projectors/sidecar';
+  const cmd = 'npm i -g sidecarsync';
   ctx.font = `400 27px ${MONO}`;
   const cw = ctx.measureText(cmd).width;
   fits('install command', PAD + cw + 52);

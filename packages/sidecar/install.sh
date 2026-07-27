@@ -11,7 +11,7 @@
 set -eu
 
 main() {
-  PACKAGE="@projectors/sidecar"
+  PACKAGE="sidecarsync"
 
   if ! command -v npm >/dev/null 2>&1; then
     echo "sidecar: npm is required (install Node.js 20+ from https://nodejs.org)" >&2

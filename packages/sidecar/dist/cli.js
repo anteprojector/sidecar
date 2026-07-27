@@ -1174,6 +1174,108 @@ var init_redaction = __esm(() => {
   ]);
 });
 
+// src/health.ts
+function healthBranch(user, checkoutId) {
+  return `${HEALTH_BRANCH_PREFIX}${user}/${checkoutId}`;
+}
+function inboxPrefixCollidesWithHealth(inboxPrefix) {
+  const prefix = inboxPrefix.replace(/^\/+/, "");
+  return prefix.startsWith(HEALTH_BRANCH_PREFIX) || HEALTH_BRANCH_PREFIX.startsWith(prefix);
+}
+function isHealthBranch(remoteBranch) {
+  const branch = remoteBranch.startsWith("origin/") ? remoteBranch.slice("origin/".length) : remoteBranch;
+  return branch.startsWith(HEALTH_BRANCH_PREFIX);
+}
+function parseHealthRecord(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw))
+    return;
+  const record = raw;
+  const status = record.status === "failed" ? "failed" : record.status === "ok" ? "ok" : undefined;
+  if (!status || typeof record.updatedAt !== "string")
+    return;
+  return {
+    schema: typeof record.schema === "number" ? record.schema : 0,
+    machine: typeof record.machine === "string" ? record.machine : "unknown",
+    root: typeof record.root === "string" ? record.root : "",
+    inbox: typeof record.inbox === "string" ? record.inbox : "",
+    version: typeof record.version === "string" ? record.version : "",
+    status,
+    updatedAt: record.updatedAt,
+    lastSuccessAt: typeof record.lastSuccessAt === "string" ? record.lastSuccessAt : undefined,
+    lastFailureAt: typeof record.lastFailureAt === "string" ? record.lastFailureAt : undefined,
+    consecutiveFailures: typeof record.consecutiveFailures === "number" && Number.isFinite(record.consecutiveFailures) ? record.consecutiveFailures : 0,
+    stage: typeof record.stage === "string" ? record.stage : undefined,
+    message: typeof record.message === "string" ? record.message : undefined
+  };
+}
+function serializeHealthRecord(record) {
+  return `${JSON.stringify(record, null, 2)}
+`;
+}
+function nextHealthRecord(previous, identity, outcome, now) {
+  const base = {
+    schema: HEALTH_SCHEMA,
+    ...identity,
+    status: outcome.status,
+    updatedAt: now,
+    lastSuccessAt: previous?.lastSuccessAt,
+    lastFailureAt: previous?.lastFailureAt,
+    consecutiveFailures: 0
+  };
+  if (outcome.status === "ok")
+    return { ...base, lastSuccessAt: now };
+  return {
+    ...base,
+    lastFailureAt: now,
+    consecutiveFailures: (previous?.consecutiveFailures ?? 0) + 1,
+    stage: outcome.stage,
+    message: redactText(outcome.message).trim().slice(-MESSAGE_LIMIT)
+  };
+}
+function shouldPublishHealth(previous, next, now = Date.now()) {
+  if (!previous)
+    return true;
+  if (next.status === "failed" || previous.status !== next.status)
+    return true;
+  const last = Date.parse(previous.updatedAt);
+  if (!Number.isFinite(last))
+    return true;
+  return now - last >= HEALTH_HEARTBEAT_MS || last > now;
+}
+function classifyHealthState(record, now = Date.now(), staleAfterMs = HEALTH_STALE_AFTER_MS) {
+  if (record.status === "failed")
+    return "failed";
+  const updated = Date.parse(record.updatedAt);
+  if (!Number.isFinite(updated))
+    return "stale";
+  return now - updated > staleAfterMs ? "stale" : "ok";
+}
+function summarizeHealthStates(states) {
+  const counts = { ok: 0, failed: 0, stale: 0 };
+  for (const state of states)
+    counts[state] += 1;
+  const parts = [];
+  if (counts.ok)
+    parts.push(`${counts.ok} ok`);
+  if (counts.failed)
+    parts.push(`${counts.failed} failed`);
+  if (counts.stale)
+    parts.push(`${counts.stale} stale`);
+  return parts.join(", ") || "none";
+}
+var HEALTH_BRANCH_PREFIX = "sidecar-health/", HEALTH_FILE = "health.json", HEALTH_SCHEMA = 1, HEALTH_STALE_AFTER_MS, HEALTH_HEARTBEAT_MS, MESSAGE_LIMIT = 500;
+var init_health = __esm(() => {
+  init_redaction();
+  HEALTH_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+  HEALTH_HEARTBEAT_MS = 60 * 60 * 1000;
+});
+
 // src/daemon.ts
 var exports_daemon = {};
 __export(exports_daemon, {
@@ -1360,7 +1462,7 @@ async function checkoutIsDirty(root) {
 function localSidecarCliPath(root) {
   if (!projectDependsOnSidecar(root))
     return;
-  const candidate = path.join(root, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+  const candidate = path.join(root, "node_modules", PACKAGE_NAME, "dist", "cli.js");
   if (!isFile(candidate))
     return;
   try {
@@ -1768,6 +1870,8 @@ function run(argv) {
       return cmdDeinit(rest);
     case "status":
       return cmdStatus(rest);
+    case "health":
+      return cmdHealth(rest);
     case "instances":
       return cmdInstances(rest);
     case "tail":
@@ -1829,6 +1933,8 @@ ${header("common:")}
                            --path . makes this repo itself the sidecar (standalone)
                            --local-install adds the devDependency so fresh clones self-register
   status [--json]
+  health [--json] [--no-fetch]
+                           how every machine sharing this sidecar is syncing
   redactions               preview what redaction rewrites before content is pushed
 
 ${header("sync & daemon:")}
@@ -2351,6 +2457,65 @@ function formatLocalTimestamp(iso) {
   const pad = (value) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` + ` ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
+function cmdHealth(args) {
+  const parsed = parseOptions(args, {
+    boolean: new Set(["--json", "--no-fetch"]),
+    value: new Set
+  });
+  if (parsed.positional.length)
+    throw new SidecarError("usage: sidecar health [--json] [--no-fetch]");
+  const [root, config] = loadProject();
+  const sidecarPath = requireSidecarCheckout(root, config);
+  if (!parsed.flags.has("--no-fetch"))
+    fetch(sidecarPath, true, false);
+  const entries = readFleetHealth(sidecarPath);
+  if (parsed.flags.has("--json")) {
+    console.log(JSON.stringify(entries, null, 2));
+    return 0;
+  }
+  console.log(`${paint("label", "remote:")} ${paint("brand", config.remote)}`);
+  console.log(`${paint("label", "fleet: ")} ${summarizeHealthStates(entries.map((entry) => entry.state))}`);
+  if (!entries.length) {
+    console.log("");
+    console.log(paint("quiet", "no checkout has reported yet; each one publishes on its next sync"));
+    return 0;
+  }
+  const width = "checkout:".length;
+  const line = (label, value, role) => labelLine(width, label, value, role, "  ");
+  for (const { record, state, self } of entries) {
+    console.log("");
+    console.log(`${paint("repo", record.machine)}${self ? paint("quiet", "  (this checkout)") : ""}`);
+    const status = healthStatusLine(state, record);
+    line("status", status.text, status.role);
+    if (record.message)
+      line("detail", record.message);
+    if (record.consecutiveFailures > 1)
+      line("failures", `${record.consecutiveFailures} in a row`, "attn");
+    if (record.root)
+      line("checkout", record.root);
+    if (record.inbox)
+      line("inbox", record.inbox);
+    line("reported", formatTimestampPair(record.updatedAt));
+    if (record.lastSuccessAt && record.lastSuccessAt !== record.updatedAt) {
+      line("last ok", formatTimestampPair(record.lastSuccessAt));
+    } else if (!record.lastSuccessAt) {
+      line("last ok", "never", "attn");
+    }
+    if (record.version)
+      line("version", record.version, "quiet");
+  }
+  return 0;
+}
+function healthStatusLine(state, record) {
+  if (state === "failed") {
+    return { text: record.stage ? `failed at ${record.stage}` : "failed", role: "bad" };
+  }
+  if (state === "stale") {
+    const age = formatRelativeTime(record.updatedAt) ?? record.updatedAt;
+    return { text: `stale — last reported ${age}`, role: "attn" };
+  }
+  return { text: "ok", role: "ok" };
+}
 function cmdInstances(args) {
   const parsed = parseOptions(args, {
     boolean: new Set(["--json"]),
@@ -2638,31 +2803,127 @@ function cmdSync(args) {
   const [root, config] = loadProject();
   removeLegacyGitHooks(root);
   const soft = parsed.flags.has("--soft") || process.env[SOFT_SYNC_ENV] === "1";
-  const synced = withSyncLock(root, soft ? "skip" : "throw", () => {
-    syncProject(root, config, {
-      snapshot: !parsed.flags.has("--no-snapshot"),
-      message: getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined
+  let stage = "start";
+  let synced;
+  try {
+    synced = withSyncLock(root, soft ? "skip" : "throw", () => {
+      syncProject(root, config, {
+        snapshot: !parsed.flags.has("--no-snapshot"),
+        message: getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined,
+        onStage: (name) => {
+          stage = name;
+        }
+      });
     });
-  });
-  if (synced)
+  } catch (error) {
+    reportSyncHealth(root, config, {
+      status: "failed",
+      stage,
+      message: error instanceof Error ? error.message : String(error)
+    });
+    throw error;
+  }
+  if (synced) {
     registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
+    reportSyncHealth(root, config, { status: "ok" });
+  }
   return 0;
 }
 function syncProject(root, config, options) {
+  const stage = (name) => options.onStage?.(name);
+  stage("checkout");
   const sidecarPath = ensureSidecarCheckout(root, config);
   const inbox = expandInbox(config, sidecarPath);
   ensureCommitIdentity(sidecarPath);
   fetch(sidecarPath, true, false);
   ensureInboxBranch(sidecarPath, config, inbox);
+  stage("snapshot");
   if (options.snapshot) {
     snapshot(sidecarPath, root, inbox, options.message, config.redaction);
   } else {
     ensureRedactionFilter(sidecarPath, config.redaction);
   }
+  stage("push-inbox");
   syncBranchBeforePush(sidecarPath, inbox);
   pushBranch(sidecarPath, inbox);
+  stage("merge");
   mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: true });
+  stage("refresh");
   refreshInboxFromMain(sidecarPath, config, inbox);
+}
+function healthBranchFor(sidecarPath) {
+  return healthBranch(slug(currentUser()), checkoutRandom(sidecarPath));
+}
+function reportSyncHealth(root, config, outcome) {
+  try {
+    const sidecarPath = resolveSidecarPath(root, config);
+    if (!hasGitMetadata(sidecarPath))
+      return;
+    const branch = healthBranchFor(sidecarPath);
+    const previous = readHealthRecordAt(sidecarPath, `origin/${branch}`);
+    const identity = {
+      machine: `${currentUser()}@${currentHost()}`,
+      root,
+      inbox: expandInbox(config, sidecarPath),
+      version: packageVersion()
+    };
+    const record = nextHealthRecord(previous, identity, outcome, nowIso());
+    if (!shouldPublishHealth(previous, record))
+      return;
+    publishHealthRecord(sidecarPath, branch, record);
+    logSidecarEvent("health", {
+      branch,
+      status: record.status,
+      stage: record.stage,
+      consecutiveFailures: record.consecutiveFailures
+    });
+  } catch (error) {
+    logSidecarEvent("failure", {
+      command: "health",
+      root,
+      message: `could not publish health: ${error instanceof Error ? error.message : String(error)}`
+    });
+  }
+}
+function publishHealthRecord(sidecarPath, branch, record) {
+  const blob = git(sidecarPath, ["hash-object", "-w", "--stdin"], {
+    input: serializeHealthRecord(record)
+  }).stdout.trim();
+  const tree = git(sidecarPath, ["mktree"], {
+    input: `100644 blob ${blob}	${HEALTH_FILE}
+`
+  }).stdout.trim();
+  const commit = git(sidecarPath, [
+    "-c",
+    `user.name=${currentUser()}`,
+    "-c",
+    `user.email=${slug(currentUser())}@${slug(currentHost())}.local`,
+    "commit-tree",
+    tree,
+    "-m",
+    `health: ${record.status} — ${record.machine}`
+  ]).stdout.trim();
+  git(sidecarPath, ["push", "--force", "origin", `${commit}:refs/heads/${branch}`]);
+}
+function readHealthRecordAt(sidecarPath, ref) {
+  const result = git(sidecarPath, ["show", `${ref}:${HEALTH_FILE}`], { check: false });
+  if (result.status !== 0)
+    return;
+  return parseHealthRecord(result.stdout);
+}
+function readFleetHealth(sidecarPath) {
+  const self = healthBranchFor(sidecarPath);
+  const refs = git(sidecarPath, ["branch", "-r", "--format=%(refname:short)"]).stdout.split(/\r?\n/).map((ref) => ref.trim()).filter((ref) => ref && ref !== "origin/HEAD" && isHealthBranch(ref));
+  const entries = [];
+  for (const ref of refs) {
+    const record = readHealthRecordAt(sidecarPath, ref);
+    if (!record)
+      continue;
+    const branch = remoteBranchName(ref);
+    entries.push({ branch, self: branch === self, state: classifyHealthState(record), record });
+  }
+  const rank = { failed: 0, stale: 1, ok: 2 };
+  return entries.sort((left, right) => rank[left.state] - rank[right.state] || left.record.machine.localeCompare(right.record.machine) || left.branch.localeCompare(right.branch));
 }
 function cmdMerge(args) {
   const parsed = parseOptions(args, {
@@ -3273,6 +3534,9 @@ function validateInboxTemplate(template) {
   const prefix = inboxBranchPrefix(template);
   if (template.includes("{") && !prefix.endsWith("/")) {
     throw new SidecarError("inbox template must place variables under a static branch namespace, like sidecar-inbox/{user}/{random}");
+  }
+  if (inboxPrefixCollidesWithHealth(prefix)) {
+    throw new SidecarError(`inbox template must not use the ${HEALTH_BRANCH_PREFIX} namespace, which sidecar reserves for health branches`);
   }
 }
 function slug(value) {
@@ -4348,6 +4612,7 @@ function gitRaw(args, options = {}) {
   const check = options.check ?? true;
   const result = spawnSync("git", args, {
     encoding: "utf8",
+    input: options.input,
     maxBuffer: 104857600
   });
   const status = result.status ?? 1;
@@ -4467,10 +4732,11 @@ function nowIso() {
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
-var DEFAULT_PATH = "sidecar", DEFAULT_BRANCH = "main", DEFAULT_INBOX = "sidecar-inbox/{user}/{random}", PACKAGE_NAME = "@projectors/sidecar", PACKAGE_SPEC = "@projectors/sidecar", GLOBAL_EXEC_ENV2 = "SIDECAR_GLOBAL_EXEC", SKIP_LOCAL_EXEC_ENV2 = "SIDECAR_SKIP_LOCAL_EXEC", STATE_DIR_ENV = "SIDECAR_STATE_DIR", SOFT_SYNC_ENV = "SIDECAR_SYNC_SOFT", SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE", DAEMON_LABEL = "com.anteprojector.sidecar", SidecarError, INSTALL_SOURCES, KNOWN_COMMANDS, STATUS_LABEL_WIDTH, DAEMON_LABEL_WIDTH, REDACTION_FILTER_NAME = "sidecar-redact", DEFAULT_SETTINGS, LOG_ROTATE_BYTES = 5242880, LEGACY_HOOK_NAMES, LEGACY_HOOK_HELPER = "sidecar-sync-hook", LEGACY_HOOK_MARKER = "sidecar-sync", LEGACY_SYNC_STAMP_FILE = "sidecar-last-sync";
+var DEFAULT_PATH = "sidecar", DEFAULT_BRANCH = "main", DEFAULT_INBOX = "sidecar-inbox/{user}/{random}", PACKAGE_NAME = "sidecarsync", PACKAGE_SPEC = "sidecarsync", GLOBAL_EXEC_ENV2 = "SIDECAR_GLOBAL_EXEC", SKIP_LOCAL_EXEC_ENV2 = "SIDECAR_SKIP_LOCAL_EXEC", STATE_DIR_ENV = "SIDECAR_STATE_DIR", SOFT_SYNC_ENV = "SIDECAR_SYNC_SOFT", SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE", DAEMON_LABEL = "com.anteprojector.sidecar", SidecarError, INSTALL_SOURCES, KNOWN_COMMANDS, STATUS_LABEL_WIDTH, DAEMON_LABEL_WIDTH, REDACTION_FILTER_NAME = "sidecar-redact", DEFAULT_SETTINGS, LOG_ROTATE_BYTES = 5242880, LEGACY_HOOK_NAMES, LEGACY_HOOK_HELPER = "sidecar-sync-hook", LEGACY_HOOK_MARKER = "sidecar-sync", LEGACY_SYNC_STAMP_FILE = "sidecar-last-sync";
 var init_cli = __esm(() => {
   init_dist();
   init_color();
+  init_health();
   init_redaction();
   SidecarError = class SidecarError extends Error {
     constructor(message) {
@@ -4484,6 +4750,7 @@ var init_cli = __esm(() => {
     "clone",
     "deinit",
     "status",
+    "health",
     "instances",
     "tail",
     "daemon",
@@ -4512,7 +4779,7 @@ import { spawnSync as spawnSync2 } from "node:child_process";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 var SKIP_LOCAL_EXEC_ENV3 = "SIDECAR_SKIP_LOCAL_EXEC";
 var GLOBAL_EXEC_ENV3 = "SIDECAR_GLOBAL_EXEC";
-var PACKAGE_NAME2 = "@projectors/sidecar";
+var PACKAGE_NAME2 = "sidecarsync";
 var GLOBAL_ONLY_COMMANDS = new Set(["daemon", "deinit", "register-install", "set-install-source", "update"]);
 if (!process.env[SKIP_LOCAL_EXEC_ENV3]) {
   const localExecutable = findLocalExecutable(process.cwd(), fileURLToPath3(import.meta.url));
@@ -4540,7 +4807,7 @@ function findLocalExecutable(start, self) {
   let current = path3.resolve(start);
   while (true) {
     if (projectDependsOnSidecar2(current)) {
-      const candidate = path3.join(current, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+      const candidate = path3.join(current, "node_modules", PACKAGE_NAME2, "dist", "cli.js");
       if (isFile2(candidate) && !sameFile(candidate, self)) {
         return candidate;
       }

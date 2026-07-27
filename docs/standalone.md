@@ -35,7 +35,7 @@ else uncommitted, per the snapshot rule below — lands on the remote
 immediately instead of waiting for the daemon's next pass.
 
 If the repo has a `package.json`, accept init's offer to add
-`@projectors/sidecar` to `devDependencies` (or pass `--local-install`):
+`sidecarsync` to `devDependencies` (or pass `--local-install`):
 fresh clones then self-register with the daemon on plain install, and the
 edit rides init's ending sync to every machine. Keep `node_modules`
 gitignored — a standalone sync snapshots everything untracked, and init

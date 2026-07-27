@@ -9,6 +9,23 @@ import { parse as parseToml } from "smol-toml";
 
 import { type Role, colorLevel, paint, stripColor } from "./color.js";
 import {
+  HEALTH_BRANCH_PREFIX,
+  HEALTH_FILE,
+  type HealthIdentity,
+  type HealthOutcome,
+  type HealthRecord,
+  type HealthState,
+  classifyHealthState,
+  healthBranch,
+  inboxPrefixCollidesWithHealth,
+  isHealthBranch,
+  nextHealthRecord,
+  parseHealthRecord,
+  serializeHealthRecord,
+  shouldPublishHealth,
+  summarizeHealthStates,
+} from "./health.js";
+import {
   DEFAULT_REDACTION_MODE,
   NO_REDACT_PRAGMA,
   REDACTION_MODES,
@@ -21,8 +38,8 @@ import {
 export const DEFAULT_PATH = "sidecar";
 export const DEFAULT_BRANCH = "main";
 export const DEFAULT_INBOX = "sidecar-inbox/{user}/{random}";
-export const PACKAGE_NAME = "@projectors/sidecar";
-const PACKAGE_SPEC = "@projectors/sidecar";
+export const PACKAGE_NAME = "sidecarsync";
+const PACKAGE_SPEC = "sidecarsync";
 const GLOBAL_EXEC_ENV = "SIDECAR_GLOBAL_EXEC";
 const SKIP_LOCAL_EXEC_ENV = "SIDECAR_SKIP_LOCAL_EXEC";
 const STATE_DIR_ENV = "SIDECAR_STATE_DIR";
@@ -152,6 +169,8 @@ function run(argv: string[]): number | Promise<number> {
       return cmdDeinit(rest);
     case "status":
       return cmdStatus(rest);
+    case "health":
+      return cmdHealth(rest);
     case "instances":
       return cmdInstances(rest);
     case "tail":
@@ -188,6 +207,7 @@ const KNOWN_COMMANDS = [
   "clone",
   "deinit",
   "status",
+  "health",
   "instances",
   "tail",
   "daemon",
@@ -238,6 +258,8 @@ ${header("common:")}
                            --path . makes this repo itself the sidecar (standalone)
                            --local-install adds the devDependency so fresh clones self-register
   status [--json]
+  health [--json] [--no-fetch]
+                           how every machine sharing this sidecar is syncing
   redactions               preview what redaction rewrites before content is pushed
 
 ${header("sync & daemon:")}
@@ -885,6 +907,75 @@ export function formatLocalTimestamp(iso: string): string | undefined {
   );
 }
 
+/**
+ * The fleet view: what every checkout of this sidecar last said about itself.
+ *
+ * Kept out of `status`, which answers "how is *this* checkout" and would lose
+ * that focus if it also had to fetch and summarise every other machine.
+ */
+function cmdHealth(args: string[]): number {
+  const parsed = parseOptions(args, {
+    boolean: new Set(["--json", "--no-fetch"]),
+    value: new Set(),
+  });
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar health [--json] [--no-fetch]");
+
+  const [root, config] = loadProject();
+  const sidecarPath = requireSidecarCheckout(root, config);
+  // A stale view is worse than a slow one — it would report a machine as fine
+  // hours after it started failing. `--no-fetch` is for reading offline.
+  if (!parsed.flags.has("--no-fetch")) fetch(sidecarPath, true, false);
+  const entries = readFleetHealth(sidecarPath);
+
+  if (parsed.flags.has("--json")) {
+    console.log(JSON.stringify(entries, null, 2));
+    return 0;
+  }
+
+  console.log(`${paint("label", "remote:")} ${paint("brand", config.remote)}`);
+  console.log(`${paint("label", "fleet: ")} ${summarizeHealthStates(entries.map((entry) => entry.state))}`);
+  if (!entries.length) {
+    console.log("");
+    console.log(paint("quiet", "no checkout has reported yet; each one publishes on its next sync"));
+    return 0;
+  }
+
+  const width = "checkout:".length;
+  const line = (label: string, value: string, role?: Role): void => labelLine(width, label, value, role, "  ");
+  for (const { record, state, self } of entries) {
+    console.log("");
+    console.log(`${paint("repo", record.machine)}${self ? paint("quiet", "  (this checkout)") : ""}`);
+    const status = healthStatusLine(state, record);
+    line("status", status.text, status.role);
+    if (record.message) line("detail", record.message);
+    if (record.consecutiveFailures > 1) line("failures", `${record.consecutiveFailures} in a row`, "attn");
+    if (record.root) line("checkout", record.root);
+    if (record.inbox) line("inbox", record.inbox);
+    line("reported", formatTimestampPair(record.updatedAt));
+    // Only worth a line when it isn't the reported time already — on a healthy
+    // machine the two are the same and the repetition just adds noise.
+    if (record.lastSuccessAt && record.lastSuccessAt !== record.updatedAt) {
+      line("last ok", formatTimestampPair(record.lastSuccessAt));
+    } else if (!record.lastSuccessAt) {
+      line("last ok", "never", "attn");
+    }
+    if (record.version) line("version", record.version, "quiet");
+  }
+  return 0;
+}
+
+/** Red for a machine reporting its own failure, bold yellow for one gone quiet. */
+function healthStatusLine(state: HealthState, record: HealthRecord): { text: string; role: Role } {
+  if (state === "failed") {
+    return { text: record.stage ? `failed at ${record.stage}` : "failed", role: "bad" };
+  }
+  if (state === "stale") {
+    const age = formatRelativeTime(record.updatedAt) ?? record.updatedAt;
+    return { text: `stale — last reported ${age}`, role: "attn" };
+  }
+  return { text: "ok", role: "ok" };
+}
+
 function cmdInstances(args: string[]): number {
   const parsed = parseOptions(args, {
     boolean: new Set(["--json"]),
@@ -1222,23 +1313,52 @@ function cmdSync(args: string[]): number {
   // that loses the lock to a running sync can no-op because the interval or
   // watcher will simply request again. A manual sync must never pretend.
   const soft = parsed.flags.has("--soft") || process.env[SOFT_SYNC_ENV] === "1";
-  const synced = withSyncLock(root, soft ? "skip" : "throw", () => {
-    syncProject(root, config, {
-      snapshot: !parsed.flags.has("--no-snapshot"),
-      message: getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined,
+  // Which step was in flight when a sync threw, so the heartbeat can say
+  // "failed at snapshot" rather than only "failed".
+  let stage = "start";
+  let synced: boolean;
+  try {
+    synced = withSyncLock(root, soft ? "skip" : "throw", () => {
+      syncProject(root, config, {
+        snapshot: !parsed.flags.has("--no-snapshot"),
+        message: getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined,
+        onStage: (name) => {
+          stage = name;
+        },
+      });
     });
-  });
-  if (synced) registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
+  } catch (error) {
+    reportSyncHealth(root, config, {
+      status: "failed",
+      stage,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+  // A soft sync that lost the lock never attempted anything, so it has nothing
+  // to report; the sync holding the lock will report for this checkout.
+  if (synced) {
+    registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
+    reportSyncHealth(root, config, { status: "ok" });
+  }
   return 0;
 }
 
 /** Runs inside the repo's sync lock — callers hold it via withSyncLock. */
-function syncProject(root: string, config: SidecarConfig, options: { snapshot: boolean; message?: string }): void {
+function syncProject(
+  root: string,
+  config: SidecarConfig,
+  options: { snapshot: boolean; message?: string; onStage?: (stage: string) => void },
+): void {
+  const stage = (name: string): void => options.onStage?.(name);
+
+  stage("checkout");
   const sidecarPath = ensureSidecarCheckout(root, config);
   const inbox = expandInbox(config, sidecarPath);
   ensureCommitIdentity(sidecarPath);
   fetch(sidecarPath, true, false);
   ensureInboxBranch(sidecarPath, config, inbox);
+  stage("snapshot");
   if (options.snapshot) {
     snapshot(sidecarPath, root, inbox, options.message, config.redaction);
   } else {
@@ -1246,10 +1366,146 @@ function syncProject(root: string, config: SidecarConfig, options: { snapshot: b
     // required=true would fail every git status until one runs.
     ensureRedactionFilter(sidecarPath, config.redaction);
   }
+  stage("push-inbox");
   syncBranchBeforePush(sidecarPath, inbox);
   pushBranch(sidecarPath, inbox);
+  stage("merge");
   mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: true });
+  stage("refresh");
   refreshInboxFromMain(sidecarPath, config, inbox);
+}
+
+// ---------------------------------------------------------------------------
+// Fleet health
+//
+// See health.ts for why this is a heartbeat on its own branch namespace rather
+// than an alert file on the main branch. What lives here is the git side of it:
+// a publish path that shares as little as possible with the sync path it
+// reports on, so a broken clean filter or a wedged checkout can still be
+// announced by the machine it broke on.
+// ---------------------------------------------------------------------------
+
+/**
+ * The branch this checkout reports on — per checkout rather than per machine,
+ * matching the inbox, because two clones of a project on one laptop are two
+ * things that can fail independently.
+ */
+function healthBranchFor(sidecarPath: string): string {
+  return healthBranch(slug(currentUser()), checkoutRandom(sidecarPath));
+}
+
+/**
+ * Publishes what a sync attempt turned out to be.
+ *
+ * Never throws. A heartbeat that could fail the sync it is reporting on would
+ * be worse than no heartbeat at all — the same rule `logSidecarEvent` follows,
+ * and the reason the failure path can call this before rethrowing.
+ */
+function reportSyncHealth(root: string, config: SidecarConfig, outcome: HealthOutcome): void {
+  try {
+    const sidecarPath = resolveSidecarPath(root, config);
+    // No checkout means no refs to publish through. The failure is real, but
+    // it's in the local log and there is nowhere to say so from.
+    if (!hasGitMetadata(sidecarPath)) return;
+
+    const branch = healthBranchFor(sidecarPath);
+    const previous = readHealthRecordAt(sidecarPath, `origin/${branch}`);
+    const identity: HealthIdentity = {
+      machine: `${currentUser()}@${currentHost()}`,
+      root,
+      inbox: expandInbox(config, sidecarPath),
+      version: packageVersion(),
+    };
+    const record = nextHealthRecord(previous, identity, outcome, nowIso());
+    if (!shouldPublishHealth(previous, record)) return;
+    publishHealthRecord(sidecarPath, branch, record);
+    logSidecarEvent("health", {
+      branch,
+      status: record.status,
+      stage: record.stage,
+      consecutiveFailures: record.consecutiveFailures,
+    });
+  } catch (error) {
+    logSidecarEvent("failure", {
+      command: "health",
+      root,
+      message: `could not publish health: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+}
+
+/**
+ * Writes the heartbeat with plumbing, deliberately touching nothing the sync
+ * path uses: no working tree, no index, no branch checkout, and — because
+ * `hash-object --stdin` has no path to key an attribute off — no clean filter.
+ * That is what lets a machine whose `git add` fails still report why.
+ *
+ * Each heartbeat is a fresh root commit, force-pushed. History of a liveness
+ * ping has no value worth the unbounded growth, and being the branch's only
+ * writer means a force push can never lose someone else's work.
+ */
+function publishHealthRecord(sidecarPath: string, branch: string, record: HealthRecord): void {
+  const blob = git(sidecarPath, ["hash-object", "-w", "--stdin"], {
+    input: serializeHealthRecord(record),
+  }).stdout.trim();
+  const tree = git(sidecarPath, ["mktree"], {
+    input: `100644 blob ${blob}\t${HEALTH_FILE}\n`,
+  }).stdout.trim();
+  // Identity comes in on the command line rather than from repo config, so
+  // publishing doesn't depend on a config write having succeeded first.
+  const commit = git(sidecarPath, [
+    "-c",
+    `user.name=${currentUser()}`,
+    "-c",
+    `user.email=${slug(currentUser())}@${slug(currentHost())}.local`,
+    "commit-tree",
+    tree,
+    "-m",
+    `health: ${record.status} — ${record.machine}`,
+  ]).stdout.trim();
+  git(sidecarPath, ["push", "--force", "origin", `${commit}:refs/heads/${branch}`]);
+}
+
+/** Reads a heartbeat straight out of a ref; `git show` on a blob is unfiltered. */
+function readHealthRecordAt(sidecarPath: string, ref: string): HealthRecord | undefined {
+  const result = git(sidecarPath, ["show", `${ref}:${HEALTH_FILE}`], { check: false });
+  if (result.status !== 0) return undefined;
+  return parseHealthRecord(result.stdout);
+}
+
+type FleetHealthEntry = {
+  branch: string;
+  self: boolean;
+  state: HealthState;
+  record: HealthRecord;
+};
+
+/** Every checkout's last word about itself, worst first. */
+function readFleetHealth(sidecarPath: string): FleetHealthEntry[] {
+  const self = healthBranchFor(sidecarPath);
+  const refs = git(sidecarPath, ["branch", "-r", "--format=%(refname:short)"])
+    .stdout.split(/\r?\n/)
+    .map((ref) => ref.trim())
+    .filter((ref) => ref && ref !== "origin/HEAD" && isHealthBranch(ref));
+
+  const entries: FleetHealthEntry[] = [];
+  for (const ref of refs) {
+    const record = readHealthRecordAt(sidecarPath, ref);
+    // A health branch this version can't read is a branch, not a machine —
+    // counting it would put an unexplainable row in the fleet view.
+    if (!record) continue;
+    const branch = remoteBranchName(ref);
+    entries.push({ branch, self: branch === self, state: classifyHealthState(record), record });
+  }
+
+  // Worst first: the point of the view is the machine that needs you.
+  const rank: Record<HealthState, number> = { failed: 0, stale: 1, ok: 2 };
+  return entries.sort(
+    (left, right) =>
+      rank[left.state] - rank[right.state] ||
+      left.record.machine.localeCompare(right.record.machine) ||
+      left.branch.localeCompare(right.branch),
+  );
 }
 
 function cmdMerge(args: string[]): number {
@@ -2093,6 +2349,12 @@ export function validateInboxTemplate(template: string): void {
   const prefix = inboxBranchPrefix(template);
   if (template.includes("{") && !prefix.endsWith("/")) {
     throw new SidecarError("inbox template must place variables under a static branch namespace, like sidecar-inbox/{user}/{random}");
+  }
+  // An inbox namespace overlapping the health one would make the merge sweep
+  // every machine's heartbeat into the main branch — the one thing the
+  // separate namespace exists to prevent.
+  if (inboxPrefixCollidesWithHealth(prefix)) {
+    throw new SidecarError(`inbox template must not use the ${HEALTH_BRANCH_PREFIX} namespace, which sidecar reserves for health branches`);
   }
 }
 
@@ -3284,7 +3546,11 @@ export function isAncestor(repo: string, maybeAncestor: string, descendant: stri
   return git(repo, ["merge-base", "--is-ancestor", maybeAncestor, descendant], { check: false }).status === 0;
 }
 
-export function git(repo: string, args: string[], options: { check?: boolean } = {}): GitResult {
+export function git(
+  repo: string,
+  args: string[],
+  options: { check?: boolean; input?: string } = {},
+): GitResult {
   return gitRaw(["-C", repo, ...args], options);
 }
 
@@ -3307,10 +3573,11 @@ export function gitBytes(
   return { status, stdout, stderr };
 }
 
-export function gitRaw(args: string[], options: { check?: boolean } = {}): GitResult {
+export function gitRaw(args: string[], options: { check?: boolean; input?: string } = {}): GitResult {
   const check = options.check ?? true;
   const result = spawnSync("git", args, {
     encoding: "utf8",
+    input: options.input,
     maxBuffer: 100 * 1024 * 1024,
   });
   const status = result.status ?? 1;

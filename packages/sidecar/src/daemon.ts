@@ -263,7 +263,7 @@ async function checkoutIsDirty(root: string): Promise<boolean> {
 
 function localSidecarCliPath(root: string): string | undefined {
   if (!projectDependsOnSidecar(root)) return undefined;
-  const candidate = path.join(root, "node_modules", "@projectors", "sidecar", "dist", "cli.js");
+  const candidate = path.join(root, "node_modules", PACKAGE_NAME, "dist", "cli.js");
   if (!isFile(candidate)) return undefined;
   try {
     if (fs.realpathSync(candidate) === fs.realpathSync(currentCliPath())) return undefined;

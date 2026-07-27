@@ -41,6 +41,11 @@ is still pending. That reset is the only destructive step in a sync, so the
 discarded tip is parked at `refs/sidecar-discarded/<branch>/<timestamp>-<tip>` first
 (local only — it is never pushed or fetched).
 
+Every sync also publishes a one-file heartbeat to `sidecar-health/<user>/<id>`,
+a namespace the merge deliberately passes over, so a failure on one machine is
+visible from all the others without anything reaching the canonical branch. See
+[Fleet health](commands.md#fleet-health).
+
 A per-repo lock serializes syncs, and the two kinds of sync react differently
 to finding it held. A manual `sidecar sync` (or `sidecar snapshot`) is a
 demand: it fails immediately with "another sidecar sync is already running" —
