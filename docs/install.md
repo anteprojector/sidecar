@@ -13,16 +13,23 @@ per-user `settings.json`, and the self-updater consults that record to pick
 the matching update channel — so future distribution channels keep updating
 seamlessly.
 
-A repo can additionally pin sidecar as a node dependency by adding
-`@projectors/sidecar` to its `devDependencies` itself — `sidecar init` never
-edits your `package.json`. When the dependency is present, the `sidecar`
-command always runs that project-local version, so a repo's pinned sidecar
-owns its own behavior; without it, everything (including daemon-scheduled
-syncs of the repo) runs the global install. Local sidecar never installs
-hooks or background sync: it syncs only on an explicit `sidecar sync`, and
-its postinstall clones a missing checkout and registers the repo with the
-global daemon when one exists. (Older versions installed git hooks; current
-versions remove those automatically.)
+A repo can additionally pin sidecar as a node dependency. When a
+`package.json` is present, `sidecar init` offers to add `@projectors/sidecar`
+to `devDependencies` (`--local-install` says yes non-interactively) — and,
+detected from the lockfile, the trust entry bun (`trustedDependencies`) or
+pnpm (`pnpm.onlyBuiltDependencies`) needs, since both block lifecycle scripts
+by default. With no lockfile, init warns that it can't tell. The payoff is on
+the next machine: the package's postinstall clones a missing checkout and
+registers the repo with the global daemon, so a fresh clone self-registers on
+plain `npm install`/`bun install` — provided the global sidecar is already
+installed there. Init never edits `package.json` without asking.
+
+When the dependency is present, the `sidecar` command always runs that
+project-local version, so a repo's pinned sidecar owns its own behavior;
+without it, everything (including daemon-scheduled syncs of the repo) runs
+the global install. Local sidecar never installs hooks or background sync: it
+syncs only on an explicit `sidecar sync`. (Older versions installed git
+hooks; current versions remove those automatically.)
 
 Daemon commands — and the plumbing commands `set-install-source` and
 `register-install` — always run the global executable, never a project-local

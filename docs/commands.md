@@ -43,14 +43,16 @@ uncommitted files land on the remote immediately. See
 | `--redaction <mode>` | what gets redacted on push: `secrets+pii`, `secrets`, or `none` — defaults to `secrets+pii`, or `none` for standalone; see [redaction.md](redaction.md) |
 | `--no-clone` | write config and registration only; skip cloning |
 | `--no-bootstrap-main` | don't create the canonical branch on an empty remote |
+| `--local-install` | add `@projectors/sidecar` to `devDependencies` (plus the bun/pnpm trust entry) so fresh clones self-register on install |
 
 `init` also adds the checkout to `.gitignore`, registers the repo with the
 global daemon, and (interactively) offers to install a missing global sidecar
-and to make the checkout searchable in Zed. It never edits your
-`package.json`: repos that want a pinned project-local sidecar add the
-`@projectors/sidecar` devDependency themselves (see
-[install.md](install.md)). When not attached to a terminal, every optional
-prompt defaults to no.
+and to make the checkout searchable in Zed. When the repo has a
+`package.json`, it offers to add the `@projectors/sidecar` devDependency —
+the package's postinstall is what makes a fresh clone self-register with the
+machine's daemon on plain install (see [install.md](install.md)). It never
+edits `package.json` without asking. When not attached to a terminal, every
+optional prompt defaults to no.
 
 ### `sidecar deinit`
 

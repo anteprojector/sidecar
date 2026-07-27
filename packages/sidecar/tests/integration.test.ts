@@ -1325,6 +1325,80 @@ describe("sidecar CLI integration", () => {
     expect(git(sidecar, ["status", "--porcelain"]).stdout).toContain("held.md");
   });
 
+  test("init --local-install adds the devDependency with the bun trust entry", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    fs.writeFileSync(path.join(main, "package.json"), '{\n  "name": "app",\n  "version": "1.0.0"\n}\n', "utf8");
+    fs.writeFileSync(path.join(main, "bun.lock"), "{}\n", "utf8");
+
+    runSidecar(["init", remote, "--redaction", "none", "--local-install"], main);
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(main, "package.json"), "utf8"));
+    expect(Object.keys(manifest.devDependencies)).toContain("@projectors/sidecar");
+    // The dependency without the trust entry would register nothing: bun
+    // blocks lifecycle scripts by default, and the postinstall is the point.
+    expect(manifest.trustedDependencies).toContain("@projectors/sidecar");
+    expect(manifest.pnpm).toBeUndefined();
+  });
+
+  test("init --local-install adds the pnpm trust entry for pnpm repos", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    fs.writeFileSync(path.join(main, "package.json"), '{\n  "name": "app",\n  "version": "1.0.0"\n}\n', "utf8");
+    fs.writeFileSync(path.join(main, "pnpm-lock.yaml"), "lockfileVersion: 9\n", "utf8");
+
+    runSidecar(["init", remote, "--redaction", "none", "--local-install"], main);
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(main, "package.json"), "utf8"));
+    expect(manifest.pnpm.onlyBuiltDependencies).toContain("@projectors/sidecar");
+    expect(manifest.trustedDependencies).toBeUndefined();
+  });
+
+  test("init --local-install warns when no lockfile identifies the package manager", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    fs.writeFileSync(path.join(main, "package.json"), '{\n  "name": "app",\n  "version": "1.0.0"\n}\n', "utf8");
+
+    const result = spawnSync(process.execPath, [cliPath, "init", remote, "--redaction", "none", "--local-install"], {
+      cwd: main,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state"),
+      },
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("the package manager is unknown");
+    const manifest = JSON.parse(fs.readFileSync(path.join(main, "package.json"), "utf8"));
+    expect(Object.keys(manifest.devDependencies)).toContain("@projectors/sidecar");
+  });
+
+  test("standalone init --local-install syncs the edit and warns about node_modules", () => {
+    const { repo, remote, state } = initStandaloneRepo();
+    fs.writeFileSync(path.join(repo, "package.json"), '{\n  "name": "setup",\n  "version": "1.0.0"\n}\n', "utf8");
+    fs.writeFileSync(path.join(repo, "bun.lock"), "{}\n", "utf8");
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-m", "Add manifest"]);
+    git(repo, ["push", "origin", "main"]);
+
+    const result = spawnSync(process.execPath, [cliPath, "init", "--path", ".", "--local-install"], {
+      cwd: repo,
+      encoding: "utf8",
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", SIDECAR_STATE_DIR: state },
+    });
+
+    expect(result.status).toBe(0);
+    // node_modules would be swept into snapshots wholesale in a standalone
+    // repo, so the missing ignore entry deserves a warning.
+    expect(result.stderr).toContain("node_modules is not gitignored");
+    // The edit rides init's ending sync, so other machines get it for free.
+    const pushed = JSON.parse(gitRaw(["--git-dir", remote, "show", "main:package.json"]).stdout);
+    expect(Object.keys(pushed.devDependencies)).toContain("@projectors/sidecar");
+    expect(pushed.trustedDependencies).toContain("@projectors/sidecar");
+  });
+
   test("init --path . adopts the repo itself as the sidecar", () => {
     const { repo, remote, state } = initStandaloneRepo();
 

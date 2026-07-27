@@ -12,6 +12,7 @@
     "dev": "bun run --filter '*' dev",
     "test": "bun run --cwd packages/sidecar test",
     "release": "node scripts/release.mjs",
+    "smoke": "node scripts/smoke.mjs",
     "site": "bun run --cwd packages/marketing serve"
   },
   "engines": {

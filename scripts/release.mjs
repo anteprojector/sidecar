@@ -2,7 +2,7 @@
 /**
  * Cut a release: bump, verify, commit, tag, push, then publish.
  *
- *   bun run release patch|minor|major|<version> [--skip-tests] [--dry-run]
+ *   bun run release patch|minor|major|<version> [--otp <code>] [--skip-tests] [--dry-run]
  *
  * The order is the point. Publishing is last and irreversible — a version can
  * never be re-published — so everything that can fail cheaply fails first, and
@@ -15,10 +15,12 @@
  * stray `git commit` desyncs them. So the bump is written by hand and the commit
  * goes through jj.
  *
- * Tests run by default. They are deliberately absent from `prepublishOnly` — the
- * suite is timing-flaky and a one-off `npm publish` shouldn't be held hostage to
- * it — but a release is deliberate and rare, so it is the right place to pay for
- * them. `--skip-tests` when you have already run them.
+ * Verification is a smoke test (scripts/smoke.mjs), not the full suite: the
+ * suite is timing-flaky, and an npm OTP passed via --otp expires in ~30
+ * seconds — everything between preflight and publish has to fit inside that
+ * window. Run `bun run test` before releasing; `--skip-tests` skips even the
+ * smoke test. A missing npm login is caught in preflight and runs `npm login`
+ * right there instead of dying.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -65,6 +67,16 @@ function setVersion(path, version) {
 const args = process.argv.slice(2)
 const DRY = args.includes('--dry-run')
 const SKIP_TESTS = args.includes('--skip-tests')
+
+// --otp takes a value, so it has to come out of args before the bump is
+// found: `--otp 123456` would otherwise read as bump "123456".
+let OTP
+const otpIndex = args.findIndex((a) => a === '--otp' || a.startsWith('--otp='))
+if (otpIndex !== -1) {
+  const arg = args[otpIndex]
+  OTP = arg.includes('=') ? arg.slice('--otp='.length) : args[otpIndex + 1]
+  args.splice(otpIndex, arg.includes('=') ? 1 : 2)
+}
 const bump = args.find((a) => !a.startsWith('--'))
 
 const die = (msg) => {
@@ -92,7 +104,8 @@ function nextVersion(current, kind) {
   return die(`unknown bump "${kind}" — expected patch, minor, major, or an explicit version`)
 }
 
-if (!bump) die('usage: bun run release patch|minor|major|<version> [--skip-tests] [--dry-run]')
+if (!bump) die('usage: bun run release patch|minor|major|<version> [--otp <code>] [--skip-tests] [--dry-run]')
+if (otpIndex !== -1 && (!OTP || OTP.startsWith('--'))) die('--otp requires a code')
 
 const root = read(ROOT_PKG)
 const published = read(PKG)
@@ -126,12 +139,20 @@ const existingTag = run('git', ['tag', '-l', tag])
 if (existingTag) die(`tag ${tag} already exists`)
 
 // A dead npm token is the failure that used to surface as a bogus 404 from the
-// registry, after the tag had already been pushed. Catch it up front.
+// registry, after the tag had already been pushed. Catch it up front — and
+// since the fix is always `npm login`, just run it here rather than dying and
+// making the user restart the release.
+const whoami = () => run('npm', ['whoami'], { stdio: ['ignore', 'pipe', 'ignore'] })
 try {
-  const who = run('npm', ['whoami'], { stdio: ['ignore', 'pipe', 'ignore'] })
-  console.log(`  npm: ${who}`)
+  console.log(`  npm: ${whoami()}`)
 } catch {
-  die('not logged in to npm — run `npm login` (a 404 on publish is usually this)')
+  if (DRY) {
+    console.log('  npm: not logged in (dry run continues; a real release would run `npm login` here)')
+  } else {
+    console.log('  npm: not logged in — running `npm login`')
+    runLoud('npm', ['login'])
+    console.log(`  npm: ${whoami()}`)
+  }
 }
 
 try {
@@ -157,8 +178,8 @@ mutate(`write ${version} across ${manifests.length} manifests`, () => {
 // ---------------------------------------------------------------- verify
 step('Verify')
 runLoud('bun', ['run', 'check'])
-if (SKIP_TESTS) console.log('  tests skipped (--skip-tests)')
-else runLoud('bun', ['run', 'test'])
+if (SKIP_TESTS) console.log('  smoke test skipped (--skip-tests)')
+else runLoud('node', [join(ROOT, 'scripts/smoke.mjs')])
 
 // ---------------------------------------------------------------- publish
 // Past this line the steps are visible to other people, so they go in the order
@@ -182,7 +203,8 @@ mutate(`tag and push ${tag}`, () => {
 step('Publish')
 mutate(`publish ${published.name}@${version}`, () => {
   // prepack builds dist and copies README/LICENSE; prepublishOnly typechecks.
-  runLoud('npm', ['publish'], { cwd: PKG_DIR })
+  // Without --otp, npm prompts for the code itself on a TTY.
+  runLoud('npm', ['publish', ...(OTP ? [`--otp=${OTP}`] : [])], { cwd: PKG_DIR })
 })
 
 console.log(`\n  ${DRY ? 'dry run complete' : `released ${published.name}@${version}`}\n`)

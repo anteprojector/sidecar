@@ -1825,8 +1825,9 @@ function printUsage(target) {
   write(`usage: sidecar <command> [options]
 
 ${header("common:")}
-  init [remote] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii]
+  init [remote] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii] [--local-install]
                            --path . makes this repo itself the sidecar (standalone)
+                           --local-install adds the devDependency so fresh clones self-register
   status [--json]
   redactions               preview what redaction rewrites before content is pushed
 
@@ -1913,7 +1914,7 @@ function releaseStandaloneCheckout(root, config) {
 }
 function cmdInit(args) {
   const parsed = parseOptions(args, {
-    boolean: new Set(["--no-clone", "--no-bootstrap-main"]),
+    boolean: new Set(["--no-clone", "--no-bootstrap-main", "--local-install"]),
     value: new Set(["--path", "--branch", "--inbox", "--redaction"])
   });
   if (parsed.positional.length > 1) {
@@ -1943,6 +1944,7 @@ function cmdInit(args) {
   } else {
     printCheckoutVisibility(root, config);
   }
+  offerLocalInstall(root, config, parsed.flags.has("--local-install"));
   if (removeLegacyGitHooks(root)) {
     console.log("removed legacy sidecar git hooks; syncing is manual or via the global daemon");
   }
@@ -1994,6 +1996,74 @@ function printCheckoutVisibility(root, config) {
       console.log(`could not parse .zed/settings.json; add "${name}/**" to file_scan_inclusions manually`);
     }
   }
+}
+function offerLocalInstall(root, config, forced) {
+  const manifestPath = path2.join(root, "package.json");
+  if (!fs2.existsSync(manifestPath)) {
+    if (forced)
+      throw new SidecarError("--local-install requires a package.json");
+    return;
+  }
+  if (projectDependsOnSidecar(root))
+    return;
+  let source;
+  let manifest;
+  try {
+    source = fs2.readFileSync(manifestPath, "utf8");
+    const parsed = JSON.parse(source);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error("not an object");
+    manifest = parsed;
+  } catch {
+    console.error(`sidecar: warning: could not parse ${manifestPath}; add ${PACKAGE_NAME} to devDependencies manually so fresh clones self-register on install`);
+    return;
+  }
+  if (!forced && !promptYesNo(`add ${PACKAGE_NAME} to devDependencies so fresh clones self-register on install?`)) {
+    return;
+  }
+  manifest.devDependencies = {
+    ...manifest.devDependencies,
+    [PACKAGE_NAME]: `^${packageVersion()}`
+  };
+  const managers = detectPackageManagers(root);
+  if (managers.has("bun")) {
+    manifest.trustedDependencies = withEntry(manifest.trustedDependencies, PACKAGE_NAME);
+  }
+  if (managers.has("pnpm")) {
+    const pnpm = { ...manifest.pnpm };
+    pnpm.onlyBuiltDependencies = withEntry(pnpm.onlyBuiltDependencies, PACKAGE_NAME);
+    manifest.pnpm = pnpm;
+  }
+  const indent = /^([ \t]+)"/m.exec(source)?.[1] ?? "  ";
+  fs2.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, indent)}
+`);
+  console.log(`added ${paint("brand", PACKAGE_NAME)} to devDependencies; run your package manager's install to pin it`);
+  if (managers.has("bun")) {
+    console.log("trusted its postinstall via trustedDependencies (bun blocks lifecycle scripts by default)");
+  }
+  if (managers.has("pnpm")) {
+    console.log("trusted its postinstall via pnpm.onlyBuiltDependencies (pnpm blocks lifecycle scripts by default)");
+  }
+  if (!managers.size) {
+    console.error(`sidecar: warning: no lockfile found, so the package manager is unknown — bun and pnpm block postinstall scripts by default; if this repo uses one of them, add the trust entry manually`);
+  }
+  if (isStandalone(config) && git(root, ["check-ignore", "-q", "node_modules"], { check: false }).status !== 0) {
+    console.error("sidecar: warning: node_modules is not gitignored; add it before installing or the next sync will snapshot the whole dependency tree");
+  }
+}
+function withEntry(value, entry) {
+  const entries = Array.isArray(value) ? value : [];
+  return entries.includes(entry) ? entries : [...entries, entry];
+}
+function detectPackageManagers(root) {
+  const lockfiles = [
+    ["bun.lock", "bun"],
+    ["bun.lockb", "bun"],
+    ["pnpm-lock.yaml", "pnpm"],
+    ["package-lock.json", "npm"],
+    ["yarn.lock", "yarn"]
+  ];
+  return new Set(lockfiles.filter(([file]) => fs2.existsSync(path2.join(root, file))).map(([, manager]) => manager));
 }
 function ensureDaemonSetup(globalSidecar) {
   if (process.env[SKIP_SERVICE_ENV] === "1")

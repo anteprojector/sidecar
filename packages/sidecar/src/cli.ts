@@ -234,8 +234,9 @@ function printUsage(target: "stdout" | "stderr"): void {
   write(`usage: sidecar <command> [options]
 
 ${header("common:")}
-  init [remote] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii]
+  init [remote] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii] [--local-install]
                            --path . makes this repo itself the sidecar (standalone)
+                           --local-install adds the devDependency so fresh clones self-register
   status [--json]
   redactions               preview what redaction rewrites before content is pushed
 
@@ -349,7 +350,7 @@ function releaseStandaloneCheckout(root: string, config: SidecarConfig): string 
 
 function cmdInit(args: string[]): number {
   const parsed = parseOptions(args, {
-    boolean: new Set(["--no-clone", "--no-bootstrap-main"]),
+    boolean: new Set(["--no-clone", "--no-bootstrap-main", "--local-install"]),
     value: new Set(["--path", "--branch", "--inbox", "--redaction"]),
   });
   if (parsed.positional.length > 1) {
@@ -392,6 +393,7 @@ function cmdInit(args: string[]): number {
   } else {
     printCheckoutVisibility(root, config);
   }
+  offerLocalInstall(root, config, parsed.flags.has("--local-install"));
   if (removeLegacyGitHooks(root)) {
     console.log("removed legacy sidecar git hooks; syncing is manual or via the global daemon");
   }
@@ -467,6 +469,98 @@ function printCheckoutVisibility(root: string, config: SidecarConfig): void {
       console.log(`could not parse .zed/settings.json; add "${name}/**" to file_scan_inclusions manually`);
     }
   }
+}
+
+/**
+ * A fresh clone of this repo self-registers with the machine's daemon through
+ * the package's postinstall — but only if the package is installed. Offer to
+ * wire that up whenever the repo already has a package.json; sidecar never
+ * creates one, because a repo without an install step shouldn't gain one for
+ * our sake. `--local-install` says yes non-interactively.
+ */
+function offerLocalInstall(root: string, config: SidecarConfig, forced: boolean): void {
+  const manifestPath = path.join(root, "package.json");
+  if (!fs.existsSync(manifestPath)) {
+    if (forced) throw new SidecarError("--local-install requires a package.json");
+    return;
+  }
+  if (projectDependsOnSidecar(root)) return;
+
+  let source: string;
+  let manifest: Record<string, unknown>;
+  try {
+    source = fs.readFileSync(manifestPath, "utf8");
+    const parsed = JSON.parse(source) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    manifest = parsed as Record<string, unknown>;
+  } catch {
+    console.error(
+      `sidecar: warning: could not parse ${manifestPath}; add ${PACKAGE_NAME} to devDependencies manually so fresh clones self-register on install`,
+    );
+    return;
+  }
+
+  if (!forced && !promptYesNo(`add ${PACKAGE_NAME} to devDependencies so fresh clones self-register on install?`)) {
+    return;
+  }
+
+  manifest.devDependencies = {
+    ...(manifest.devDependencies as Record<string, string> | undefined),
+    [PACKAGE_NAME]: `^${packageVersion()}`,
+  };
+
+  // The postinstall is the whole point, and bun and pnpm block lifecycle
+  // scripts by default — the dependency without its trust entry would
+  // register nothing while looking like it should.
+  const managers = detectPackageManagers(root);
+  if (managers.has("bun")) {
+    manifest.trustedDependencies = withEntry(manifest.trustedDependencies, PACKAGE_NAME);
+  }
+  if (managers.has("pnpm")) {
+    const pnpm = { ...(manifest.pnpm as Record<string, unknown> | undefined) };
+    pnpm.onlyBuiltDependencies = withEntry(pnpm.onlyBuiltDependencies, PACKAGE_NAME);
+    manifest.pnpm = pnpm;
+  }
+
+  const indent = /^([ \t]+)"/m.exec(source)?.[1] ?? "  ";
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, indent)}\n`);
+  console.log(`added ${paint("brand", PACKAGE_NAME)} to devDependencies; run your package manager's install to pin it`);
+  if (managers.has("bun")) {
+    console.log("trusted its postinstall via trustedDependencies (bun blocks lifecycle scripts by default)");
+  }
+  if (managers.has("pnpm")) {
+    console.log("trusted its postinstall via pnpm.onlyBuiltDependencies (pnpm blocks lifecycle scripts by default)");
+  }
+  if (!managers.size) {
+    console.error(
+      `sidecar: warning: no lockfile found, so the package manager is unknown — bun and pnpm block postinstall scripts by default; if this repo uses one of them, add the trust entry manually`,
+    );
+  }
+
+  // In a standalone repo everything untracked gets snapshotted and pushed,
+  // so an install that materializes node_modules without an ignore entry
+  // would sync the whole dependency tree.
+  if (isStandalone(config) && git(root, ["check-ignore", "-q", "node_modules"], { check: false }).status !== 0) {
+    console.error(
+      "sidecar: warning: node_modules is not gitignored; add it before installing or the next sync will snapshot the whole dependency tree",
+    );
+  }
+}
+
+function withEntry(value: unknown, entry: string): string[] {
+  const entries = Array.isArray(value) ? (value as string[]) : [];
+  return entries.includes(entry) ? entries : [...entries, entry];
+}
+
+function detectPackageManagers(root: string): Set<string> {
+  const lockfiles: Array<[string, string]> = [
+    ["bun.lock", "bun"],
+    ["bun.lockb", "bun"],
+    ["pnpm-lock.yaml", "pnpm"],
+    ["package-lock.json", "npm"],
+    ["yarn.lock", "yarn"],
+  ];
+  return new Set(lockfiles.filter(([file]) => fs.existsSync(path.join(root, file))).map(([, manager]) => manager));
 }
 
 // Package managers don't reliably run the postinstall that enables the daemon
