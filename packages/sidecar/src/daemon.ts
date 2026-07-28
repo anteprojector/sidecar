@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 
 import {
   PACKAGE_NAME,
+  LOCAL_SYNC_ENV,
+  familyPrimaryRoot,
   SOFT_SYNC_ENV,
   bunGlobalRoot,
   compareVersions,
@@ -34,8 +36,12 @@ export const WATCH_LIMIT = 100;
 const SYNC_TIMEOUT_MS = 10 * 60 * 1000;
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const PRUNE_AFTER_MISSES = 3;
-// Syncing rewrites files in the checkout; ignore our own watcher echo.
-const SYNC_ECHO_GRACE_MS = 5000;
+// How long changes collapse before the next settle. Short: settling is local
+// and cheap, so this is the floor on how fast one working copy's edit reaches
+// its siblings. It doubles as the window a burst of non-user writes — a sync's
+// own echo, a sibling's settle — coalesces into before the checkout is asked
+// once more whether anything real landed in the middle of it.
+const SETTLE_WINDOW_MS = 5000;
 const MAX_BACKOFF_CYCLES = 6;
 
 export type DaemonOptions = {
@@ -54,7 +60,9 @@ type Watcher = {
 type DaemonState = {
   options: DaemonOptions;
   syncing: Set<string>;
-  lastSyncEndAt: Map<string, number>;
+  syncingFamilies: Set<string>;
+  lastRemoteSyncAt: Map<string, number>;
+  remoteTimers: Map<string, NodeJS.Timeout>;
   pendingTimers: Map<string, NodeJS.Timeout>;
   trailingPending: Set<string>;
   failures: Map<string, number>;
@@ -72,7 +80,9 @@ export async function runDaemonLoop(options: DaemonOptions): Promise<number> {
   const state: DaemonState = {
     options,
     syncing: new Set(),
-    lastSyncEndAt: new Map(),
+    syncingFamilies: new Set(),
+    lastRemoteSyncAt: new Map(),
+    remoteTimers: new Map(),
     pendingTimers: new Map(),
     trailingPending: new Set(),
     failures: new Map(),
@@ -203,19 +213,50 @@ function pruneInstance(root: string): void {
 
 // Repos with a project-local sidecar install sync with their own pinned
 // version; the global daemon only schedules the work.
-async function syncInstance(state: DaemonState, root: string, trigger: string): Promise<boolean> {
+async function syncInstance(
+  state: DaemonState,
+  root: string,
+  trigger: string,
+  options: { localOnly?: boolean } = {},
+): Promise<boolean> {
   if (state.syncing.has(root)) return false;
+  // Working copies of one repo share a sidecar clone and therefore one sync
+  // lock. Two syncing at once means the loser — soft, because the daemon issued
+  // it — quietly does nothing and reports success, stranding whatever it was
+  // about to capture until the next poll. Serialize the family here instead,
+  // where the work can simply be asked for again.
+  const family = realpathOr(familyPrimaryRoot(root) ?? root);
+  if (state.syncingFamilies.has(family)) {
+    logSidecarEvent("daemon-defer", { root, trigger, reason: "family-busy" });
+    state.trailingPending.add(root);
+    if (!state.pendingTimers.has(root)) openTrailingWindow(state, root, SETTLE_WINDOW_MS);
+    return false;
+  }
   state.syncing.add(root);
+  state.syncingFamilies.add(family);
+  // Stamped on the attempt, not the outcome: a remote that is failing must not
+  // be retried at the settle cadence.
+  if (!options.localOnly) {
+    state.lastRemoteSyncAt.set(root, Date.now());
+    clearTimeout(state.remoteTimers.get(root));
+    state.remoteTimers.delete(root);
+  }
   let succeeded = false;
   try {
     const localCli = localSidecarCliPath(root);
     const cli = localCli ?? currentCliPath();
-    logSidecarEvent("daemon-sync-start", { root, trigger, local: Boolean(localCli) });
+    logSidecarEvent("daemon-sync-start", { root, trigger, local: Boolean(localCli), localOnly: Boolean(options.localOnly) });
     const result = await runChild(process.execPath, [cli, "sync"], {
       cwd: root,
       // Daemon syncs are soft: one that finds a manual sync mid-flight can
       // no-op without it counting as a failure — the next trigger retries.
-      env: { ...process.env, [SKIP_LOCAL_EXEC_ENV]: "1", [GLOBAL_EXEC_ENV]: "1", [SOFT_SYNC_ENV]: "1" },
+      env: {
+        ...process.env,
+        [SKIP_LOCAL_EXEC_ENV]: "1",
+        [GLOBAL_EXEC_ENV]: "1",
+        [SOFT_SYNC_ENV]: "1",
+        ...(options.localOnly ? { [LOCAL_SYNC_ENV]: "1" } : {}),
+      },
       timeoutMs: SYNC_TIMEOUT_MS,
     });
     if (result.status === 0) {
@@ -236,7 +277,8 @@ async function syncInstance(state: DaemonState, root: string, trigger: string): 
     }
   } finally {
     state.syncing.delete(root);
-    state.lastSyncEndAt.set(root, Date.now());
+    state.syncingFamilies.delete(family);
+    if (options.localOnly) armRemoteSync(state, root);
   }
   if (succeeded) await followUpTrailingSync(state, root);
   else state.trailingPending.delete(root);
@@ -246,12 +288,21 @@ async function syncInstance(state: DaemonState, root: string, trigger: string): 
 // Watch events that arrived during a sync are either edits the sync missed or
 // the echo of its own writes. A dirty checkout disambiguates: echo is always
 // committed state, a missed save is not. Skipping the clean case is what stops
-// every watch sync from scheduling another one forever.
+// every watch sync from scheduling another one forever — and, now that a sync
+// fast-forwards its sibling worktrees, what stops one checkout's settle from
+// waking every other checkout on the machine.
 async function followUpTrailingSync(state: DaemonState, root: string): Promise<void> {
   if (!state.trailingPending.delete(root)) return;
-  if (await checkoutIsDirty(root)) {
-    void syncInstance(state, root, "watch-followup");
-  }
+  await syncIfDirty(state, root, "watch-followup");
+}
+
+async function syncIfDirty(state: DaemonState, root: string, trigger: string): Promise<void> {
+  if (await checkoutIsDirty(root)) void syncInstance(state, root, trigger);
+}
+
+async function trailingSync(state: DaemonState, root: string): Promise<void> {
+  if (!(await checkoutIsDirty(root))) return;
+  void syncInstance(state, root, "watch-trailing", { localOnly: !remoteIsDue(state, root) });
 }
 
 async function checkoutIsDirty(root: string): Promise<boolean> {
@@ -363,25 +414,97 @@ function scheduleWatchSync(state: DaemonState, root: string): void {
     state.trailingPending.add(root);
     return;
   }
-  if (Date.now() - (state.lastSyncEndAt.get(root) ?? 0) < SYNC_ECHO_GRACE_MS) return;
   if (state.pendingTimers.has(root)) {
     state.trailingPending.add(root);
     return;
   }
-  logSidecarEvent("daemon-watch-debounce", { root, windowSeconds: state.options.debounceSeconds });
+  void beginWatchSync(state, root);
+}
+
+/**
+ * The leading edge, where a dirty checkout answers both questions at once.
+ *
+ * Dirty means edits no sync has captured: sync now, and open the full debounce
+ * behind it to collapse the burst still arriving. Clean means these writes were
+ * not the user's — this checkout's own sync echo, or a sibling settling it out
+ * of the shared object store — so there is nothing to capture and no sync to
+ * run. Syncing anyway is how one checkout's settle woke every other checkout on
+ * the machine, each paying a full round trip to discover it had no work.
+ *
+ * This replaces a timing guard that dropped any change arriving within a few
+ * seconds of a sync. Dropping was the wrong verdict twice over: it stranded a
+ * real edit until the next interval, a whole poll period away, and it still let
+ * echo through whenever the writes landed late. Asking the checkout is exact.
+ *
+ * The clean case still opens a short window, so the rest of that write burst
+ * coalesces into one re-check rather than a git call apiece — and that re-check
+ * catches a real edit that landed mid-burst. Short rather than the full
+ * debounce because its job is to ask again, not to wait out a burst: borrowing
+ * the 60s debounce here would strand an edit made moments after a settle.
+ */
+async function beginWatchSync(state: DaemonState, root: string): Promise<void> {
+  if (state.syncing.has(root) || state.pendingTimers.has(root)) return;
+  const dirty = await checkoutIsDirty(root);
+  // The await is a scheduling gap; another event may have led in the meantime.
+  if (state.syncing.has(root) || state.pendingTimers.has(root)) return;
+
+  openTrailingWindow(state, root, SETTLE_WINDOW_MS);
+  if (dirty) void syncInstance(state, root, "watch", { localOnly: !remoteIsDue(state, root) });
+  else state.trailingPending.add(root);
+}
+
+/**
+ * Whether this root has gone long enough without reaching the remote to be
+ * worth the trip.
+ *
+ * Settling this machine and syncing with the other machines happen at
+ * deliberately different rates. Settling is a local fast-forward out of an
+ * object store the sibling worktrees already share, so it can run as often as
+ * edits land; the round trip cannot, and `--debounce` is what governs it. One
+ * window for both meant the second edit in a burst waited out the full debounce
+ * before any sibling saw it — a minute, by default, to move a file between two
+ * directories on the same disk.
+ */
+/**
+ * Books the round trip a local-only sync deferred.
+ *
+ * Settling leaves work owed to the remote, and once the editing stops there is
+ * no further watch event to carry it — without this it would wait for the
+ * interval poll, ten minutes away by default, where before it went within the
+ * debounce. The delay is the remainder of that debounce, so the cadence is the
+ * one `--debounce` asked for however the syncs were triggered.
+ */
+function armRemoteSync(state: DaemonState, root: string): void {
+  if (state.remoteTimers.has(root)) return;
+  const elapsed = Date.now() - (state.lastRemoteSyncAt.get(root) ?? 0);
+  const timer = setTimeout(
+    () => {
+      state.remoteTimers.delete(root);
+      void syncInstance(state, root, "remote-due");
+    },
+    Math.max(0, state.options.debounceSeconds * 1000 - elapsed),
+  );
+  state.remoteTimers.set(root, timer);
+}
+
+function remoteIsDue(state: DaemonState, root: string): boolean {
+  const last = state.lastRemoteSyncAt.get(root) ?? 0;
+  return Date.now() - last >= state.options.debounceSeconds * 1000;
+}
+
+function openTrailingWindow(state: DaemonState, root: string, delayMs: number): void {
+  logSidecarEvent("daemon-watch-debounce", { root, windowSeconds: Math.round(delayMs / 1000) });
   const timer = setTimeout(() => {
     state.pendingTimers.delete(root);
-    if (state.trailingPending.delete(root)) {
-      if (state.syncing.has(root)) {
-        // The running sync's completion handler owns the follow-up.
-        state.trailingPending.add(root);
-      } else {
-        void syncInstance(state, root, "watch-trailing");
-      }
+    if (!state.trailingPending.delete(root)) return;
+    if (state.syncing.has(root)) {
+      // The running sync's completion handler owns the follow-up.
+      state.trailingPending.add(root);
+      return;
     }
-  }, state.options.debounceSeconds * 1000);
+    void trailingSync(state, root);
+  }, delayMs);
   state.pendingTimers.set(root, timer);
-  void syncInstance(state, root, "watch");
 }
 
 // Local installs register repos while the daemon is running; pick those up

@@ -5,7 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { git, gitRaw } from "../src/cli.js";
+import { git, gitRaw, syncLockDir } from "../src/cli.js";
 
 const tempRoots: string[] = [];
 const cliPath = path.resolve("dist/cli.js");
@@ -179,7 +179,7 @@ describe("sidecar CLI integration", () => {
     expect(JSON.parse(fs.readFileSync(path.join(stateDir, "instances.json"), "utf8"))).toEqual([]);
   });
 
-  test("deinit outside a Git repository warns and exits successfully", () => {
+  test("deinit outside a repo and away from any config warns and exits successfully", () => {
     const outside = tempDir();
     const result = spawnSync(process.execPath, [cliPath, "deinit"], {
       cwd: outside,
@@ -188,7 +188,7 @@ describe("sidecar CLI integration", () => {
     });
 
     expect(result.status).toBe(0);
-    expect(result.stderr).toContain("warning: not inside a Git repository; nothing to remove");
+    expect(result.stderr).toContain("warning: no .sidecar config or Git repository found; nothing to remove");
     expect(fs.readdirSync(outside)).toEqual([]);
   });
 
@@ -315,6 +315,97 @@ describe("sidecar CLI integration", () => {
 
     expect(output).not.toContain("sidecar checkout ready");
     expect(fs.existsSync(marker)).toBe(true);
+  });
+
+  test("a second working copy links to the primary's checkout instead of cloning again", () => {
+    const { main, worktree, state } = initWorktreeFamily();
+
+    runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
+
+    // A clone keeps a .git directory; a linked worktree keeps a .git file.
+    expect(fs.statSync(path.join(main, "sidecar", ".git")).isDirectory()).toBe(true);
+    expect(fs.statSync(path.join(worktree, "sidecar", ".git")).isFile()).toBe(true);
+
+    // One object store, one working copy each, and an inbox branch per checkout.
+    const listed = git(path.join(main, "sidecar"), ["worktree", "list", "--porcelain"]).stdout;
+    expect(listed).toContain(fs.realpathSync(path.join(worktree, "sidecar")));
+    const inboxOf = (cwd: string): string =>
+      JSON.parse(runSidecar(["status", "--json"], cwd, { SIDECAR_STATE_DIR: state })).inbox;
+    expect(inboxOf(worktree)).not.toBe(inboxOf(main));
+  });
+
+  test("a secondary cloning first creates the primary's checkout, then links to it", () => {
+    const { main, worktree, state } = initWorktreeFamily();
+    // The ordering a fresh working copy actually hits: postinstall runs there
+    // before anything has populated the primary.
+    fs.rmSync(path.join(main, "sidecar"), { recursive: true, force: true });
+
+    runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
+
+    expect(fs.statSync(path.join(main, "sidecar", ".git")).isDirectory()).toBe(true);
+    expect(fs.statSync(path.join(worktree, "sidecar", ".git")).isFile()).toBe(true);
+  });
+
+  test("a snapshot in one working copy reaches its sibling without being pushed", () => {
+    const { main, worktree, remote, state } = initWorktreeFamily();
+    runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
+
+    fs.writeFileSync(path.join(worktree, "sidecar", "from-worktree.md"), "wt\n", "utf8");
+    // snapshot commits and stops; nothing reaches the remote.
+    runSidecar(["snapshot"], worktree, { SIDECAR_STATE_DIR: state });
+    expect(
+      gitRaw(["--git-dir", remote, "cat-file", "-e", "main:from-worktree.md"], { check: false }).status,
+    ).not.toBe(0);
+
+    const output = runSidecar(["sync"], main, { SIDECAR_STATE_DIR: state });
+
+    // The local ref, not origin/ — the sibling's work never made a round trip.
+    expect(output).toMatch(/merging sidecar-inbox\//);
+    expect(fs.readFileSync(path.join(main, "sidecar", "from-worktree.md"), "utf8")).toBe("wt\n");
+  });
+
+  test("sync --local settles siblings with no remote in existence", () => {
+    const { main, worktree, remote, state } = initWorktreeFamily();
+    runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
+    // Deleting the remote outright is the strongest available proof that the
+    // local phase never reaches for it.
+    fs.rmSync(remote, { recursive: true, force: true });
+
+    fs.writeFileSync(path.join(main, "sidecar", "local-only.md"), "local\n", "utf8");
+    runSidecar(["sync", "--local"], main, { SIDECAR_STATE_DIR: state });
+
+    expect(fs.readFileSync(path.join(worktree, "sidecar", "local-only.md"), "utf8")).toBe("local\n");
+  });
+
+  test("the local phase settles siblings even when the remote phase fails", () => {
+    const { main, worktree, remote, state } = initWorktreeFamily();
+    runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
+    fs.rmSync(remote, { recursive: true, force: true });
+
+    fs.writeFileSync(path.join(main, "sidecar", "offline.md"), "offline\n", "utf8");
+    const result = spawnSync(process.execPath, [cliPath, "sync"], {
+      cwd: main,
+      encoding: "utf8",
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", SIDECAR_STATE_DIR: state },
+    });
+
+    // The sync fails, loudly and for the right reason — and the sibling is
+    // current anyway, because local settling ran before anything could fail.
+    expect(result.status).not.toBe(0);
+    expect(fs.readFileSync(path.join(worktree, "sidecar", "offline.md"), "utf8")).toBe("offline\n");
+  });
+
+  test("deinit in a secondary unregisters its worktree and leaves the primary whole", () => {
+    const { main, worktree, state } = initWorktreeFamily();
+    runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
+
+    runSidecar(["deinit"], worktree, { SIDECAR_STATE_DIR: state });
+
+    expect(fs.existsSync(path.join(worktree, "sidecar"))).toBe(false);
+    // A deleted-but-registered worktree would block a later add at that path.
+    const listed = git(path.join(main, "sidecar"), ["worktree", "list", "--porcelain"]).stdout;
+    expect(listed).not.toContain(fs.realpathSync(worktree));
+    expect(fs.statSync(path.join(main, "sidecar", ".git")).isDirectory()).toBe(true);
   });
 
   test("postinstall clones a missing sidecar checkout for local installs", () => {
@@ -843,7 +934,7 @@ describe("sidecar CLI integration", () => {
         });
         // The daemon spawns syncs as children; killing it does not kill an
         // in-flight sync, so wait for the lock to clear before cleanup.
-        await waitFor(() => !fs.existsSync(path.join(main, ".git", "sidecar-sync-lock")), 15000);
+        await waitFor(() => !fs.existsSync(testSyncLockDir(main)), 15000);
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
     },
@@ -1257,8 +1348,8 @@ describe("sidecar CLI integration", () => {
     runSidecar(["sync"], main);
     const lastSyncBefore = JSON.parse(fs.readFileSync(path.join(stateDir, "instances.json"), "utf8"))[0].lastSyncAt;
     expect(lastSyncBefore).toBeTruthy();
-    const lockDir = path.join(main, ".git", "sidecar-sync-lock");
-    fs.mkdirSync(lockDir);
+    const lockDir = testSyncLockDir(main);
+    fs.mkdirSync(lockDir, { recursive: true });
     fs.writeFileSync(path.join(lockDir, "pid"), String(process.pid), "utf8");
     fs.writeFileSync(path.join(sidecar, "held.md"), "held\n", "utf8");
 
@@ -1286,8 +1377,8 @@ describe("sidecar CLI integration", () => {
   test("a soft sync silently no-ops while another sync holds the lock", () => {
     const { main, remote, sidecar } = initSidecarProject();
     const stateDir = path.join(main, ".sidecar-test-state");
-    const lockDir = path.join(main, ".git", "sidecar-sync-lock");
-    fs.mkdirSync(lockDir);
+    const lockDir = testSyncLockDir(main);
+    fs.mkdirSync(lockDir, { recursive: true });
     fs.writeFileSync(path.join(lockDir, "pid"), String(process.pid), "utf8");
     fs.writeFileSync(path.join(sidecar, "soft.md"), "soft\n", "utf8");
 
@@ -1307,8 +1398,8 @@ describe("sidecar CLI integration", () => {
 
   test("snapshot errors while another sync holds the lock", () => {
     const { main, sidecar } = initSidecarProject();
-    const lockDir = path.join(main, ".git", "sidecar-sync-lock");
-    fs.mkdirSync(lockDir);
+    const lockDir = testSyncLockDir(main);
+    fs.mkdirSync(lockDir, { recursive: true });
     fs.writeFileSync(path.join(lockDir, "pid"), String(process.pid), "utf8");
     fs.writeFileSync(path.join(sidecar, "held.md"), "held\n", "utf8");
 
@@ -1477,7 +1568,8 @@ describe("sidecar CLI integration", () => {
     runSidecar(["sync"], repo, { SIDECAR_STATE_DIR: state });
 
     expect(fs.readFileSync(path.join(repo, "aliases.sh"), "utf8")).toBe("alias g=git\n");
-  });
+    // Two machines and six syncs; this one has always run close to the default.
+  }, 30000);
 
   test("standalone init forks the inbox from HEAD on a repo ahead of its origin", () => {
     const { repo, remote, state } = initStandaloneRepo();
@@ -1840,6 +1932,22 @@ function initStandaloneRepo(): { repo: string; remote: string; state: string } {
   return { repo, remote, state: tempDir() };
 }
 
+/**
+ * A repo plus a second working copy of it — the shape jj workspaces and git
+ * worktrees both make. Uses git worktrees so the suite needs no jj on PATH.
+ *
+ * `.sidecar` has to be committed before the worktree is added, or the new
+ * working copy checks out a commit that never heard of the sidecar.
+ */
+function initWorktreeFamily(): { main: string; worktree: string; remote: string; state: string } {
+  const { main, remote } = initSidecarProject();
+  git(main, ["add", ".sidecar", ".gitignore"]);
+  git(main, ["commit", "-m", "Add sidecar config"]);
+  const worktree = path.join(tempDir(), "worktree");
+  git(main, ["worktree", "add", worktree, "-b", "feature"]);
+  return { main, worktree, remote, state: path.join(main, ".sidecar-test-state") };
+}
+
 function initBareRemote(): string {
   const remote = path.join(tempDir(), "sidecar.git");
   gitRaw(["init", "--bare", remote]);
@@ -1858,6 +1966,19 @@ function findExecutable(name: string): string {
     if (fs.existsSync(candidate)) return candidate;
   }
   throw new Error(`missing executable ${name}`);
+}
+
+// The sync lock lives under the state dir, so it has to be resolved with the
+// same SIDECAR_STATE_DIR the spawned CLI runs with.
+function testSyncLockDir(main: string): string {
+  const previous = process.env.SIDECAR_STATE_DIR;
+  process.env.SIDECAR_STATE_DIR = path.join(main, ".sidecar-test-state");
+  try {
+    return syncLockDir(main);
+  } finally {
+    if (previous === undefined) delete process.env.SIDECAR_STATE_DIR;
+    else process.env.SIDECAR_STATE_DIR = previous;
+  }
 }
 
 function runSidecar(args: string[], cwd: string, env: Record<string, string> = {}): string {

@@ -47,6 +47,10 @@ const STATE_DIR_ENV = "SIDECAR_STATE_DIR";
 // older pinned project-local CLIs, which ignore it instead of rejecting an
 // unknown option.
 export const SOFT_SYNC_ENV = "SIDECAR_SYNC_SOFT";
+// Likewise a variable rather than a flag: the daemon settles this machine far
+// more often than it talks to the remote, and a pinned older CLI has to be able
+// to ignore the request instead of rejecting an option it never heard of.
+export const LOCAL_SYNC_ENV = "SIDECAR_SYNC_LOCAL";
 const SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE";
 const DAEMON_LABEL = "com.anteprojector.sidecar";
 
@@ -263,7 +267,8 @@ ${header("common:")}
   redactions               preview what redaction rewrites before content is pushed
 
 ${header("sync & daemon:")}
-  sync [--no-snapshot] [--soft] [-m message]
+  sync [--local] [--no-snapshot] [--soft] [-m message]
+                           --local settles this machine's checkouts without touching the remote
   daemon status|enable|disable|restart|autoupdate on|off|run [--once] [--interval seconds]
   instances [--json]
   tail [-f|--follow] [-n|--lines count]
@@ -282,9 +287,13 @@ ${header("advanced (mostly run for you by init, git, and the daemon):")}
 function cmdDeinit(args: string[]): number {
   if (args.length) throw new SidecarError("usage: sidecar deinit");
 
-  const root = gitToplevelOptional(process.cwd());
+  // The config is what deinit removes, so it locates the repo the way every
+  // other command does — by walking up for .sidecar. Falling back to git covers
+  // the repo whose config is already gone but whose ignore entries are not; a
+  // jj workspace has no git root at all and would otherwise be unremovable.
+  const root = findConfigRootOptional(process.cwd()) ?? gitToplevelOptional(process.cwd());
   if (!root) {
-    console.error("sidecar: warning: not inside a Git repository; nothing to remove");
+    console.error("sidecar: warning: no .sidecar config or Git repository found; nothing to remove");
     return 0;
   }
 
@@ -321,12 +330,13 @@ function cmdDeinit(args: string[]): number {
   if (config && !isStandalone(config)) {
     const checkoutPath = path.resolve(root, config.path);
     if (checkoutPath !== path.resolve(root) && checkoutPath !== path.parse(checkoutPath).root) {
-      fs.rmSync(checkoutPath, { recursive: true, force: true });
+      removeCheckout(checkoutPath);
     }
     const ignoreEntry = ignoreEntryForSidecarPath(root, config.path);
     if (ignoreEntry) {
       removeIgnoreEntry(path.join(root, ".gitignore"), ignoreEntry);
-      removeIgnoreEntry(path.join(gitCommonDir(root), "info", "exclude"), ignoreEntry);
+      const commonDir = gitCommonDirOptional(root);
+      if (commonDir) removeIgnoreEntry(path.join(commonDir, "info", "exclude"), ignoreEntry);
       removeZedInclusion(root, ignoreEntry);
     }
   }
@@ -436,7 +446,7 @@ function cmdInit(args: string[]): number {
   // already doing this exact work.
   if (isStandalone(config) && !parsed.flags.has("--no-clone")) {
     const synced = withSyncLock(root, "skip", () => {
-      syncProject(root, config, { snapshot: true });
+      syncProject(root, config, { snapshot: true, remote: true });
     });
     if (synced) registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
   }
@@ -1302,10 +1312,12 @@ function cmdSnapshot(args: string[]): number {
 
 function cmdSync(args: string[]): number {
   const parsed = parseOptions(args, {
-    boolean: new Set(["--no-snapshot", "--soft"]),
+    boolean: new Set(["--no-snapshot", "--soft", "--local"]),
     value: new Set(["-m", "--message"]),
   });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar sync [--no-snapshot] [--soft] [-m message]");
+  if (parsed.positional.length) {
+    throw new SidecarError("usage: sidecar sync [--local] [--no-snapshot] [--soft] [-m message]");
+  }
 
   const [root, config] = loadProject();
   removeLegacyGitHooks(root);
@@ -1321,6 +1333,9 @@ function cmdSync(args: string[]): number {
     synced = withSyncLock(root, soft ? "skip" : "throw", () => {
       syncProject(root, config, {
         snapshot: !parsed.flags.has("--no-snapshot"),
+        // --local settles this machine and stops there: no fetch, no push, and
+        // nothing that can fail because a remote is unreachable.
+        remote: !parsed.flags.has("--local") && process.env[LOCAL_SYNC_ENV] !== "1",
         message: getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined,
         onStage: (name) => {
           stage = name;
@@ -1345,10 +1360,21 @@ function cmdSync(args: string[]): number {
 }
 
 /** Runs inside the repo's sync lock — callers hold it via withSyncLock. */
+/**
+ * A sync in two phases, local first.
+ *
+ * The local phase captures this checkout's edits and settles them across every
+ * working copy on this machine, touching nothing but the shared object store.
+ * The remote phase then trades the same work with the other machines. Running
+ * them in that order is what makes local collaboration independent of the
+ * network: by the time a push can fail, the sibling worktrees are already
+ * current, so an unreachable remote or an expired credential no longer stops
+ * two agents on one laptop from seeing each other's notes.
+ */
 function syncProject(
   root: string,
   config: SidecarConfig,
-  options: { snapshot: boolean; message?: string; onStage?: (stage: string) => void },
+  options: { snapshot: boolean; remote: boolean; message?: string; onStage?: (stage: string) => void },
 ): void {
   const stage = (name: string): void => options.onStage?.(name);
 
@@ -1356,8 +1382,8 @@ function syncProject(
   const sidecarPath = ensureSidecarCheckout(root, config);
   const inbox = expandInbox(config, sidecarPath);
   ensureCommitIdentity(sidecarPath);
-  fetch(sidecarPath, true, false);
   ensureInboxBranch(sidecarPath, config, inbox);
+
   stage("snapshot");
   if (options.snapshot) {
     snapshot(sidecarPath, root, inbox, options.message, config.redaction);
@@ -1366,13 +1392,80 @@ function syncProject(
     // required=true would fail every git status until one runs.
     ensureRedactionFilter(sidecarPath, config.redaction);
   }
+
+  // The local phase exists to bring sibling working copies current early, before
+  // anything that can fail on the network. With no siblings there is nothing to
+  // bring current, and the remote phase performs the same merge on its way past,
+  // so a lone checkout — every standalone repo, and most others — skips it and
+  // pays only the ref lookup. A local-only sync always runs it: there is no
+  // second phase behind it to do the work.
+  const siblings = siblingCheckouts(sidecarPath);
+  if (siblings.length || !options.remote) {
+    stage("merge-local");
+    mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: false, remote: false });
+    stage("settle");
+    settleCheckouts(sidecarPath, config, inbox, siblings);
+  }
+  if (!options.remote) return;
+
   stage("push-inbox");
+  fetch(sidecarPath, true, false);
   syncBranchBeforePush(sidecarPath, inbox);
   pushBranch(sidecarPath, inbox);
   stage("merge");
-  mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: true });
-  stage("refresh");
+  mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: true, remote: true });
+  stage("settle-remote");
+  settleCheckouts(sidecarPath, config, inbox, siblings);
+}
+
+/**
+ * Brings this checkout and its siblings up to the main branch as it now stands.
+ *
+ * Propagation is the cheap half of a sync and deliberately carries no debounce
+ * of its own: the objects are already in the shared store, so each sibling is
+ * one fast-forward and a working-tree write from current. It runs as the tail
+ * of whichever phase advanced the branch, which is to say exactly as often as
+ * there is something to move.
+ *
+ * Siblings are best effort. One mid-edit is dirty and gets skipped — its own
+ * watcher reconciles it moments later — and no sibling may fail the sync that
+ * is only doing it a favour.
+ */
+function settleCheckouts(
+  sidecarPath: string,
+  config: SidecarConfig,
+  inbox: string,
+  siblings: string[],
+): void {
   refreshInboxFromMain(sidecarPath, config, inbox);
+
+  let settled = 0;
+  for (const sibling of siblings) {
+    // A detached sibling is the merge scratch worktree, not a checkout; one
+    // parked on the main branch is mid-something and not ours to move.
+    const branch = git(sibling, ["branch", "--show-current"], { check: false }).stdout.trim();
+    if (!branch || branch === config.branch || isDirty(sibling)) continue;
+    if (git(sibling, ["merge", "--ff-only", config.branch], { check: false }).status === 0) settled += 1;
+  }
+  if (settled) logSidecarEvent("settle", { sidecarPath, siblings: settled });
+}
+
+/**
+ * The other working copies of this sidecar on this machine.
+ *
+ * Asked of git rather than of the instance registry: the worktree list is the
+ * authoritative set, it needs no bookkeeping to stay true, and it is right even
+ * where the registry is unavailable.
+ */
+function siblingCheckouts(sidecarPath: string): string[] {
+  const result = git(sidecarPath, ["worktree", "list", "--porcelain"], { check: false });
+  if (result.status !== 0) return [];
+  const self = realpathOr(sidecarPath);
+  return result.stdout
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length).trim())
+    .filter((checkout) => checkout && realpathOr(checkout) !== self);
 }
 
 // ---------------------------------------------------------------------------
@@ -1532,6 +1625,7 @@ function cmdMerge(args: string[]): number {
   mergeInboxBranches(sidecarPath, config, {
     forkFiles: parsed.flags.has("--fork-files"),
     push: !parsed.flags.has("--no-push"),
+    remote: true,
   });
   return 0;
 }
@@ -1539,18 +1633,36 @@ function cmdMerge(args: string[]): number {
 export function mergeInboxBranches(
   sidecarPath: string,
   config: SidecarConfig,
-  options: { forkFiles: boolean; push: boolean },
+  options: { forkFiles: boolean; push: boolean; remote: boolean },
 ): number {
   ensureClean(sidecarPath);
   ensureCommitIdentity(sidecarPath);
 
-  // Most syncs have no merge work. Detect that from refs alone — local main
-  // matching origin and every inbox branch already merged — before paying
-  // for a worktree checkout.
-  fetch(sidecarPath, false);
-  if (mainMatchesRemote(sidecarPath, config) && !hasPendingInboxWork(sidecarPath, config)) {
-    console.log("no inbox branches to merge");
-    return 0;
+  // Most syncs have no merge work. Detect that from refs alone, before paying
+  // for a worktree checkout — asking exactly what the merge loop would ask, so
+  // the two cannot disagree: is any inbox branch still outside local main? A
+  // local merge sees only what this machine holds and does not fetch; a remote
+  // one fetches first, so the same question also covers the other machines.
+  if (options.remote) fetch(sidecarPath, false);
+  if (!hasPendingInboxWork(sidecarPath, config)) {
+    // Nothing to merge, but the local phase advances main before the remote
+    // phase runs, so main is routinely owed to the remote with no merge behind
+    // it. Sending a branch needs no checkout — and so needs no worktree. A
+    // rejected push means another machine moved main and this is a real
+    // reconcile after all, so fall through and do it properly.
+    if (options.push && !mainMatchesRemote(sidecarPath, config)) {
+      const push = git(sidecarPath, ["push", "origin", `refs/heads/${config.branch}:refs/heads/${config.branch}`], {
+        check: false,
+      });
+      if (push.status === 0) {
+        console.log(`pushed ${config.branch}`);
+        return 0;
+      }
+      console.log(`push of ${config.branch} was rejected; refetching and retrying`);
+    } else {
+      console.log("no inbox branches to merge");
+      return 0;
+    }
   }
 
   // Merging switches branches, which rewrites working-tree files from
@@ -1597,9 +1709,10 @@ function mainMatchesRemote(repo: string, config: SidecarConfig): boolean {
   return local === remote;
 }
 
+/** Whether any inbox branch still sits outside the local main branch. */
 function hasPendingInboxWork(repo: string, config: SidecarConfig): boolean {
-  const remoteMain = `origin/${config.branch}`;
-  return pendingInboxBranches(repo, config).some((branch) => !isAncestor(repo, branch, remoteMain));
+  const main = `refs/heads/${config.branch}`;
+  return pendingInboxBranches(repo, config).some((branch) => !isAncestor(repo, branch, main));
 }
 
 function mergeInboxBranchesAt(
@@ -1621,7 +1734,11 @@ function mergeInboxBranchesAt(
     const inboxBranches = pendingInboxBranches(sidecarPath, config).filter(
       (remoteBranch) => !isAncestor(sidecarPath, remoteBranch, "HEAD"),
     );
-    if (!inboxBranches.length && attempt === 1) {
+    // Nothing left to merge is not the same as nothing left to do: the local
+    // phase merges into main before the remote phase runs, so by here the work
+    // is routinely already in main and still owed to the remote.
+    const mainOwedToRemote = options.push && !mainMatchesRemote(sidecarPath, config);
+    if (!inboxBranches.length && !mainOwedToRemote && attempt === 1) {
       console.log("no inbox branches to merge");
       return 0;
     }
@@ -1760,6 +1877,108 @@ function cmdRedact(args: string[]): number {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Repo families
+//
+// Several working copies of one repo — git worktrees, jj workspaces — used to
+// get a full clone of the sidecar each, so two of them on one machine traded
+// notes by pushing to the remote and fetching back. They share a VCS store
+// already; the sidecar checkout can share one too, as a linked worktree of the
+// clone held by whichever working copy owns that store.
+//
+// That owner is elected rather than recorded because it needs no repair: git
+// and jj both die in every other working copy the moment it is deleted or
+// moved, so hanging the shared checkout off it adds no failure mode they do
+// not already have. Everything here degrades to undefined instead of throwing —
+// an unresolvable family just means the checkout gets its own clone, which is
+// what it would have had anyway.
+// ---------------------------------------------------------------------------
+
+/**
+ * The root of the working copy owning this repo family's VCS store, or
+ * undefined when `root` is that owner, stands alone, or cannot be resolved.
+ */
+export function familyPrimaryRoot(root: string): string | undefined {
+  const primary = jjDefaultWorkspace(root) ?? gitMainWorktree(root);
+  if (!primary) return undefined;
+  return realpathOr(primary) === realpathOr(root) ? undefined : primary;
+}
+
+/**
+ * jj publishes no command for this: `jj workspace list` omits paths and
+ * `jj workspace root` answers for the current workspace. The layout is the only
+ * route — a secondary workspace's `.jj/repo` is a file holding the path of the
+ * default workspace's `.jj/repo` directory, which the default workspace has in
+ * its place. Reading it is a reach into another tool's internals, so treat
+ * every surprise as "no family".
+ */
+function jjDefaultWorkspace(root: string): string | undefined {
+  const pointer = path.join(root, ".jj", "repo");
+  try {
+    if (!fs.statSync(pointer).isFile()) return undefined;
+    const workspace = path.dirname(path.dirname(fs.readFileSync(pointer, "utf8").trim()));
+    return fs.existsSync(path.join(workspace, ".jj")) ? workspace : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `git worktree list` names the main worktree first. */
+function gitMainWorktree(root: string): string | undefined {
+  const result = git(root, ["worktree", "list", "--porcelain"], { check: false });
+  if (result.status !== 0) return undefined;
+  const entry = result.stdout.split(/\r?\n/).find((line) => line.startsWith("worktree "));
+  return entry?.slice("worktree ".length).trim() || undefined;
+}
+
+/**
+ * The family primary's own sidecar checkout, created if it does not exist yet.
+ *
+ * Creating it is the point: a secondary is as likely to run `sidecar clone`
+ * first as the primary is — a fresh jj workspace does exactly that through
+ * postinstall — and the worktree it needs has to hang off something. A primary
+ * that declares no sidecar, or a different one, is not ours to populate.
+ */
+function familySidecarCheckout(root: string, config: SidecarConfig): string | undefined {
+  const primary = familyPrimaryRoot(root);
+  if (!primary) return undefined;
+
+  let primaryConfig: SidecarConfig;
+  try {
+    primaryConfig = readConfig(path.join(primary, ".sidecar"));
+  } catch {
+    return undefined;
+  }
+  if (primaryConfig.remote !== config.remote) return undefined;
+
+  const primaryPath = resolveSidecarPath(primary, primaryConfig);
+  if (path.resolve(primaryPath) === path.resolve(primary)) return undefined;
+  if (!hasGitMetadata(primaryPath)) cloneOrUpdate(primary, primaryConfig, true);
+  return hasGitMetadata(primaryPath) ? primaryPath : undefined;
+}
+
+/**
+ * Reconnects a linked checkout whose worktree pointer went stale, which is what
+ * moving the repo on disk does to every linked worktree — git's own included.
+ * Repair needs the new path spelled out; the argument-less form does not find
+ * it.
+ */
+function repairLinkedCheckout(root: string, config: SidecarConfig, sidecarPath: string): void {
+  if (git(sidecarPath, ["rev-parse", "--git-dir"], { check: false }).status === 0) return;
+
+  const primaryPath = familySidecarCheckout(root, config);
+  if (primaryPath && git(primaryPath, ["worktree", "repair", sidecarPath], { check: false }).status === 0) {
+    logSidecarEvent("checkout-repair", { root, sidecarPath });
+    return;
+  }
+  // Unrepairable here: a moved repo breaks the working copy this checkout hangs
+  // off before it breaks the checkout, and that has to be fixed first. Say so —
+  // every git call from here reports something else as the problem.
+  throw new SidecarError(
+    `sidecar checkout at ${sidecarPath} is not a usable Git checkout; if this repo moved, repair it there first (\`git worktree repair\`), or delete the checkout and run \`sidecar clone\``,
+  );
+}
+
 export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain: boolean): void {
   const sidecarPath = resolveSidecarPath(root, config);
   if (fs.existsSync(sidecarPath) && !hasGitMetadata(sidecarPath)) {
@@ -1770,7 +1989,12 @@ export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain
   }
 
   if (!fs.existsSync(sidecarPath)) {
-    gitRaw(["clone", "--", config.remote, sidecarPath]);
+    const primaryPath = familySidecarCheckout(root, config);
+    // Detached, because the inbox branch is named after this worktree's own git
+    // dir — which does not exist until the worktree does. ensureInboxBranch
+    // below puts it on its branch.
+    if (primaryPath) git(primaryPath, ["worktree", "add", "--detach", sidecarPath]);
+    else gitRaw(["clone", "--", config.remote, sidecarPath]);
   } else if (hasGitMetadata(sidecarPath)) {
     const existing = git(sidecarPath, ["remote", "get-url", "origin"], { check: false });
     if (existing.status !== 0) {
@@ -2274,13 +2498,35 @@ export function showStage(repo: string, stage: number, conflictPath: string): Bu
   return result.status === 0 ? result.stdout : undefined;
 }
 
+/**
+ * Every inbox branch this checkout can reach, local heads as well as
+ * remote-tracking refs.
+ *
+ * The local half is what lets checkouts sharing a clone see each other without
+ * the remote: a sibling worktree's snapshot is committed here the moment it is
+ * taken, so its branch is readable — and fresher than origin — before any push
+ * happens. A name held in both places is listed once, local first, for the same
+ * reason.
+ */
 export function pendingInboxBranches(repo: string, config: SidecarConfig): string[] {
-  const match = inboxBranchMatcher(config);
-  const refs = git(repo, ["branch", "-r", "--format=%(refname:short)"]).stdout.split(/\r?\n/);
-  return refs
+  const prefix = inboxPrefix(config);
+  const matches = (branch: string): boolean =>
+    prefix.endsWith("/") ? branch.startsWith(prefix) : branch === prefix;
+
+  const local = refNames(repo, "refs/heads/").filter(matches);
+  const claimed = new Set(local);
+  const remote = refNames(repo, "refs/remotes/origin/").filter((ref) => {
+    const branch = remoteBranchName(ref);
+    return ref !== "origin/HEAD" && matches(branch) && !claimed.has(branch);
+  });
+  return [...local, ...remote].sort();
+}
+
+function refNames(repo: string, namespace: string): string[] {
+  return git(repo, ["for-each-ref", "--format=%(refname:short)", namespace])
+    .stdout.split(/\r?\n/)
     .map((ref) => ref.trim())
-    .filter((ref) => ref !== "origin/HEAD" && match(ref))
-    .sort();
+    .filter(Boolean);
 }
 
 export function inboxPrefix(config: SidecarConfig): string {
@@ -3218,8 +3464,16 @@ function gitToplevelOptional(cwd: string): string | undefined {
 }
 
 export function gitCommonDir(root: string): string {
+  const commonDir = gitCommonDirOptional(root);
+  if (!commonDir) throw new SidecarError("not inside a Git repository");
+  return commonDir;
+}
+
+/** The shared git dir, or undefined where there is no git — a jj workspace. */
+function gitCommonDirOptional(root: string): string | undefined {
   const result = gitRaw(["-C", root, "rev-parse", "--git-common-dir"], { check: false });
-  if (result.status !== 0) throw new SidecarError("not inside a Git repository");
+  if (result.status !== 0) return undefined;
+  // Reported relative to the cwd git ran in, which is `root`.
   return path.resolve(root, result.stdout.trim());
 }
 
@@ -3235,6 +3489,8 @@ export function ensureSidecarCheckout(root: string, config: SidecarConfig): stri
   const sidecarPath = resolveSidecarPath(root, config);
   if (!hasGitMetadata(sidecarPath)) {
     cloneOrUpdate(root, config, true);
+  } else {
+    repairLinkedCheckout(root, config, sidecarPath);
   }
   return requireSidecarCheckout(root, config);
 }
@@ -3331,8 +3587,31 @@ export function removeLegacyGitHooks(root: string): boolean {
   return removed;
 }
 
+/**
+ * Where a repo's sync lock lives.
+ *
+ * Not the repo's own git dir, which is where this used to sit: a jj workspace
+ * has no `.git` at all, so locating the lock through git made every sync in one
+ * fail before it started. Not the sidecar checkout's git dir either — the lock
+ * is taken before `ensureSidecarCheckout` clones it, so on a fresh checkout
+ * there is nothing to lock inside yet. The state dir is the one location that
+ * exists for every repo at every point in a sync.
+ *
+ * Keyed by family rather than by root: working copies sharing a clone cannot
+ * merge at the same time, because the merge worktree switches to the main
+ * branch and git allows one worktree to hold a branch. The key is a hash of the
+ * realpath because two spellings of one path (a symlink, /tmp vs /private/tmp)
+ * have to land on the same lock, and a repo path is not a legal directory name.
+ */
+export function syncLockDir(root: string): string {
+  const family = familyPrimaryRoot(root) ?? root;
+  const key = crypto.createHash("sha256").update(realpathOr(family)).digest("hex").slice(0, 16);
+  return path.join(sidecarStateDir(), "locks", `${slug(path.basename(family))}-${key}`);
+}
+
 export function acquireSyncLock(root: string): (() => void) | undefined {
-  const lockDir = path.join(gitCommonDir(root), "sidecar-sync-lock");
+  const lockDir = syncLockDir(root);
+  fs.mkdirSync(path.dirname(lockDir), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       fs.mkdirSync(lockDir);
@@ -3713,10 +3992,21 @@ function numberConfigValue(
   return value;
 }
 
-function inboxBranchMatcher(config: SidecarConfig): (remoteBranch: string) => boolean {
-  const prefix = `origin/${inboxBranchPrefix(config.inbox)}`;
-  if (prefix.endsWith("/")) return (remoteBranch) => remoteBranch.startsWith(prefix);
-  return (remoteBranch) => remoteBranch === prefix;
+/**
+ * Deletes a checkout, unregistering it first when it is a linked worktree: the
+ * clone it hangs off would otherwise keep an admin entry that blocks a later
+ * `worktree add` at the same path. A linked worktree's `.git` is a file, where
+ * a clone's is a directory.
+ */
+function removeCheckout(checkoutPath: string): void {
+  try {
+    if (fs.statSync(path.join(checkoutPath, ".git")).isFile()) {
+      git(checkoutPath, ["worktree", "remove", "--force", checkoutPath], { check: false });
+    }
+  } catch {
+    // No .git at all: nothing is registered anywhere, so the delete is enough.
+  }
+  fs.rmSync(checkoutPath, { recursive: true, force: true });
 }
 
 function inboxBranchPrefix(template: string): string {
