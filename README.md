@@ -11,6 +11,7 @@
 
 # sidecar
 
+[![CI](https://github.com/anteprojector/sidecar/actions/workflows/ci.yml/badge.svg)](https://github.com/anteprojector/sidecar/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/sidecarsync)](https://www.npmjs.com/package/sidecarsync)
 [![license](https://img.shields.io/npm/l/sidecarsync)](LICENSE)
 [![node](https://img.shields.io/node/v/sidecarsync)](https://nodejs.org)
