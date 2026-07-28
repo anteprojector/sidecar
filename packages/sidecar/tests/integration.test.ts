@@ -414,6 +414,7 @@ describe("sidecar CLI integration", () => {
         ...process.env,
         INIT_CWD: main,
         GIT_TERMINAL_PROMPT: "0",
+        PATH: `${fakeGlobalBinDir()}${path.delimiter}${process.env.PATH || ""}`,
         SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state"),
       },
     });
@@ -422,6 +423,33 @@ describe("sidecar CLI integration", () => {
     expect(fs.existsSync(path.join(main, "sidecar", ".git"))).toBe(true);
     expect(fs.existsSync(path.join(main, ".git", "hooks", "post-commit"))).toBe(false);
     expect(fs.existsSync(path.join(main, ".git", "hooks", "sidecar-sync-hook"))).toBe(false);
+  });
+
+  // A checkout with no daemon behind it never syncs, and users read that
+  // silence as sidecar being broken. Say why instead of cloning.
+  test("postinstall clones nothing and warns when no global sidecar is installed", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    const pathWithoutSidecar = tempDir();
+    fs.symlinkSync(findExecutable("git"), path.join(pathWithoutSidecar, "git"));
+    runSidecar(["init", remote, "--no-clone"], main, { PATH: pathWithoutSidecar });
+
+    const result = spawnSync(process.execPath, [path.resolve("scripts", "postinstall.js")], {
+      cwd: main,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        INIT_CWD: main,
+        GIT_TERMINAL_PROMPT: "0",
+        PATH: pathWithoutSidecar,
+        SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state"),
+      },
+    });
+
+    expect(result.status).toBe(0);
+    expect(fs.existsSync(path.join(main, "sidecar"))).toBe(false);
+    expect(result.stderr).toContain("no global install found");
+    expect(result.stderr).toContain("npm install -g sidecarsync");
   });
 
   test("clone does not create editor settings", () => {
@@ -522,26 +550,8 @@ describe("sidecar CLI integration", () => {
       "utf8",
     );
 
-    const binDir = tempDir();
-    const fakeGlobal = path.join(binDir, process.platform === "win32" ? "sidecar.cmd" : "sidecar");
-    fs.writeFileSync(
-      fakeGlobal,
-      [
-        "#!/usr/bin/env node",
-        'const { spawnSync } = require("node:child_process");',
-        `const result = spawnSync(process.execPath, [${JSON.stringify(cliPath)}, ...process.argv.slice(2)], {`,
-        '  stdio: "inherit",',
-        '  env: { ...process.env, SIDECAR_GLOBAL_EXEC: "1", SIDECAR_SKIP_LOCAL_EXEC: "1" },',
-        "});",
-        "process.exit(result.status ?? 1);",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    fs.chmodSync(fakeGlobal, 0o755);
-
     runSidecar(["init", remote, "--no-clone"], main, {
-      PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
+      PATH: `${fakeGlobalBinDir()}${path.delimiter}${process.env.PATH || ""}`,
       SIDECAR_STATE_DIR: stateDir,
       SIDECAR_SKIP_LOCAL_EXEC: "1",
     });
@@ -570,31 +580,13 @@ describe("sidecar CLI integration", () => {
     });
     expect(fs.existsSync(path.join(stateDir, "instances.json"))).toBe(false);
 
-    const binDir = tempDir();
-    const fakeGlobal = path.join(binDir, process.platform === "win32" ? "sidecar.cmd" : "sidecar");
-    fs.writeFileSync(
-      fakeGlobal,
-      [
-        "#!/usr/bin/env node",
-        'const { spawnSync } = require("node:child_process");',
-        `const result = spawnSync(process.execPath, [${JSON.stringify(cliPath)}, ...process.argv.slice(2)], {`,
-        '  stdio: "inherit",',
-        '  env: { ...process.env, SIDECAR_GLOBAL_EXEC: "1" },',
-        "});",
-        "process.exit(result.status ?? 1);",
-        "",
-      ].join("\n"),
-      "utf8",
-    );
-    fs.chmodSync(fakeGlobal, 0o755);
-
     const result = spawnSync(process.execPath, [path.resolve("scripts/postinstall.js")], {
       cwd: path.resolve("."),
       encoding: "utf8",
       env: {
         ...process.env,
         INIT_CWD: main,
-        PATH: `${binDir}${path.delimiter}${process.env.PATH || ""}`,
+        PATH: `${fakeGlobalBinDir()}${path.delimiter}${process.env.PATH || ""}`,
         SIDECAR_STATE_DIR: stateDir,
       },
     });
@@ -1298,6 +1290,33 @@ describe("sidecar CLI integration", () => {
     expect(output).toMatch(/last sync:\s+never/);
   });
 
+  // The state postinstall now leaves a machine in when it declines to clone.
+  // Reporting it dimly would confirm the user's guess that sidecar is broken.
+  test("status names the missing global install as the reason nothing syncs", () => {
+    const main = localInstallRepo();
+    const pathWithoutSidecar = tempDir();
+    fs.symlinkSync(findExecutable("git"), path.join(pathWithoutSidecar, "git"));
+
+    const output = runSidecar(["status"], main, { PATH: pathWithoutSidecar });
+
+    expect(output).toMatch(/daemon:\s+no global install — nothing syncs/);
+    expect(output).toContain("npm install -g sidecarsync");
+    expect(output).toMatch(/checkout:\s+missing — run `sidecar init`/);
+    const payload = JSON.parse(runSidecar(["status", "--json"], main, { PATH: pathWithoutSidecar }));
+    expect(payload.globalInstall).toBe(false);
+  });
+
+  test("status reports a project-local install with a global present as owned by it", () => {
+    const main = localInstallRepo();
+
+    const output = runSidecar(["status"], main, {
+      PATH: `${fakeGlobalBinDir()}${path.delimiter}${process.env.PATH || ""}`,
+    });
+
+    expect(output).toMatch(/daemon:\s+owned by the global install/);
+    expect(output).not.toContain("nothing syncs");
+  });
+
   test("two writers on the same inbox branch reconcile instead of diverging", () => {
     const main = initMainRepo();
     const remote = initBareRemote();
@@ -1985,6 +2004,45 @@ function fakeLocalInstallProject(installedVersion: string | undefined): string {
     "utf8",
   );
   return project;
+}
+
+// An initialized repo that pins sidecarsync as a dependency, so a CLI run
+// inside it is a project-local one — the install shape whose sync depends
+// entirely on a global sidecar existing elsewhere on the machine.
+function localInstallRepo(): string {
+  const main = initMainRepo();
+  const remote = initBareRemote();
+  fs.writeFileSync(
+    path.join(main, "package.json"),
+    JSON.stringify({ dependencies: { "sidecarsync": "1.0.0" } }),
+    "utf8",
+  );
+  runSidecar(["init", remote, "--no-clone"], main);
+  return main;
+}
+
+// A bin dir to put on PATH holding a `sidecar` that forwards to the built CLI,
+// so a spawned init or postinstall sees a global install the way a real
+// machine would.
+function fakeGlobalBinDir(): string {
+  const binDir = tempDir();
+  const fakeGlobal = path.join(binDir, process.platform === "win32" ? "sidecar.cmd" : "sidecar");
+  fs.writeFileSync(
+    fakeGlobal,
+    [
+      "#!/usr/bin/env node",
+      'const { spawnSync } = require("node:child_process");',
+      `const result = spawnSync(process.execPath, [${JSON.stringify(cliPath)}, ...process.argv.slice(2)], {`,
+      '  stdio: "inherit",',
+      '  env: { ...process.env, SIDECAR_GLOBAL_EXEC: "1", SIDECAR_SKIP_LOCAL_EXEC: "1" },',
+      "});",
+      "process.exit(result.status ?? 1);",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  fs.chmodSync(fakeGlobal, 0o755);
+  return binDir;
 }
 
 function findExecutable(name: string): string {

@@ -5,7 +5,7 @@ import fs from "node:fs";
 import { type Role, paint } from "./color.js";
 import { SidecarError, getValue, parseOptions } from "./util.js";
 import { branchExists, fetch, git, hasGitMetadata, isAncestor, remoteRefExists } from "./git.js";
-import { shouldUseGlobalRegistry } from "./install.js";
+import { PACKAGE_SPEC, findGlobalSidecarExecutable, shouldUseGlobalRegistry } from "./install.js";
 import { type SidecarConfig, expandInbox, isStandalone, loadProject, requireSidecarCheckout, resolveSidecarPath } from "./config.js";
 import { instancesPath, listInstanceStatuses, readInstances, readSettings, sidecarLogPath } from "./state.js";
 import { daemonServiceStatus } from "./service.js";
@@ -40,7 +40,12 @@ export function cmdStatus(args: string[]): number {
   statusLine("inbox branch", inbox);
 
   if (!checkoutPresent) {
-    statusLine("checkout", "missing", "bad");
+    // The state a fresh clone lands in when nothing cloned for it: say what to
+    // run, since the daemon line below only explains why nothing did. `init` on
+    // an already-configured repo is the catchall — it clones the checkout,
+    // registers the repo, and offers the global install this may also be
+    // missing, where `clone` would fix only the one line it sits under.
+    statusLine("checkout", "missing — run `sidecar init`", "bad");
     printDaemonLine();
     printLastSyncLine(root);
     return 0;
@@ -82,6 +87,7 @@ function cmdStatusJson(): number {
     branch: config.branch,
     inbox,
     checkout: checkoutPresent ? "present" : "missing",
+    globalInstall: shouldUseGlobalRegistry() || Boolean(findGlobalSidecarExecutable()),
     currentBranch: branch || undefined,
     dirty: checkoutPresent ? Boolean(git(sidecarPath, ["status", "--porcelain"]).stdout.trim()) : undefined,
     daemon: daemonHealth().text,
@@ -108,9 +114,18 @@ function pendingStatusInboxBranches(sidecarPath: string, config: SidecarConfig):
  * Green when the daemon is up, red when it should be up and isn't, and dim when
  * this install can't run one at all — a project-local sidecar has no daemon to
  * report on, which is a fact about the install rather than a fault.
+ *
+ * The exception is a project-local install with nothing global on the machine:
+ * no install owns a daemon, so this repo will never sync on its own. That is a
+ * fault, and the one this line exists to make impossible to miss.
  */
 export function daemonHealth(): { text: string; role: Role } {
-  if (!shouldUseGlobalRegistry()) return { text: "no global install", role: "quiet" };
+  if (!shouldUseGlobalRegistry()) {
+    if (!findGlobalSidecarExecutable()) {
+      return { text: `no global install — nothing syncs; \`npm install -g ${PACKAGE_SPEC}\``, role: "bad" };
+    }
+    return { text: "owned by the global install", role: "quiet" };
+  }
 
   const service = daemonServiceStatus();
   if (!service.available) return { text: service.message ?? "unavailable", role: "quiet" };
