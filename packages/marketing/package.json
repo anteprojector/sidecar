@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "marketing",
   "private": true,
   "description": "The sidecar landing page, branding art, and their build scripts.",

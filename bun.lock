@@ -7,11 +7,11 @@
     },
     "packages/marketing": {
       "name": "marketing",
-      "version": "1.0.0",
+      "version": "1.1.0",
     },
     "packages/sidecar": {
       "name": "sidecarsync",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "bin": {
         "sidecar": "dist/cli.js",
       },
@@ -27,7 +27,7 @@
     },
     "packages/studio": {
       "name": "studio",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "dependencies": {
         "@remotion/cli": "^4.0.0",
         "@remotion/fonts": "^4.0.0",

@@ -1,7 +1,7 @@
 {
   "name": "studio",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "The sidecar videos, rendered with Remotion.",
   "type": "module",
   "scripts": {
