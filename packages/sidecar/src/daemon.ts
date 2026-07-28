@@ -10,6 +10,7 @@ import {
   SOFT_SYNC_ENV,
   bunGlobalRoot,
   compareVersions,
+  installedPackageVersion,
   daemonPidPath,
   ensureDaemonServiceFile,
   findExecutableOnPath,
@@ -211,8 +212,9 @@ function pruneInstance(root: string): void {
   logSidecarEvent("daemon-prune", { root, reason: "config-missing" });
 }
 
-// Repos with a project-local sidecar install sync with their own pinned
-// version; the global daemon only schedules the work.
+// The newest install wins: a repo whose project-local sidecar is ahead of the
+// daemon syncs with that copy, everything else with the daemon's own. The
+// daemon only schedules the work either way.
 async function syncInstance(
   state: DaemonState,
   root: string,
@@ -318,11 +320,8 @@ function localSidecarCliPath(root: string): string | undefined {
   if (!projectDependsOnSidecar(root)) return undefined;
   const candidate = path.join(root, "node_modules", PACKAGE_NAME, "dist", "cli.js");
   if (!isFile(candidate)) return undefined;
-  try {
-    if (fs.realpathSync(candidate) === fs.realpathSync(currentCliPath())) return undefined;
-  } catch {
-    // Unresolvable paths cannot be the same file.
-  }
+  const localVersion = installedPackageVersion(root);
+  if (localVersion === undefined || compareVersions(localVersion, packageVersion()) <= 0) return undefined;
   return candidate;
 }
 

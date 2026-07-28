@@ -24,12 +24,14 @@ registers the repo with the global daemon, so a fresh clone self-registers on
 plain `npm install`/`bun install` — provided the global sidecar is already
 installed there. Init never edits `package.json` without asking.
 
-When the dependency is present, the `sidecar` command always runs that
-project-local version, so a repo's pinned sidecar owns its own behavior;
-without it, everything (including daemon-scheduled syncs of the repo) runs
-the global install. Local sidecar never installs hooks or background sync: it
-syncs only on an explicit `sidecar sync`. (Older versions installed git
-hooks; current versions remove those automatically.)
+When the dependency is present, the newest install wins: the `sidecar`
+command compares the project-local version against its own and runs
+whichever is newer, with ties going to the global. The daemon picks the same
+way for its scheduled syncs of the repo. Updating the global therefore takes
+effect in every repo at once, while a repo whose local copy is ahead of a
+stale global still runs its own. Local sidecar never installs hooks or
+background sync: it syncs only on an explicit `sidecar sync`. (Older
+versions installed git hooks; current versions remove those automatically.)
 
 Daemon commands — and the plumbing commands `set-install-source` and
 `register-install` — always run the global executable, never a project-local

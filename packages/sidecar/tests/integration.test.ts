@@ -5,7 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { git, gitRaw, syncLockDir } from "../src/cli.js";
+import { git, gitRaw, packageVersion, syncLockDir } from "../src/cli.js";
 
 const tempRoots: string[] = [];
 const cliPath = path.resolve("dist/cli.js");
@@ -17,20 +17,8 @@ afterEach(() => {
 });
 
 describe("sidecar CLI integration", () => {
-  test("global executable delegates to a project-local sidecar dependency", () => {
-    const project = tempDir();
-    const localBin = path.join(project, "node_modules", "sidecarsync", "dist", "cli.js");
-    fs.mkdirSync(path.dirname(localBin), { recursive: true });
-    fs.writeFileSync(
-      path.join(project, "package.json"),
-      JSON.stringify({ dependencies: { "sidecarsync": "0.1.0" } }),
-      "utf8",
-    );
-    fs.writeFileSync(
-      localBin,
-      "console.log(JSON.stringify({ local: true, argv: process.argv.slice(2), skip: process.env.SIDECAR_SKIP_LOCAL_EXEC }))\n",
-      "utf8",
-    );
+  test("global executable delegates to a newer project-local sidecar dependency", () => {
+    const project = fakeLocalInstallProject("99.0.0");
 
     const result = spawnSync(process.execPath, [cliPath, "status"], {
       cwd: project,
@@ -39,6 +27,31 @@ describe("sidecar CLI integration", () => {
 
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({ local: true, argv: ["status"], skip: "1" });
+  });
+
+  test("global executable runs itself over a project-local dependency that is not newer", () => {
+    // Same version: the newest install wins, and ties go to the global.
+    const project = fakeLocalInstallProject(packageVersion());
+
+    const result = spawnSync(process.execPath, [cliPath, "--version"], {
+      cwd: project,
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe(packageVersion());
+  });
+
+  test("global executable runs itself when the local install's version is unreadable", () => {
+    const project = fakeLocalInstallProject(undefined);
+
+    const result = spawnSync(process.execPath, [cliPath, "--version"], {
+      cwd: project,
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe(packageVersion());
   });
 
   test("init writes config, bootstraps sidecar main, and creates an inbox branch", () => {
@@ -207,15 +220,8 @@ describe("sidecar CLI integration", () => {
   });
 
   test("global executable runs daemon commands itself instead of delegating locally", () => {
-    const project = tempDir();
-    const localBin = path.join(project, "node_modules", "sidecarsync", "dist", "cli.js");
-    fs.mkdirSync(path.dirname(localBin), { recursive: true });
-    fs.writeFileSync(
-      path.join(project, "package.json"),
-      JSON.stringify({ dependencies: { "sidecarsync": "0.1.0" } }),
-      "utf8",
-    );
-    fs.writeFileSync(localBin, "console.log(JSON.stringify({ local: true }))\n", "utf8");
+    // Newer than the global, so any non-daemon command would delegate to it.
+    const project = fakeLocalInstallProject("99.0.0");
 
     const result = spawnSync(process.execPath, [cliPath, "daemon", "status"], {
       cwd: project,
@@ -857,14 +863,19 @@ describe("sidecar CLI integration", () => {
     runSidecar(["init", remote, "--no-clone"], main);
 
     // Adding the dependency and a fake local CLI afterwards simulates a repo
-    // whose local sidecar version must own its own sync.
+    // whose local sidecar is newer than the daemon and so owns its own sync.
     fs.writeFileSync(
       path.join(main, "package.json"),
-      JSON.stringify({ devDependencies: { "sidecarsync": "0.2.0" } }),
+      JSON.stringify({ devDependencies: { "sidecarsync": "99.0.0" } }),
       "utf8",
     );
     const localCli = path.join(main, "node_modules", "sidecarsync", "dist", "cli.js");
     fs.mkdirSync(path.dirname(localCli), { recursive: true });
+    fs.writeFileSync(
+      path.join(main, "node_modules", "sidecarsync", "package.json"),
+      JSON.stringify({ name: "sidecarsync", version: "99.0.0" }),
+      "utf8",
+    );
     fs.writeFileSync(
       localCli,
       'require("node:fs").writeFileSync(__filename + ".marker", JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));\n',
@@ -1947,6 +1958,33 @@ function tempDir(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-it-"));
   tempRoots.push(root);
   return root;
+}
+
+// A project depending on sidecarsync whose installed copy is a stub that
+// prints JSON, so tests can tell which install handled the command. Pass
+// undefined to leave the installed package's manifest missing.
+function fakeLocalInstallProject(installedVersion: string | undefined): string {
+  const project = tempDir();
+  const packageDir = path.join(project, "node_modules", "sidecarsync");
+  fs.mkdirSync(path.join(packageDir, "dist"), { recursive: true });
+  fs.writeFileSync(
+    path.join(project, "package.json"),
+    JSON.stringify({ dependencies: { "sidecarsync": "*" } }),
+    "utf8",
+  );
+  if (installedVersion !== undefined) {
+    fs.writeFileSync(
+      path.join(packageDir, "package.json"),
+      JSON.stringify({ name: "sidecarsync", version: installedVersion }),
+      "utf8",
+    );
+  }
+  fs.writeFileSync(
+    path.join(packageDir, "dist", "cli.js"),
+    "console.log(JSON.stringify({ local: true, argv: process.argv.slice(2), skip: process.env.SIDECAR_SKIP_LOCAL_EXEC }))\n",
+    "utf8",
+  );
+  return project;
 }
 
 function findExecutable(name: string): string {

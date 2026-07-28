@@ -68,6 +68,16 @@ export function projectDependsOnSidecar(projectRoot: string): boolean {
   }
 }
 
+export function installedPackageVersion(projectRoot: string): string | undefined {
+  const manifestPath = path.join(projectRoot, "node_modules", PACKAGE_NAME, "package.json");
+  try {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { name?: string; version?: string };
+    return manifest.name === PACKAGE_NAME ? manifest.version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function shouldUseGlobalRegistry(): boolean {
   return process.env[GLOBAL_EXEC_ENV] === "1" || !findDependencyRoot(process.cwd());
 }

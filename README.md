@@ -86,7 +86,7 @@ Sidecar takes over branch management there —
 - [Standalone repos](docs/standalone.md) — a repo that is its own sidecar
 - [Redaction](docs/redaction.md) — what's stripped from pushes, reviewing it, opting out
 - [Editor search visibility](docs/editors.md) — making gitignored files searchable
-- [Global vs local installs](docs/install.md) — pinning sidecar per-repo
+- [Global vs local installs](docs/install.md) — the newest install wins
 - [All commands](docs/commands.md)
 - [Uninstall & troubleshooting](docs/uninstall.md) — removing the daemon, service, and state
 

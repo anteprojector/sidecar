@@ -18,7 +18,7 @@ automatically by `export *`.
 - `sync.ts` — the engine: snapshot, inbox merge + conflict forking, clone/settle, redaction filter wiring, health heartbeat.
 - `cmd-init.ts` / `cmd-status.ts` / `cmd-daemon.ts` / `cmd-sync.ts` — command handlers, thin over the modules above.
 - `commands.ts` — the COMMANDS table + dispatch. **Adding a command = one table entry here plus a handler in a cmd-\*.ts**; usage text and typo suggestions derive from the table.
-- `bin.ts` — entry point; deliberately self-contained so delegation to a project-local install runs before loading anything else.
+- `bin.ts` — entry point; resolves which install runs the command (newest wins between global and project-local) before `main()` does any work.
 
 ## Invariants that are easy to break
 

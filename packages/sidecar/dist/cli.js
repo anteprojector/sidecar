@@ -238,6 +238,15 @@ function projectDependsOnSidecar(projectRoot) {
     return false;
   }
 }
+function installedPackageVersion(projectRoot) {
+  const manifestPath = path2.join(projectRoot, "node_modules", PACKAGE_NAME, "package.json");
+  try {
+    const manifest = JSON.parse(fs2.readFileSync(manifestPath, "utf8"));
+    return manifest.name === PACKAGE_NAME ? manifest.version : undefined;
+  } catch {
+    return;
+  }
+}
 function shouldUseGlobalRegistry() {
   return process.env[GLOBAL_EXEC_ENV] === "1" || !findDependencyRoot(process.cwd());
 }
@@ -4175,10 +4184,9 @@ function localSidecarCliPath(root) {
   const candidate = path9.join(root, "node_modules", PACKAGE_NAME, "dist", "cli.js");
   if (!isFile(candidate))
     return;
-  try {
-    if (fs11.realpathSync(candidate) === fs11.realpathSync(currentCliPath()))
-      return;
-  } catch {}
+  const localVersion = installedPackageVersion(root);
+  if (localVersion === undefined || compareVersions(localVersion, packageVersion()) <= 0)
+    return;
   return candidate;
 }
 function currentCliPath() {
@@ -5098,12 +5106,11 @@ var GLOBAL_EXEC_ENV3 = "SIDECAR_GLOBAL_EXEC";
 var PACKAGE_NAME2 = "sidecarsync";
 var GLOBAL_ONLY_COMMANDS = new Set(["daemon", "deinit", "register-install", "set-install-source", "update"]);
 if (!process.env[SKIP_LOCAL_EXEC_ENV3]) {
-  const localExecutable = findLocalExecutable(process.cwd(), fileURLToPath4(import.meta.url));
-  if (localExecutable) {
-    if (GLOBAL_ONLY_COMMANDS.has(process.argv[2])) {
-      process.env[GLOBAL_EXEC_ENV3] = "1";
-    } else {
-      const result = spawnSync5(process.execPath, [localExecutable, ...process.argv.slice(2)], {
+  const local = findLocalInstall(process.cwd(), fileURLToPath4(import.meta.url));
+  if (local) {
+    process.env[GLOBAL_EXEC_ENV3] = "1";
+    if (local.newer && !GLOBAL_ONLY_COMMANDS.has(process.argv[2])) {
+      const result = spawnSync5(process.execPath, [local.executable, ...process.argv.slice(2)], {
         stdio: "inherit",
         env: {
           ...process.env,
@@ -5119,13 +5126,13 @@ if (!process.env[SKIP_LOCAL_EXEC_ENV3]) {
   }
 }
 process.exit(await main());
-function findLocalExecutable(start, self) {
+function findLocalInstall(start, self) {
   let current = path11.resolve(start);
   while (true) {
     if (projectDependsOnSidecar2(current)) {
       const candidate = path11.join(current, "node_modules", PACKAGE_NAME2, "dist", "cli.js");
       if (isFile2(candidate) && !sameFile(candidate, self)) {
-        return candidate;
+        return { executable: candidate, newer: localIsNewer(current) };
       }
     }
     const parent = path11.dirname(current);
@@ -5133,6 +5140,10 @@ function findLocalExecutable(start, self) {
       return;
     current = parent;
   }
+}
+function localIsNewer(projectRoot) {
+  const localVersion = installedPackageVersion(projectRoot);
+  return localVersion !== undefined && compareVersions(localVersion, packageVersion()) > 0;
 }
 function projectDependsOnSidecar2(projectRoot) {
   const manifestPath = path11.join(projectRoot, "package.json");
