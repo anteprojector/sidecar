@@ -27,6 +27,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          prev=$(git describe --abbrev=0 --tags "$TAG"^ 2>/dev/null || true)
+          prev=$(git describe --abbrev=0 --tags --match 'v*' "$TAG"^ 2>/dev/null || true)
           notes=$(git log --no-merges --format='- %s (%h)' ${prev:+$prev..}"$TAG")
           gh release create "$TAG" --title "$TAG" --notes "$notes"
