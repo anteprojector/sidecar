@@ -14,8 +14,8 @@ Windows) that:
   checks the checkout and syncs again if that save left uncommitted work
 - syncs every registered repo on a 10-minute interval as a backstop — this is
   also the fallback on platforms where file watching is unreliable
-- runs each repo's project-local sidecar for the sync when one is installed,
-  and its own copy otherwise
+- runs each repo's project-local sidecar for the sync when it is newer than
+  the daemon, and its own copy otherwise
 - checks npm daily and updates itself (`sidecar daemon autoupdate off` to opt
   out, `sidecar update` to trigger it manually)
 - self-heals: it re-clones missing checkouts, restores its service definition,
