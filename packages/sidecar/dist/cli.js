@@ -2902,7 +2902,7 @@ function syncProject(root, config, options) {
   } else {
     ensureRedactionFilter(sidecarPath, config.redaction);
   }
-  const siblings = siblingCheckouts(sidecarPath);
+  const siblings = siblingCheckouts(sidecarPath, config);
   if (siblings.length || !options.remote) {
     stage("merge-local");
     mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: false, remote: false });
@@ -2921,11 +2921,9 @@ function syncProject(root, config, options) {
 }
 function settleCheckouts(sidecarPath, config, inbox, siblings) {
   refreshInboxFromMain(sidecarPath, config, inbox);
-  const prefix = inboxPrefix(config);
   let settled = 0;
   for (const sibling of siblings) {
-    const branch = git(sibling, ["branch", "--show-current"], { check: false }).stdout.trim();
-    if (!matchesInboxPrefix(prefix, branch) || isDirty(sibling))
+    if (isDirty(sibling))
       continue;
     if (git(sibling, ["merge", "--ff-only", config.branch], { check: false }).status === 0)
       settled += 1;
@@ -2933,12 +2931,25 @@ function settleCheckouts(sidecarPath, config, inbox, siblings) {
   if (settled)
     logSidecarEvent("settle", { sidecarPath, siblings: settled });
 }
-function siblingCheckouts(sidecarPath) {
+function siblingCheckouts(sidecarPath, config) {
   const result = git(sidecarPath, ["worktree", "list", "--porcelain"], { check: false });
   if (result.status !== 0)
     return [];
   const self = realpathOr2(sidecarPath);
-  return result.stdout.split(/\r?\n/).filter((line) => line.startsWith("worktree ")).map((line) => line.slice("worktree ".length).trim()).filter((checkout) => checkout && realpathOr2(checkout) !== self);
+  const prefix = inboxPrefix(config);
+  const siblings = [];
+  let checkout = "";
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (line.startsWith("worktree ")) {
+      checkout = line.slice("worktree ".length).trim();
+    } else if (line.startsWith("branch ")) {
+      const branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
+      if (checkout && realpathOr2(checkout) !== self && matchesInboxPrefix(prefix, branch)) {
+        siblings.push(checkout);
+      }
+    }
+  }
+  return siblings;
 }
 function healthBranchFor(sidecarPath) {
   return healthBranch(slug(currentUser()), checkoutRandom(sidecarPath));

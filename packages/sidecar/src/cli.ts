@@ -1399,7 +1399,7 @@ function syncProject(
   // so a lone checkout — every standalone repo, and most others — skips it and
   // pays only the ref lookup. A local-only sync always runs it: there is no
   // second phase behind it to do the work.
-  const siblings = siblingCheckouts(sidecarPath);
+  const siblings = siblingCheckouts(sidecarPath, config);
   if (siblings.length || !options.remote) {
     stage("merge-local");
     mergeInboxBranches(sidecarPath, config, { forkFiles: true, push: false, remote: false });
@@ -1438,15 +1438,12 @@ function settleCheckouts(
 ): void {
   refreshInboxFromMain(sidecarPath, config, inbox);
 
-  const prefix = inboxPrefix(config);
   let settled = 0;
   for (const sibling of siblings) {
-    // Only a checkout parked on an inbox branch is sidecar's to move. That
-    // rules out the detached merge scratch worktree, one mid-switch on the main
-    // branch, and — in a standalone repo, where the sidecar is the user's own
-    // repo — the user's other worktrees, whatever branch they hold.
-    const branch = git(sibling, ["branch", "--show-current"], { check: false }).stdout.trim();
-    if (!matchesInboxPrefix(prefix, branch) || isDirty(sibling)) continue;
+    // Dirty is the only reason left to pass one over: siblingCheckouts already
+    // narrowed these to checkouts sidecar owns. An edit in flight is transient,
+    // so leave it for that checkout's own next sync.
+    if (isDirty(sibling)) continue;
     if (git(sibling, ["merge", "--ff-only", config.branch], { check: false }).status === 0) settled += 1;
   }
   if (settled) logSidecarEvent("settle", { sidecarPath, siblings: settled });
@@ -1459,15 +1456,35 @@ function settleCheckouts(
  * authoritative set, it needs no bookkeeping to stay true, and it is right even
  * where the registry is unavailable.
  */
-function siblingCheckouts(sidecarPath: string): string[] {
+function siblingCheckouts(sidecarPath: string, config: SidecarConfig): string[] {
   const result = git(sidecarPath, ["worktree", "list", "--porcelain"], { check: false });
   if (result.status !== 0) return [];
   const self = realpathOr(sidecarPath);
-  return result.stdout
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith("worktree "))
-    .map((line) => line.slice("worktree ".length).trim())
-    .filter((checkout) => checkout && realpathOr(checkout) !== self);
+  const prefix = inboxPrefix(config);
+
+  // Only a checkout parked on an inbox branch is sidecar's. That rules out the
+  // detached merge scratch worktree, one mid-switch on the main branch, and — in
+  // a standalone repo, where the sidecar is the user's own repo — the user's own
+  // worktrees, whatever branch they hold. Narrowing here rather than at the
+  // point of use keeps the count honest: it is what decides whether the local
+  // phase is worth running at all, and worktrees it would never settle used to
+  // buy a whole merge pass that settled nothing.
+  //
+  // The listing already names each branch, so this costs no extra git call. A
+  // detached worktree has no branch line and so is never collected.
+  const siblings: string[] = [];
+  let checkout = "";
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (line.startsWith("worktree ")) {
+      checkout = line.slice("worktree ".length).trim();
+    } else if (line.startsWith("branch ")) {
+      const branch = line.slice("branch ".length).trim().replace(/^refs\/heads\//, "");
+      if (checkout && realpathOr(checkout) !== self && matchesInboxPrefix(prefix, branch)) {
+        siblings.push(checkout);
+      }
+    }
+  }
+  return siblings;
 }
 
 // ---------------------------------------------------------------------------

@@ -395,6 +395,29 @@ describe("sidecar CLI integration", () => {
     expect(fs.readFileSync(path.join(worktree, "sidecar", "offline.md"), "utf8")).toBe("offline\n");
   });
 
+  test("a standalone repo's own worktrees are neither settled nor counted as siblings", () => {
+    const { repo, remote, state } = initStandaloneRepo();
+    runSidecar(["init", "--path", "."], repo, { SIDECAR_STATE_DIR: state });
+    // In standalone mode the sidecar is the user's own repo, so `git worktree
+    // list` answers with the user's working copies. None of them are sidecar's.
+    const feature = path.join(tempDir(), "feature");
+    git(repo, ["worktree", "add", feature, "-b", "feature"]);
+    const featureHead = git(feature, ["rev-parse", "HEAD"]).stdout.trim();
+
+    fs.writeFileSync(path.join(repo, "note.md"), "note\n", "utf8");
+    const output = runSidecar(["sync"], repo, { SIDECAR_STATE_DIR: state });
+
+    // Untouched: settling the user's own branch would rewrite their tree.
+    expect(git(feature, ["rev-parse", "HEAD"]).stdout.trim()).toBe(featureHead);
+    expect(git(feature, ["branch", "--show-current"]).stdout.trim()).toBe("feature");
+    // And with nothing of sidecar's to settle, the local phase is skipped: the
+    // merge lands in the remote phase, after the inbox push, rather than being
+    // paid for once locally beforehand. Both spellings print one "merged" line,
+    // so the order is what tells them apart.
+    expect(output.indexOf("merging sidecar-inbox/")).toBeGreaterThan(output.indexOf("pushed sidecar-inbox/"));
+    expect(gitRaw(["--git-dir", remote, "show", "main:note.md"]).stdout).toBe("note\n");
+  });
+
   test("deinit in a secondary unregisters its worktree and leaves the primary whole", () => {
     const { main, worktree, state } = initWorktreeFamily();
     runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
