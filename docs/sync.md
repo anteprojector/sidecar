@@ -5,11 +5,13 @@ The global install owns automation. It registers a per-user daemon
 Windows) that:
 
 - watches up to 100 of the most recently synced registered sidecars with
-  chokidar; the first change syncs immediately, and further changes inside a
-  60-second quiet window collapse into one trailing sync at its close
-  (leading + trailing debounce). A save that lands while a sync is already
-  running is not lost either: when the sync finishes, the daemon checks the
-  checkout and immediately syncs again if that save left uncommitted work
+  chokidar. A change syncs within seconds — but most of those syncs stay
+  local: they settle this machine's working copies (below) and only make the
+  remote round trip once the 60-second debounce since the last one has
+  passed, so a burst of edits reaches sibling checkouts almost immediately
+  while the remote sees one sync a minute. A save that lands while a sync is
+  already running is not lost either: when the sync finishes, the daemon
+  checks the checkout and syncs again if that save left uncommitted work
 - syncs every registered repo on a 10-minute interval as a backstop — this is
   also the fallback on platforms where file watching is unreliable
 - runs each repo's project-local sidecar for the sync when one is installed,
@@ -46,7 +48,25 @@ a namespace the merge deliberately passes over, so a failure on one machine is
 visible from all the others without anything reaching the canonical branch. See
 [Fleet health](commands.md#fleet-health).
 
-A per-repo lock serializes syncs, and the two kinds of sync react differently
+## One machine, many working copies
+
+Working copies of one repo — git worktrees, jj workspaces — share a single
+sidecar clone. The working copy that owns the repo's VCS store keeps the
+clone; every other one gets a linked worktree of it, each still on its own
+inbox branch. Sharing an object store is what makes local sync near-instant:
+a sync merges inbox branches and settles this machine's checkouts first,
+before anything touches the network, so two agents in sibling worktrees see
+each other's notes in seconds even when the remote is unreachable. The
+remote round trip runs behind it; `sidecar sync --local` stops before it.
+
+Settling is deliberately timid: only a clean sibling checkout parked on its
+inbox branch is fast-forwarded, and one that cannot be settled is left for
+its own next sync. When the family cannot be resolved at all — an unreadable
+primary, mismatched remotes — a checkout simply gets its own clone, which is
+what it would have had anyway.
+
+A per-family lock (per-repo, when nothing shares the clone) serializes
+syncs, and the two kinds of sync react differently
 to finding it held. A manual `sidecar sync` (or `sidecar snapshot`) is a
 demand: it fails immediately with "another sidecar sync is already running" —
 rerun it once the other sync finishes. A daemon-triggered sync is a soft
