@@ -29,6 +29,7 @@ import {
   writeConfig,
   acquireSyncLock,
   acquireSyncLockOrThrow,
+  syncLockDir,
   daemonServiceFileContents,
   daemonServicePath,
   ensureIgnoreEntry,
@@ -233,7 +234,7 @@ describe("sync lock", () => {
     const second = acquireSyncLock(repo);
     expect(second).toBeDefined();
     // Simulate a crashed holder: overwrite the pid with one that cannot be running.
-    fs.writeFileSync(path.join(repo, ".git", "sidecar-sync-lock", "pid"), "999999999", "utf8");
+    fs.writeFileSync(path.join(syncLockDir(repo), "pid"), "999999999", "utf8");
     const stolen = acquireSyncLock(repo);
     expect(stolen).toBeDefined();
     stolen!();

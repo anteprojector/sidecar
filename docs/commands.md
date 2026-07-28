@@ -84,10 +84,14 @@ stopped contributing is visible from any other machine. `--json` prints the
 raw records; `--no-fetch` reads the refs already on disk instead of fetching
 first. See [Fleet health](#fleet-health) below.
 
-### `sidecar sync [--no-snapshot] [--soft] [-m|--message <text>]`
+### `sidecar sync [--local] [--no-snapshot] [--soft] [-m|--message <text>]`
 
-Snapshot local changes, push the inbox branch, merge all inbox branches into
-the canonical branch, and push it. `--no-snapshot` syncs without committing
+Snapshot local changes, settle this machine's other working copies of the
+same sidecar, push the inbox branch, merge all inbox branches into the
+canonical branch, and push it. `--local` stops after settling — no fetch, no
+push, nothing that needs the remote (see
+[One machine, many working copies](sync.md#one-machine-many-working-copies)).
+`--no-snapshot` syncs without committing
 local edits; `-m` sets the snapshot commit message. If another sync (usually
 the daemon's) holds the repo's sync lock, `sync` fails immediately with
 "another sidecar sync is already running" — rerun it once that sync finishes.
@@ -98,7 +102,7 @@ retries anyway.
 ### `sidecar snapshot [--push] [-m|--message <text>]`
 
 Commit local sidecar changes to the inbox branch without merging anything.
-`--push` also pushes the inbox branch. Takes the same per-repo lock as `sync`.
+`--push` also pushes the inbox branch. Takes the same sync lock as `sync`.
 
 ### `sidecar merge [--fork-files] [--no-push]`
 
@@ -114,8 +118,10 @@ against what is pushed, recomputed on demand from the working tree. See
 
 ### `sidecar clone [--if-missing]`
 
-Clone the configured sidecar repo (or update an existing checkout).
-`--if-missing` is a no-op when the checkout already exists.
+Clone the configured sidecar repo (or update an existing checkout). In a repo
+with several working copies — git worktrees, jj workspaces — the checkout is
+created as a linked worktree of the primary working copy's clone instead of a
+second clone. `--if-missing` is a no-op when the checkout already exists.
 
 ### `sidecar instances [--json]`
 
