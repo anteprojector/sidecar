@@ -1359,9 +1359,9 @@ function cmdSync(args: string[]): number {
   return 0;
 }
 
-/** Runs inside the repo's sync lock — callers hold it via withSyncLock. */
 /**
- * A sync in two phases, local first.
+ * A sync in two phases, local first. Runs inside the repo's sync lock —
+ * callers hold it via withSyncLock.
  *
  * The local phase captures this checkout's edits and settles them across every
  * working copy on this machine, touching nothing but the shared object store.
@@ -1409,7 +1409,6 @@ function syncProject(
   if (!options.remote) return;
 
   stage("push-inbox");
-  fetch(sidecarPath, true, false);
   syncBranchBeforePush(sidecarPath, inbox);
   pushBranch(sidecarPath, inbox);
   stage("merge");
@@ -1439,12 +1438,15 @@ function settleCheckouts(
 ): void {
   refreshInboxFromMain(sidecarPath, config, inbox);
 
+  const prefix = inboxPrefix(config);
   let settled = 0;
   for (const sibling of siblings) {
-    // A detached sibling is the merge scratch worktree, not a checkout; one
-    // parked on the main branch is mid-something and not ours to move.
+    // Only a checkout parked on an inbox branch is sidecar's to move. That
+    // rules out the detached merge scratch worktree, one mid-switch on the main
+    // branch, and — in a standalone repo, where the sidecar is the user's own
+    // repo — the user's other worktrees, whatever branch they hold.
     const branch = git(sibling, ["branch", "--show-current"], { check: false }).stdout.trim();
-    if (!branch || branch === config.branch || isDirty(sibling)) continue;
+    if (!matchesInboxPrefix(prefix, branch) || isDirty(sibling)) continue;
     if (git(sibling, ["merge", "--ff-only", config.branch], { check: false }).status === 0) settled += 1;
   }
   if (settled) logSidecarEvent("settle", { sidecarPath, siblings: settled });
@@ -2510,16 +2512,17 @@ export function showStage(repo: string, stage: number, conflictPath: string): Bu
  */
 export function pendingInboxBranches(repo: string, config: SidecarConfig): string[] {
   const prefix = inboxPrefix(config);
-  const matches = (branch: string): boolean =>
-    prefix.endsWith("/") ? branch.startsWith(prefix) : branch === prefix;
-
-  const local = refNames(repo, "refs/heads/").filter(matches);
+  const local = refNames(repo, "refs/heads/").filter((branch) => matchesInboxPrefix(prefix, branch));
   const claimed = new Set(local);
   const remote = refNames(repo, "refs/remotes/origin/").filter((ref) => {
     const branch = remoteBranchName(ref);
-    return ref !== "origin/HEAD" && matches(branch) && !claimed.has(branch);
+    return ref !== "origin/HEAD" && matchesInboxPrefix(prefix, branch) && !claimed.has(branch);
   });
   return [...local, ...remote].sort();
+}
+
+function matchesInboxPrefix(prefix: string, branch: string): boolean {
+  return prefix.endsWith("/") ? branch.startsWith(prefix) : branch === prefix;
 }
 
 function refNames(repo: string, namespace: string): string[] {

@@ -230,6 +230,10 @@ async function syncInstance(
     logSidecarEvent("daemon-defer", { root, trigger, reason: "family-busy" });
     state.trailingPending.add(root);
     if (!state.pendingTimers.has(root)) openTrailingWindow(state, root, SETTLE_WINDOW_MS);
+    // A deferred remote sync has to be rebooked here: the trailing window only
+    // re-syncs a dirty checkout, and a clean one can still owe the remote a
+    // push — which would otherwise wait for the interval poll.
+    if (!options.localOnly) armRemoteSync(state, root);
     return false;
   }
   state.syncing.add(root);
@@ -296,13 +300,11 @@ async function followUpTrailingSync(state: DaemonState, root: string): Promise<v
   await syncIfDirty(state, root, "watch-followup");
 }
 
+// Local unless the remote is due, like every other watch-driven sync: an edit
+// arriving mid-sync is no more urgent for the remote than one arriving after.
 async function syncIfDirty(state: DaemonState, root: string, trigger: string): Promise<void> {
-  if (await checkoutIsDirty(root)) void syncInstance(state, root, trigger);
-}
-
-async function trailingSync(state: DaemonState, root: string): Promise<void> {
   if (!(await checkoutIsDirty(root))) return;
-  void syncInstance(state, root, "watch-trailing", { localOnly: !remoteIsDue(state, root) });
+  void syncInstance(state, root, trigger, { localOnly: !remoteIsDue(state, root) });
 }
 
 async function checkoutIsDirty(root: string): Promise<boolean> {
@@ -424,7 +426,7 @@ function scheduleWatchSync(state: DaemonState, root: string): void {
 /**
  * The leading edge, where a dirty checkout answers both questions at once.
  *
- * Dirty means edits no sync has captured: sync now, and open the full debounce
+ * Dirty means edits no sync has captured: sync now, and open a settle window
  * behind it to collapse the burst still arriving. Clean means these writes were
  * not the user's — this checkout's own sync echo, or a sibling settling it out
  * of the shared object store — so there is nothing to capture and no sync to
@@ -454,18 +456,6 @@ async function beginWatchSync(state: DaemonState, root: string): Promise<void> {
 }
 
 /**
- * Whether this root has gone long enough without reaching the remote to be
- * worth the trip.
- *
- * Settling this machine and syncing with the other machines happen at
- * deliberately different rates. Settling is a local fast-forward out of an
- * object store the sibling worktrees already share, so it can run as often as
- * edits land; the round trip cannot, and `--debounce` is what governs it. One
- * window for both meant the second edit in a burst waited out the full debounce
- * before any sibling saw it — a minute, by default, to move a file between two
- * directories on the same disk.
- */
-/**
  * Books the round trip a local-only sync deferred.
  *
  * Settling leaves work owed to the remote, and once the editing stops there is
@@ -482,11 +472,25 @@ function armRemoteSync(state: DaemonState, root: string): void {
       state.remoteTimers.delete(root);
       void syncInstance(state, root, "remote-due");
     },
-    Math.max(0, state.options.debounceSeconds * 1000 - elapsed),
+    // The floor keeps an overdue sync rebooked against a busy family from
+    // retrying in a hot loop instead of at the settle cadence.
+    Math.max(SETTLE_WINDOW_MS, state.options.debounceSeconds * 1000 - elapsed),
   );
   state.remoteTimers.set(root, timer);
 }
 
+/**
+ * Whether this root has gone long enough without reaching the remote to be
+ * worth the trip.
+ *
+ * Settling this machine and syncing with the other machines happen at
+ * deliberately different rates. Settling is a local fast-forward out of an
+ * object store the sibling worktrees already share, so it can run as often as
+ * edits land; the round trip cannot, and `--debounce` is what governs it. One
+ * window for both meant the second edit in a burst waited out the full debounce
+ * before any sibling saw it — a minute, by default, to move a file between two
+ * directories on the same disk.
+ */
 function remoteIsDue(state: DaemonState, root: string): boolean {
   const last = state.lastRemoteSyncAt.get(root) ?? 0;
   return Date.now() - last >= state.options.debounceSeconds * 1000;
@@ -502,7 +506,7 @@ function openTrailingWindow(state: DaemonState, root: string, delayMs: number): 
       state.trailingPending.add(root);
       return;
     }
-    void trailingSync(state, root);
+    void syncIfDirty(state, root, "watch-trailing");
   }, delayMs);
   state.pendingTimers.set(root, timer);
 }

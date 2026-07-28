@@ -1416,6 +1416,8 @@ async function syncInstance(state, root, trigger, options = {}) {
     state.trailingPending.add(root);
     if (!state.pendingTimers.has(root))
       openTrailingWindow(state, root, SETTLE_WINDOW_MS);
+    if (!options.localOnly)
+      armRemoteSync(state, root);
     return false;
   }
   state.syncing.add(root);
@@ -1475,13 +1477,9 @@ async function followUpTrailingSync(state, root) {
   await syncIfDirty(state, root, "watch-followup");
 }
 async function syncIfDirty(state, root, trigger) {
-  if (await checkoutIsDirty(root))
-    syncInstance(state, root, trigger);
-}
-async function trailingSync(state, root) {
   if (!await checkoutIsDirty(root))
     return;
-  syncInstance(state, root, "watch-trailing", { localOnly: !remoteIsDue(state, root) });
+  syncInstance(state, root, trigger, { localOnly: !remoteIsDue(state, root) });
 }
 async function checkoutIsDirty(root) {
   const sidecarPath = readInstances().find((instance) => instance.root === root)?.sidecarPath;
@@ -1607,7 +1605,7 @@ function armRemoteSync(state, root) {
   const timer = setTimeout(() => {
     state.remoteTimers.delete(root);
     syncInstance(state, root, "remote-due");
-  }, Math.max(0, state.options.debounceSeconds * 1000 - elapsed));
+  }, Math.max(SETTLE_WINDOW_MS, state.options.debounceSeconds * 1000 - elapsed));
   state.remoteTimers.set(root, timer);
 }
 function remoteIsDue(state, root) {
@@ -1624,7 +1622,7 @@ function openTrailingWindow(state, root, delayMs) {
       state.trailingPending.add(root);
       return;
     }
-    trailingSync(state, root);
+    syncIfDirty(state, root, "watch-trailing");
   }, delayMs);
   state.pendingTimers.set(root, timer);
 }
@@ -2914,7 +2912,6 @@ function syncProject(root, config, options) {
   if (!options.remote)
     return;
   stage("push-inbox");
-  fetch(sidecarPath, true, false);
   syncBranchBeforePush(sidecarPath, inbox);
   pushBranch(sidecarPath, inbox);
   stage("merge");
@@ -2924,10 +2921,11 @@ function syncProject(root, config, options) {
 }
 function settleCheckouts(sidecarPath, config, inbox, siblings) {
   refreshInboxFromMain(sidecarPath, config, inbox);
+  const prefix = inboxPrefix(config);
   let settled = 0;
   for (const sibling of siblings) {
     const branch = git(sibling, ["branch", "--show-current"], { check: false }).stdout.trim();
-    if (!branch || branch === config.branch || isDirty(sibling))
+    if (!matchesInboxPrefix(prefix, branch) || isDirty(sibling))
       continue;
     if (git(sibling, ["merge", "--ff-only", config.branch], { check: false }).status === 0)
       settled += 1;
@@ -3644,14 +3642,16 @@ function showStage(repo, stage, conflictPath) {
 }
 function pendingInboxBranches(repo, config) {
   const prefix = inboxPrefix(config);
-  const matches = (branch) => prefix.endsWith("/") ? branch.startsWith(prefix) : branch === prefix;
-  const local = refNames(repo, "refs/heads/").filter(matches);
+  const local = refNames(repo, "refs/heads/").filter((branch) => matchesInboxPrefix(prefix, branch));
   const claimed = new Set(local);
   const remote = refNames(repo, "refs/remotes/origin/").filter((ref) => {
     const branch = remoteBranchName(ref);
-    return ref !== "origin/HEAD" && matches(branch) && !claimed.has(branch);
+    return ref !== "origin/HEAD" && matchesInboxPrefix(prefix, branch) && !claimed.has(branch);
   });
   return [...local, ...remote].sort();
+}
+function matchesInboxPrefix(prefix, branch) {
+  return prefix.endsWith("/") ? branch.startsWith(prefix) : branch === prefix;
 }
 function refNames(repo, namespace) {
   return git(repo, ["for-each-ref", "--format=%(refname:short)", namespace]).stdout.split(/\r?\n/).map((ref) => ref.trim()).filter(Boolean);

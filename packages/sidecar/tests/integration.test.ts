@@ -1612,7 +1612,8 @@ describe("sidecar CLI integration", () => {
     runSidecar(["sync"], second, { SIDECAR_STATE_DIR: state });
     runSidecar(["sync"], repo, { SIDECAR_STATE_DIR: state });
     expect(fs.readFileSync(path.join(repo, "aliases.sh"), "utf8")).toBe("alias g=git\n");
-  });
+    // Two machines, two inits, and four syncs; runs close to the default.
+  }, 30000);
 
   test("deinit releases a standalone repo instead of deleting it", () => {
     const { repo, state } = initStandaloneRepo();
