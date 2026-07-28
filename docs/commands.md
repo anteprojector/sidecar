@@ -51,7 +51,8 @@ global daemon, and (interactively) offers to install a missing global sidecar
 and to make the checkout searchable in Zed. When the repo has a
 `package.json`, it offers to add the `sidecarsync` devDependency —
 the package's postinstall is what makes a fresh clone self-register with the
-machine's daemon on plain install (see [install.md](install.md)). It never
+machine's daemon on plain install, provided that machine has a global sidecar
+(see [install.md](install.md)). It never
 edits `package.json` without asking. When not attached to a terminal, every
 optional prompt defaults to no.
 
@@ -189,10 +190,17 @@ colored is worth reading:
 | yellow | the sidecar — its checkout path and the remote it syncs with |
 | **bold yellow** | something is waiting on you: `dirty: yes`, a pending inbox count, a detached checkout, or a checkout parked off its inbox branch |
 | green | `daemon: running` |
-| red | the daemon should be running and isn't, or the checkout is missing |
+| red | the daemon should be running and isn't, no global install owns one, or the checkout is missing |
 
 `daemon:` is dim rather than colored when this install can't run one — a
-project-local sidecar has no daemon of its own, so it reports `no global install`.
+project-local sidecar has no daemon of its own, so it reports `owned by the
+global install`. If there is no global install on the machine, though, nothing
+owns a daemon and this repo will never sync on its own, so the line turns red
+and says so along with the command to fix it. A `checkout: missing` line names
+the command that fixes it too — `sidecar init`, which on an already-configured
+repo clones the checkout and registers it rather than asking anything. The two
+lines together are what a fresh clone sees when its `bun install`/`npm install`
+found no global sidecar to clone for (see [install.md](install.md)).
 `last sync:` comes from the machine-level instance registry and is never colored
 by age: a sidecar only syncs when something changed, so a quiet week is normal.
 

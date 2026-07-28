@@ -3705,7 +3705,7 @@ function cmdStatus(args) {
   statusLine("main branch", config.branch);
   statusLine("inbox branch", inbox);
   if (!checkoutPresent) {
-    statusLine("checkout", "missing", "bad");
+    statusLine("checkout", "missing — run `sidecar init`", "bad");
     printDaemonLine();
     printLastSyncLine(root);
     return 0;
@@ -3746,6 +3746,7 @@ function cmdStatusJson() {
     branch: config.branch,
     inbox,
     checkout: checkoutPresent ? "present" : "missing",
+    globalInstall: shouldUseGlobalRegistry() || Boolean(findGlobalSidecarExecutable()),
     currentBranch: branch || undefined,
     dirty: checkoutPresent ? Boolean(git(sidecarPath, ["status", "--porcelain"]).stdout.trim()) : undefined,
     daemon: daemonHealth().text,
@@ -3761,8 +3762,12 @@ function pendingStatusInboxBranches(sidecarPath, config) {
   return pendingInboxBranches(sidecarPath, config).filter((remoteBranch) => !isAncestor(sidecarPath, remoteBranch, base));
 }
 function daemonHealth() {
-  if (!shouldUseGlobalRegistry())
-    return { text: "no global install", role: "quiet" };
+  if (!shouldUseGlobalRegistry()) {
+    if (!findGlobalSidecarExecutable()) {
+      return { text: `no global install — nothing syncs; \`npm install -g ${PACKAGE_SPEC}\``, role: "bad" };
+    }
+    return { text: "owned by the global install", role: "quiet" };
+  }
   const service = daemonServiceStatus();
   if (!service.available)
     return { text: service.message ?? "unavailable", role: "quiet" };

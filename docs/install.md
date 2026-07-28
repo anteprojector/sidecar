@@ -21,8 +21,11 @@ pnpm (`pnpm.onlyBuiltDependencies`) needs, since both block lifecycle scripts
 by default. With no lockfile, init warns that it can't tell. The payoff is on
 the next machine: the package's postinstall clones a missing checkout and
 registers the repo with the global daemon, so a fresh clone self-registers on
-plain `npm install`/`bun install` — provided the global sidecar is already
-installed there. Init never edits `package.json` without asking.
+plain `npm install`/`bun install`. It does this only when a global sidecar is
+already installed there — the global install is what owns the daemon, so
+without it a cloned checkout would sit there never syncing. With no global
+install the postinstall clones nothing and prints how to install one, after
+which `sidecar init` sets the repo up. Init never edits `package.json` without asking.
 
 When the dependency is present, the newest install wins: the `sidecar`
 command compares the project-local version against its own and runs

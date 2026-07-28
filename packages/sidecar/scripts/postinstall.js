@@ -14,8 +14,7 @@ try {
     enableDaemon(packageRoot);
     recordInstallSource(packageRoot);
   } else {
-    cloneIfMissing(packageRoot);
-    registerWithGlobalSidecar(packageRoot);
+    setUpLocalInstall(packageRoot);
   }
 } catch (error) {
   console.warn(`sidecar: postinstall failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -61,10 +60,36 @@ function recordInstallSource(packageRoot) {
   });
 }
 
-function cloneIfMissing(packageRoot) {
+// The global install owns the daemon, so it is what makes a cloned checkout
+// actually sync. Without it a clone here would leave the user with a sidecar
+// directory that silently never updates — worse than no checkout at all.
+function setUpLocalInstall(packageRoot) {
   const projectRoot = findInstallProjectRoot();
   if (!projectRoot || !fs.existsSync(path.join(projectRoot, ".sidecar"))) return;
 
+  const globalSidecar = findGlobalSidecar(packageRoot);
+  if (!globalSidecar) {
+    warnMissingGlobalSidecar();
+    return;
+  }
+
+  cloneIfMissing(packageRoot, projectRoot);
+  registerWithGlobalSidecar(globalSidecar, projectRoot);
+}
+
+function warnMissingGlobalSidecar() {
+  console.warn(
+    [
+      "sidecar: no global install found, so this repo's sidecar checkout was not cloned.",
+      "sidecar: without the global install there is no daemon, and nothing would sync.",
+      "sidecar: install it, then set this repo up:",
+      "sidecar:   npm install -g sidecarsync",
+      "sidecar:   sidecar init",
+    ].join("\n"),
+  );
+}
+
+function cloneIfMissing(packageRoot, projectRoot) {
   const cliPath = path.join(packageRoot, "dist", "cli.js");
   if (!fs.existsSync(cliPath)) return;
 
@@ -80,13 +105,7 @@ function cloneIfMissing(packageRoot) {
   if (output) console.warn(output);
 }
 
-function registerWithGlobalSidecar(packageRoot) {
-  const projectRoot = findInstallProjectRoot();
-  if (!projectRoot || !fs.existsSync(path.join(projectRoot, ".sidecar"))) return;
-
-  const globalSidecar = findGlobalSidecar(packageRoot);
-  if (!globalSidecar) return;
-
+function registerWithGlobalSidecar(globalSidecar, projectRoot) {
   const result = spawnSync(globalSidecar, ["register-install"], {
     cwd: projectRoot,
     encoding: "utf8",
