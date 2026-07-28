@@ -335,12 +335,9 @@ function cmdDeinit(args: string[]): number {
     const ignoreEntry = ignoreEntryForSidecarPath(root, config.path);
     if (ignoreEntry) {
       removeIgnoreEntry(path.join(root, ".gitignore"), ignoreEntry);
-      const commonDir = gitCommonDirOptional(root);
-      if (commonDir) removeIgnoreEntry(path.join(commonDir, "info", "exclude"), ignoreEntry);
       removeZedInclusion(root, ignoreEntry);
     }
   }
-  removeLegacyGitHooks(root);
   unregisterInstance(root);
 
   console.log(`removed sidecar from ${paint("repo", root)}`);
@@ -426,9 +423,6 @@ function cmdInit(args: string[]): number {
     printCheckoutVisibility(root, config);
   }
   offerLocalInstall(root, config, parsed.flags.has("--local-install"));
-  if (removeLegacyGitHooks(root)) {
-    console.log("removed legacy sidecar git hooks; syncing is manual or via the global daemon");
-  }
 
   if (!parsed.flags.has("--no-clone")) {
     cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
@@ -734,7 +728,6 @@ function cmdClone(args: string[]): number {
   if (parsed.positional.length) throw new SidecarError("usage: sidecar clone [--if-missing] [--no-bootstrap-main]");
 
   const [root, config] = loadProject();
-  removeLegacyGitHooks(root);
   if (parsed.flags.has("--if-missing")) {
     const sidecarPath = resolveSidecarPath(root, config);
     if (fs.existsSync(sidecarPath) && hasGitMetadata(sidecarPath)) return 0;
@@ -1320,7 +1313,6 @@ function cmdSync(args: string[]): number {
   }
 
   const [root, config] = loadProject();
-  removeLegacyGitHooks(root);
   // A soft sync is a request, not a demand: the daemon issues them, and one
   // that loses the lock to a running sync can no-op because the interval or
   // watcher will simply request again. A manual sync must never pretend.
@@ -1622,15 +1614,12 @@ function readFleetHealth(sidecarPath: string): FleetHealthEntry[] {
 
 function cmdMerge(args: string[]): number {
   const parsed = parseOptions(args, {
-    boolean: new Set(["--fork-files", "--llm", "--delete-merged-inbox", "--no-push"]),
+    boolean: new Set(["--fork-files", "--llm", "--no-push"]),
     value: new Set(),
   });
   if (parsed.positional.length) throw new SidecarError("usage: sidecar merge [--fork-files] [--no-push]");
   if (parsed.flags.has("--llm")) {
     throw new SidecarError("--llm is reserved for a configured resolver; use --fork-files for now");
-  }
-  if (parsed.flags.has("--delete-merged-inbox")) {
-    throw new SidecarError("--delete-merged-inbox is no longer supported; merged inbox branches are kept and skipped by ancestry");
   }
   if (!parsed.flags.has("--fork-files")) {
     console.log("sidecar: conflicts will stop the merge; pass --fork-files to preserve all versions");
@@ -3568,45 +3557,6 @@ function redactionModeConfigValue(value: string, source: string): RedactionMode 
   );
 }
 
-// Earlier sidecar versions installed background-sync git hooks in local
-// installs. Local sidecar is now manual-sync only, so every command that
-// touches a project removes any hooks a previous version left behind.
-const LEGACY_HOOK_NAMES = ["post-commit", "pre-push"] as const;
-const LEGACY_HOOK_HELPER = "sidecar-sync-hook";
-const LEGACY_HOOK_MARKER = "sidecar-sync";
-const LEGACY_SYNC_STAMP_FILE = "sidecar-last-sync";
-
-export function removeLegacyGitHooks(root: string): boolean {
-  let removed = false;
-  try {
-    const commonDir = gitCommonDir(root);
-    const hooksDir = path.join(commonDir, "hooks");
-    for (const name of LEGACY_HOOK_NAMES) {
-      const hookPath = path.join(hooksDir, name);
-      if (!fs.existsSync(hookPath)) continue;
-      const lines = fs.readFileSync(hookPath, "utf8").split("\n");
-      const kept = lines.filter((line) => !line.includes(LEGACY_HOOK_MARKER));
-      if (kept.length === lines.length) continue;
-      if (kept.every((line) => !line.trim() || line.trim() === "#!/bin/sh")) {
-        fs.rmSync(hookPath);
-      } else {
-        fs.writeFileSync(hookPath, `${kept.join("\n").replace(/\n*$/, "\n")}`, "utf8");
-      }
-      removed = true;
-    }
-    const helperPath = path.join(hooksDir, LEGACY_HOOK_HELPER);
-    if (fs.existsSync(helperPath)) {
-      fs.rmSync(helperPath);
-      removed = true;
-    }
-    fs.rmSync(path.join(commonDir, LEGACY_SYNC_STAMP_FILE), { force: true });
-  } catch {
-    // Cleanup is best-effort; never block the command that triggered it.
-  }
-  if (removed) logSidecarEvent("legacy-hooks-removed", { root });
-  return removed;
-}
-
 /**
  * Where a repo's sync lock lives.
  *
@@ -3698,8 +3648,6 @@ export function ensureSidecarIgnored(root: string, sidecarPath: string): string 
   const entry = ignoreEntryForSidecarPath(root, sidecarPath);
   if (!entry) return undefined;
   ensureIgnoreEntry(path.join(root, ".gitignore"), entry);
-  // Interim sidecar versions wrote the entry to .git/info/exclude instead.
-  removeIgnoreEntry(path.join(gitCommonDir(root), "info", "exclude"), entry);
   return entry;
 }
 

@@ -2045,13 +2045,9 @@ function cmdDeinit(args) {
     const ignoreEntry = ignoreEntryForSidecarPath(root, config.path);
     if (ignoreEntry) {
       removeIgnoreEntry(path2.join(root, ".gitignore"), ignoreEntry);
-      const commonDir = gitCommonDirOptional(root);
-      if (commonDir)
-        removeIgnoreEntry(path2.join(commonDir, "info", "exclude"), ignoreEntry);
       removeZedInclusion(root, ignoreEntry);
     }
   }
-  removeLegacyGitHooks(root);
   unregisterInstance(root);
   console.log(`removed sidecar from ${paint("repo", root)}`);
   if (leftovers.length) {
@@ -2109,9 +2105,6 @@ function cmdInit(args) {
     printCheckoutVisibility(root, config);
   }
   offerLocalInstall(root, config, parsed.flags.has("--local-install"));
-  if (removeLegacyGitHooks(root)) {
-    console.log("removed legacy sidecar git hooks; syncing is manual or via the global daemon");
-  }
   if (!parsed.flags.has("--no-clone")) {
     cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   }
@@ -2361,7 +2354,6 @@ function cmdClone(args) {
   if (parsed.positional.length)
     throw new SidecarError("usage: sidecar clone [--if-missing] [--no-bootstrap-main]");
   const [root, config] = loadProject();
-  removeLegacyGitHooks(root);
   if (parsed.flags.has("--if-missing")) {
     const sidecarPath = resolveSidecarPath(root, config);
     if (fs2.existsSync(sidecarPath) && hasGitMetadata(sidecarPath))
@@ -2860,7 +2852,6 @@ function cmdSync(args) {
     throw new SidecarError("usage: sidecar sync [--local] [--no-snapshot] [--soft] [-m message]");
   }
   const [root, config] = loadProject();
-  removeLegacyGitHooks(root);
   const soft = parsed.flags.has("--soft") || process.env[SOFT_SYNC_ENV] === "1";
   let stage = "start";
   let synced;
@@ -3027,16 +3018,13 @@ function readFleetHealth(sidecarPath) {
 }
 function cmdMerge(args) {
   const parsed = parseOptions(args, {
-    boolean: new Set(["--fork-files", "--llm", "--delete-merged-inbox", "--no-push"]),
+    boolean: new Set(["--fork-files", "--llm", "--no-push"]),
     value: new Set
   });
   if (parsed.positional.length)
     throw new SidecarError("usage: sidecar merge [--fork-files] [--no-push]");
   if (parsed.flags.has("--llm")) {
     throw new SidecarError("--llm is reserved for a configured resolver; use --fork-files for now");
-  }
-  if (parsed.flags.has("--delete-merged-inbox")) {
-    throw new SidecarError("--delete-merged-inbox is no longer supported; merged inbox branches are kept and skipped by ancestry");
   }
   if (!parsed.flags.has("--fork-files")) {
     console.log("sidecar: conflicts will stop the merge; pass --fork-files to preserve all versions");
@@ -4545,40 +4533,6 @@ function redactionModeConfigValue(value, source) {
     return value;
   throw new SidecarError(`${source}: invalid redaction mode ${JSON.stringify(value)}; expected one of ${REDACTION_MODES.join(", ")}`);
 }
-function removeLegacyGitHooks(root) {
-  let removed = false;
-  try {
-    const commonDir = gitCommonDir(root);
-    const hooksDir = path2.join(commonDir, "hooks");
-    for (const name of LEGACY_HOOK_NAMES) {
-      const hookPath = path2.join(hooksDir, name);
-      if (!fs2.existsSync(hookPath))
-        continue;
-      const lines = fs2.readFileSync(hookPath, "utf8").split(`
-`);
-      const kept = lines.filter((line) => !line.includes(LEGACY_HOOK_MARKER));
-      if (kept.length === lines.length)
-        continue;
-      if (kept.every((line) => !line.trim() || line.trim() === "#!/bin/sh")) {
-        fs2.rmSync(hookPath);
-      } else {
-        fs2.writeFileSync(hookPath, `${kept.join(`
-`).replace(/\n*$/, `
-`)}`, "utf8");
-      }
-      removed = true;
-    }
-    const helperPath = path2.join(hooksDir, LEGACY_HOOK_HELPER);
-    if (fs2.existsSync(helperPath)) {
-      fs2.rmSync(helperPath);
-      removed = true;
-    }
-    fs2.rmSync(path2.join(commonDir, LEGACY_SYNC_STAMP_FILE), { force: true });
-  } catch {}
-  if (removed)
-    logSidecarEvent("legacy-hooks-removed", { root });
-  return removed;
-}
 function syncLockDir(root) {
   const family = familyPrimaryRoot(root) ?? root;
   const key = crypto.createHash("sha256").update(realpathOr2(family)).digest("hex").slice(0, 16);
@@ -4646,7 +4600,6 @@ function ensureSidecarIgnored(root, sidecarPath) {
   if (!entry)
     return;
   ensureIgnoreEntry(path2.join(root, ".gitignore"), entry);
-  removeIgnoreEntry(path2.join(gitCommonDir(root), "info", "exclude"), entry);
   return entry;
 }
 function ensureIgnoreEntry(ignorePath, sidecarPath) {
@@ -4933,7 +4886,7 @@ function nowIso() {
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
-var DEFAULT_PATH = "sidecar", DEFAULT_BRANCH = "main", DEFAULT_INBOX = "sidecar-inbox/{user}/{random}", PACKAGE_NAME = "sidecarsync", PACKAGE_SPEC = "sidecarsync", GLOBAL_EXEC_ENV2 = "SIDECAR_GLOBAL_EXEC", SKIP_LOCAL_EXEC_ENV2 = "SIDECAR_SKIP_LOCAL_EXEC", STATE_DIR_ENV = "SIDECAR_STATE_DIR", SOFT_SYNC_ENV = "SIDECAR_SYNC_SOFT", LOCAL_SYNC_ENV = "SIDECAR_SYNC_LOCAL", SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE", DAEMON_LABEL = "com.anteprojector.sidecar", SidecarError, INSTALL_SOURCES, KNOWN_COMMANDS, STATUS_LABEL_WIDTH, DAEMON_LABEL_WIDTH, REDACTION_FILTER_NAME = "sidecar-redact", DEFAULT_SETTINGS, LOG_ROTATE_BYTES = 5242880, LEGACY_HOOK_NAMES, LEGACY_HOOK_HELPER = "sidecar-sync-hook", LEGACY_HOOK_MARKER = "sidecar-sync", LEGACY_SYNC_STAMP_FILE = "sidecar-last-sync";
+var DEFAULT_PATH = "sidecar", DEFAULT_BRANCH = "main", DEFAULT_INBOX = "sidecar-inbox/{user}/{random}", PACKAGE_NAME = "sidecarsync", PACKAGE_SPEC = "sidecarsync", GLOBAL_EXEC_ENV2 = "SIDECAR_GLOBAL_EXEC", SKIP_LOCAL_EXEC_ENV2 = "SIDECAR_SKIP_LOCAL_EXEC", STATE_DIR_ENV = "SIDECAR_STATE_DIR", SOFT_SYNC_ENV = "SIDECAR_SYNC_SOFT", LOCAL_SYNC_ENV = "SIDECAR_SYNC_LOCAL", SKIP_SERVICE_ENV = "SIDECAR_SKIP_SERVICE", DAEMON_LABEL = "com.anteprojector.sidecar", SidecarError, INSTALL_SOURCES, KNOWN_COMMANDS, STATUS_LABEL_WIDTH, DAEMON_LABEL_WIDTH, REDACTION_FILTER_NAME = "sidecar-redact", DEFAULT_SETTINGS, LOG_ROTATE_BYTES = 5242880;
 var init_cli = __esm(() => {
   init_dist();
   init_color();
@@ -4969,7 +4922,6 @@ var init_cli = __esm(() => {
   STATUS_LABEL_WIDTH = "pending inbox:".length;
   DAEMON_LABEL_WIDTH = "settings:".length;
   DEFAULT_SETTINGS = { daemonEnabled: true, autoUpdate: true };
-  LEGACY_HOOK_NAMES = ["post-commit", "pre-push"];
 });
 
 // src/bin.ts

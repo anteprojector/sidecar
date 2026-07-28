@@ -38,7 +38,6 @@ import {
   ignoreEntryForSidecarPath,
   removeIgnoreEntry,
   removeZedInclusion,
-  removeLegacyGitHooks,
   lastLines,
   parseGitHubRemote,
   formatLocalTimestamp,
@@ -178,47 +177,6 @@ describe("config", () => {
     expect(ignoreEntryForSidecarPath(root, "sidecar")).toBe("sidecar");
     expect(ignoreEntryForSidecarPath(root, path.join(root, "sidecar"))).toBe("sidecar");
     expect(ignoreEntryForSidecarPath(root, "../external-sidecar")).toBeUndefined();
-  });
-});
-
-describe("legacy git hooks", () => {
-  test("removal deletes sidecar-owned hooks but preserves foreign hook content", () => {
-    process.env.SIDECAR_STATE_DIR = tempDir();
-    const repo = initRepo();
-    const hooksDir = path.join(repo, ".git", "hooks");
-    fs.mkdirSync(hooksDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(hooksDir, "post-commit"),
-      '#!/bin/sh\n"$(dirname -- "$0")/sidecar-sync-hook" post-commit "$@" # sidecar-sync\n',
-      "utf8",
-    );
-    fs.writeFileSync(
-      path.join(hooksDir, "pre-push"),
-      '#!/bin/sh\necho existing\n"$(dirname -- "$0")/sidecar-sync-hook" pre-push "$@" # sidecar-sync\n',
-      "utf8",
-    );
-    fs.writeFileSync(path.join(hooksDir, "sidecar-sync-hook"), "#!/bin/sh\nexit 0\n", "utf8");
-    fs.writeFileSync(path.join(repo, ".git", "sidecar-last-sync"), "0", "utf8");
-
-    expect(removeLegacyGitHooks(repo)).toBe(true);
-
-    expect(fs.existsSync(path.join(hooksDir, "post-commit"))).toBe(false);
-    expect(fs.existsSync(path.join(hooksDir, "sidecar-sync-hook"))).toBe(false);
-    expect(fs.existsSync(path.join(repo, ".git", "sidecar-last-sync"))).toBe(false);
-    const prePush = fs.readFileSync(path.join(hooksDir, "pre-push"), "utf8");
-    expect(prePush).toContain("echo existing");
-    expect(prePush).not.toContain("sidecar-sync");
-  });
-
-  test("removal leaves unrelated hooks alone and reports nothing removed", () => {
-    const repo = initRepo();
-    const hooksDir = path.join(repo, ".git", "hooks");
-    fs.mkdirSync(hooksDir, { recursive: true });
-    fs.writeFileSync(path.join(hooksDir, "pre-push"), "#!/bin/sh\necho existing\n", "utf8");
-
-    expect(removeLegacyGitHooks(repo)).toBe(false);
-
-    expect(fs.readFileSync(path.join(hooksDir, "pre-push"), "utf8")).toContain("echo existing");
   });
 });
 

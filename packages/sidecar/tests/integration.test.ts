@@ -122,19 +122,6 @@ describe("sidecar CLI integration", () => {
     expect(fs.readFileSync(path.join(main, ".sidecar"), "utf8")).toBe(configBefore);
   });
 
-  test("init migrates an interim .git/info/exclude entry back to .gitignore", () => {
-    const main = initMainRepo();
-    const remote = initBareRemote();
-    const excludePath = path.join(main, ".git", "info", "exclude");
-    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-    fs.writeFileSync(excludePath, "# comment\n/sidecar/\n", "utf8");
-
-    runSidecar(["init", remote, "--no-clone"], main);
-
-    expect(fs.readFileSync(path.join(main, ".gitignore"), "utf8")).toContain("/sidecar/");
-    expect(fs.readFileSync(excludePath, "utf8")).not.toContain("/sidecar/");
-  });
-
   test("deinit deletes artifacts created by init while preserving unrelated project configuration", () => {
     const main = initMainRepo();
     const remote = initBareRemote();
@@ -211,33 +198,11 @@ describe("sidecar CLI integration", () => {
     expect(fs.readFileSync(path.join(main, "sidecar", "keep.txt"), "utf8")).toBe("not managed by Sidecar\n");
   });
 
-  test("init does not install git hooks and sync removes hooks left by old versions", () => {
+  test("init does not install git hooks", () => {
     const { main } = initSidecarProject();
     const hooksDir = path.join(main, ".git", "hooks");
     expect(fs.existsSync(path.join(hooksDir, "post-commit"))).toBe(false);
     expect(fs.existsSync(path.join(hooksDir, "pre-push"))).toBe(false);
-    expect(fs.existsSync(path.join(hooksDir, "sidecar-sync-hook"))).toBe(false);
-
-    // Simulate hooks written by an earlier sidecar version.
-    fs.mkdirSync(hooksDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(hooksDir, "post-commit"),
-      '#!/bin/sh\n"$(dirname -- "$0")/sidecar-sync-hook" post-commit "$@" # sidecar-sync\n',
-      "utf8",
-    );
-    fs.writeFileSync(
-      path.join(hooksDir, "pre-push"),
-      '#!/bin/sh\necho custom\n"$(dirname -- "$0")/sidecar-sync-hook" pre-push "$@" # sidecar-sync\n',
-      "utf8",
-    );
-    fs.writeFileSync(path.join(hooksDir, "sidecar-sync-hook"), "#!/bin/sh\nexit 0\n", "utf8");
-
-    runSidecar(["sync"], main);
-
-    expect(fs.existsSync(path.join(hooksDir, "post-commit"))).toBe(false);
-    const prePush = fs.readFileSync(path.join(hooksDir, "pre-push"), "utf8");
-    expect(prePush).toContain("echo custom");
-    expect(prePush).not.toContain("sidecar-sync");
     expect(fs.existsSync(path.join(hooksDir, "sidecar-sync-hook"))).toBe(false);
   });
 
