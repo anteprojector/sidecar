@@ -15,7 +15,15 @@ import {
   nowIso,
   parseOptions,
 } from "./util.js";
-import { git, gitToplevel, gitToplevelOptional } from "./git.js";
+import {
+  familyPrimaryRoot,
+  fetch,
+  git,
+  gitToplevel,
+  gitToplevelOptional,
+  hasGitMetadata,
+  isDirty,
+} from "./git.js";
 import {
   GLOBAL_EXEC_ENV,
   PACKAGE_NAME,
@@ -31,6 +39,7 @@ import {
   DEFAULT_INBOX,
   DEFAULT_PATH,
   type SidecarConfig,
+  expandInbox,
   findConfigRootOptional,
   isStandalone,
   isStandalonePath,
@@ -38,6 +47,8 @@ import {
   pathIsRepoRoot,
   readConfig,
   redactionModeConfigValue,
+  requireSidecarCheckout,
+  resolveSidecarPath,
   validateBranch,
   validateInboxTemplate,
   validateRemote,
@@ -45,7 +56,16 @@ import {
 } from "./config.js";
 import { readSettings, registerCurrentInstance, unregisterInstance, withSyncLock, writeSettings } from "./state.js";
 import { SKIP_SERVICE_ENV, daemonServiceStatus } from "./service.js";
-import { cloneIfMissing, cloneOrUpdate, removeRedactionFilter, syncProject } from "./sync.js";
+import {
+  branchIsCheckedOut,
+  checkoutIsUnlinkedFromFamily,
+  cloneOrUpdate,
+  familySidecarCheckout,
+  refreshFamilyCheckout,
+  removeRedactionFilter,
+  syncProject,
+  unpushedInboxCommits,
+} from "./sync.js";
 import { promptLine, promptYesNo, promptYesNoDefaultNo } from "./ui.js";
 import { DEFAULT_REDACTION_MODE, REDACTION_MODES, type RedactionMode } from "./redaction.js";
 
@@ -462,11 +482,99 @@ export function cmdClone(args: string[]): number {
 
   const [root, config] = loadProject();
   if (parsed.flags.has("--if-missing")) {
-    if (!cloneIfMissing(root, config, !parsed.flags.has("--no-bootstrap-main"))) return 0;
-  } else {
-    cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
+    const sidecarPath = resolveSidecarPath(root, config);
+    if (fs.existsSync(sidecarPath) && hasGitMetadata(sidecarPath)) return 0;
   }
+  cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   registerCurrentInstance(root, config, { event: "clone" });
+  return 0;
+}
+
+/**
+ * Rebuilds an independent secondary checkout as a linked worktree of the one its
+ * repo family shares.
+ *
+ * This is the only thing that converts a checkout, and it only ever runs because
+ * someone typed it. An unlinked checkout is slow, not broken, so nothing about it
+ * justifies an unprompted rewrite of a directory holding the user's notes — the
+ * install hooks and the daemon report it and leave it alone.
+ *
+ * Everything that has reached the remote survives; everything that has not is
+ * discarded. Rather than try to rescue the difference, refuse while there is a
+ * difference to rescue and name the command that removes it. `--force` is for
+ * people who mean to throw the work away.
+ */
+export function cmdRefresh(args: string[]): number {
+  const parsed = parseOptions(args, {
+    boolean: new Set(["--force", "--yes", "-y"]),
+    value: new Set(),
+  });
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar refresh [--force] [--yes]");
+
+  const [root, config] = loadProject();
+  const sidecarPath = requireSidecarCheckout(root, config);
+  if (!checkoutIsUnlinkedFromFamily(root, config, sidecarPath)) {
+    console.log("this sidecar checkout already shares its repo family's Git store; nothing to refresh");
+    return 0;
+  }
+
+  const inbox = expandInbox(config, sidecarPath);
+  const primary = familyPrimaryRoot(root);
+  // origin/<inbox> is what decides how much is unpushed, so it has to be current
+  // before anything is counted against it. A refresh with an unreachable remote
+  // can only be a --force.
+  fetch(sidecarPath, true, false);
+  const unpushed = unpushedInboxCommits(sidecarPath, config, inbox);
+  const dirtyFiles = git(sidecarPath, ["status", "--porcelain"]).stdout.split("\n").filter(Boolean).length;
+
+  console.log(`${paint("brand", sidecarPath)} is an independent clone of ${paint("brand", config.remote)}.`);
+  if (primary) {
+    console.log(`this repo family shares a sidecar checkout under ${paint("repo", primary)}.`);
+  }
+  console.log(
+    `refresh replaces this one with a linked worktree of that checkout, ${paint("attn", "discarding anything not pushed")}.`,
+  );
+
+  if ((unpushed || dirtyFiles) && !parsed.flags.has("--force")) {
+    const held = [
+      unpushed ? `${unpushed} commit(s) the remote has not seen` : "",
+      dirtyFiles ? `${dirtyFiles} uncommitted file(s)` : "",
+    ].filter(Boolean);
+    throw new SidecarError(
+      `this checkout still holds ${held.join(" and ")}; run \`sidecar sync\` to push them, then refresh — or \`sidecar refresh --force\` to discard them`,
+    );
+  }
+
+  const primaryCheckout = familySidecarCheckout(root, config);
+  if (primaryCheckout && branchIsCheckedOut(primaryCheckout, inbox)) {
+    // Git allows one worktree to hold a branch, so the rebuilt worktree could not
+    // take its inbox back. Checked before anything is removed, never after.
+    throw new SidecarError(
+      `${inbox} is already checked out elsewhere in this repo family; give this working copy its own inbox (an {random} in the .sidecar inbox template) before refreshing`,
+    );
+  }
+
+  const confirmed =
+    parsed.flags.has("--yes") ||
+    parsed.flags.has("-y") ||
+    promptYesNoDefaultNo(`replace ${sidecarPath}?`);
+  if (!confirmed) {
+    // A non-TTY lands here too: an unattended refresh has to be asked for in the
+    // arguments, never inferred from a prompt nobody could answer.
+    console.log("nothing changed");
+    return 0;
+  }
+
+  withSyncLock(root, "throw", () => {
+    // Re-read under the lock: the prompt above is unbounded, and a sync or an
+    // agent could have written to the checkout while it sat there.
+    if (!parsed.flags.has("--force") && isDirty(sidecarPath)) {
+      throw new SidecarError("the sidecar checkout changed while waiting for confirmation; rerun refresh");
+    }
+    refreshFamilyCheckout(root, config);
+  });
+  registerCurrentInstance(root, config, { event: "refresh" });
+  console.log(`refreshed sidecar checkout at ${paint("brand", sidecarPath)}`);
   return 0;
 }
 

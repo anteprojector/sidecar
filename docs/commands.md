@@ -12,6 +12,8 @@ sidecar health             # show how every machine sharing this sidecar is sync
 sidecar sync               # snapshot, push, merge, and push canonical state
 sidecar snapshot           # commit local changes to the inbox branch, nothing else
 sidecar clone              # clone or update the configured sidecar repo
+sidecar refresh            # rebuild this checkout as a linked worktree of the
+                           # one this repo's other working copies share
 sidecar merge --fork-files # merge inbox branches and preserve conflicts
 sidecar redactions         # preview what redaction changes on the next push
 sidecar instances          # list known local sidecar checkouts
@@ -122,7 +124,40 @@ against what is pushed, recomputed on demand from the working tree. See
 Clone the configured sidecar repo (or update an existing checkout). In a repo
 with several working copies — git worktrees, jj workspaces — the checkout is
 created as a linked worktree of the primary working copy's clone instead of a
-second clone. `--if-missing` is a no-op when the checkout already exists.
+second clone. `--if-missing` is a no-op when the checkout already exists — it
+never converts or replaces one.
+
+### `sidecar refresh [--force] [--yes]`
+
+Rebuilds this working copy's sidecar checkout as a linked worktree of the one
+its repo family shares. Only useful for a checkout that is an independent
+clone — one made before family linking worked, or in a jj workspace whose
+default workspace could not be resolved. `sidecar status` reports that state,
+and `refresh` exits without doing anything when the checkout is already linked.
+
+This is destructive on purpose and nothing runs it for you. The checkout
+directory is replaced, so everything that has reached the remote comes back
+(the rebuilt worktree tracks the same inbox branch, under the same checkout id)
+and everything that has not is gone. Rather than try to rescue the difference,
+`refresh` refuses while there is one:
+
+```
+sidecar: this checkout still holds 2 commit(s) the remote has not seen and 1
+uncommitted file(s); run `sidecar sync` to push them, then refresh — or
+`sidecar refresh --force` to discard them
+```
+
+| flag | effect |
+|---|---|
+| `--force` | refresh anyway, discarding unpushed commits and uncommitted files |
+| `--yes`, `-y` | skip the confirmation prompt |
+
+It also refuses, before touching anything, when the inbox branch is already
+checked out elsewhere in the family — git allows one worktree to hold a branch,
+so the rebuilt worktree could not take its inbox back. That only happens with an
+inbox template shared across working copies; putting `{random}` back in the
+template fixes it. Without a terminal and without `--yes`, `refresh` reports
+that nothing changed and exits successfully.
 
 ### `sidecar instances [--json]`
 

@@ -40,7 +40,7 @@ import {
   requireSidecarCheckout,
   resolveSidecarPath,
 } from "./config.js";
-import { logSidecarEvent, sidecarStateDir } from "./state.js";
+import { logSidecarEvent } from "./state.js";
 import {
   HEALTH_FILE,
   type HealthIdentity,
@@ -503,7 +503,7 @@ function mergeInboxBranchesAt(
  * postinstall — and the worktree it needs has to hang off something. A primary
  * that declares no sidecar, or a different one, is not ours to populate.
  */
-function familySidecarCheckout(root: string, config: SidecarConfig): string | undefined {
+export function familySidecarCheckout(root: string, config: SidecarConfig): string | undefined {
   const primary = familyPrimaryRoot(root);
   if (!primary) return undefined;
 
@@ -544,11 +544,22 @@ function repairLinkedCheckout(root: string, config: SidecarConfig, sidecarPath: 
 }
 
 /**
- * An old secondary checkout may be a full clone from before repo-family
- * linking worked. A clone's .git is a directory; a linked worktree's is a
- * file. Only secondaries with the same committed sidecar remote are eligible.
+ * A secondary checkout that never joined its repo family's shared Git store: a
+ * full clone from before family linking worked, or from a jj workspace whose
+ * default workspace could not be resolved. A clone's `.git` is a directory; a
+ * linked worktree's is a file.
+ *
+ * This is a diagnosis, not a fault, and nothing acts on it unasked. An
+ * independent clone syncs correctly — it just trades with its siblings through
+ * the remote instead of the object store they already share, so it is slower
+ * and needs the network to settle. `sidecar refresh` converts it, destructively,
+ * when the user asks.
  */
-function checkoutNeedsFamilyRelink(root: string, config: SidecarConfig, sidecarPath: string): boolean {
+export function checkoutIsUnlinkedFromFamily(
+  root: string,
+  config: SidecarConfig,
+  sidecarPath: string,
+): boolean {
   if (isStandalone(config)) return false;
   try {
     if (!fs.statSync(path.join(sidecarPath, ".git")).isDirectory()) return false;
@@ -566,136 +577,90 @@ function checkoutNeedsFamilyRelink(root: string, config: SidecarConfig, sidecarP
   }
 }
 
-function branchIsCheckedOut(repo: string, branch: string): boolean {
+/**
+ * Whether a branch is checked out anywhere in a repo's worktrees. Git allows one
+ * worktree to hold a branch, so this is what makes a refresh a precondition
+ * failure rather than a half-finished one.
+ */
+export function branchIsCheckedOut(repo: string, branch: string): boolean {
   const result = git(repo, ["worktree", "list", "--porcelain"], { check: false });
   if (result.status !== 0) return false;
   return result.stdout.split(/\r?\n/).some((line) => line === `branch refs/heads/${branch}`);
 }
 
-/**
- * Converts a secondary's independent clone into a linked worktree.
- *
- * Everything recoverable from Git is imported into private refs before the
- * old checkout moves. Dirty files are snapshotted first. The original clone is
- * renamed, never deleted in place, so any failure can put it straight back.
- * Ignored files are not part of a snapshot; where any exist, the backup is
- * deliberately retained and reported instead of guessing that they are safe
- * to discard.
- */
-function maybeRelinkFamilyCheckout(root: string, config: SidecarConfig, sidecarPath: string): boolean {
-  if (!checkoutNeedsFamilyRelink(root, config, sidecarPath)) return false;
-
-  const primaryPath = familySidecarCheckout(root, config);
-  if (!primaryPath) return false;
-  if (realpathOr(gitCommonDir(primaryPath)) === realpathOr(gitCommonDir(sidecarPath))) return false;
-
-  let backupPath: string | undefined;
-  let previousInbox: string | undefined;
-  let inboxRef = "";
-  try {
-    const inbox = expandInbox(config, sidecarPath);
-    if (isDirty(sidecarPath)) {
-      snapshot(sidecarPath, root, inbox, "sidecar snapshot before workspace relink", config.redaction);
-    }
-    ensureClean(sidecarPath);
-
-    const checkoutId = checkoutRandom(sidecarPath);
-    const token = `${utcTimestamp()}-${crypto.randomBytes(4).toString("hex")}`;
-    const recoveryRoot = `refs/sidecar-relinked/${checkoutId}/${token}`;
-    const recoveryInbox = `${recoveryRoot}/heads/${inbox}`;
-    inboxRef = `refs/heads/${inbox}`;
-
-    if (branchIsCheckedOut(primaryPath, inbox)) {
-      throw new SidecarError(`${inbox} is already checked out in this sidecar family`);
-    }
-
-    const imported = git(
-      primaryPath,
-      ["fetch", "--no-tags", sidecarPath, `+refs/heads/*:${recoveryRoot}/heads/*`],
-      { check: false },
-    );
-    if (imported.status !== 0) {
-      throw new SidecarError(imported.stderr.trim() || "could not preserve the existing sidecar refs");
-    }
-
-    const preservedHead = git(primaryPath, ["rev-parse", "--verify", recoveryInbox]).stdout.trim();
-    const previous = git(primaryPath, ["rev-parse", "--verify", inboxRef], { check: false });
-    previousInbox = previous.status === 0 ? previous.stdout.trim() : undefined;
-    git(primaryPath, ["update-ref", inboxRef, preservedHead]);
-
-    const ignored = git(sidecarPath, ["ls-files", "--others", "--ignored", "--exclude-standard"], {
-      check: false,
-    });
-    const keepBackup = ignored.status !== 0 || Boolean(ignored.stdout.trim());
-
-    const recoveryDir = path.join(sidecarStateDir(), "recovery");
-    fs.mkdirSync(recoveryDir, { recursive: true });
-    backupPath = path.join(recoveryDir, `${slug(path.basename(root))}-${checkoutId}-${token}`);
-    fs.renameSync(sidecarPath, backupPath);
-
-    git(primaryPath, ["worktree", "add", "--detach", sidecarPath, preservedHead]);
-    fs.writeFileSync(path.join(gitDir(sidecarPath), "sidecar-id"), `${checkoutId}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-    ensureInboxBranch(sidecarPath, config, inbox);
-
-    const linkedHead = git(sidecarPath, ["rev-parse", "HEAD"]).stdout.trim();
-    if (linkedHead !== preservedHead) throw new SidecarError("relinked checkout did not preserve HEAD");
-    if (realpathOr(gitCommonDir(sidecarPath)) !== realpathOr(gitCommonDir(primaryPath))) {
-      throw new SidecarError("relinked checkout did not join the shared Git store");
-    }
-
-    if (keepBackup) {
-      console.error(`sidecar: kept the previous checkout at ${backupPath} because it contains ignored files`);
-    } else {
-      try {
-        fs.rmSync(backupPath, { recursive: true, force: true });
-        backupPath = undefined;
-      } catch {
-        console.error(`sidecar: could not remove the previous checkout; kept it at ${backupPath}`);
-      }
-    }
-    logSidecarEvent("checkout-relink", { root, sidecarPath, backupPath: backupPath ?? null });
-    console.log(`relinked sidecar checkout for this repo family`);
-    return true;
-  } catch (error) {
-    if (backupPath && fs.existsSync(backupPath) && fs.existsSync(sidecarPath)) {
-      git(primaryPath, ["worktree", "remove", "--force", sidecarPath], { check: false });
-      fs.rmSync(sidecarPath, { recursive: true, force: true });
-    }
-    if (backupPath && fs.existsSync(backupPath) && !fs.existsSync(sidecarPath)) {
-      try {
-        fs.renameSync(backupPath, sidecarPath);
-        backupPath = undefined;
-      } catch {
-        // The warning below names the retained backup when rollback cannot.
-      }
-    }
-    if (inboxRef) {
-      if (previousInbox) git(primaryPath, ["update-ref", inboxRef, previousInbox], { check: false });
-      else git(primaryPath, ["update-ref", "-d", inboxRef], { check: false });
-    }
-
-    const message = error instanceof Error ? error.message : String(error);
-    const recovery = backupPath ? `; previous checkout kept at ${backupPath}` : "";
-    console.error(`sidecar: could not relink this checkout: ${message}${recovery}`);
-    logSidecarEvent("failure", { command: "checkout-relink", root, sidecarPath, message, backupPath });
-    return false;
-  }
+/** How many commits this checkout holds that the remote has never seen. */
+export function unpushedInboxCommits(sidecarPath: string, config: SidecarConfig, inbox: string): number {
+  if (!hasAnyCommit(sidecarPath)) return 0;
+  // With the inbox absent from the remote, main is the next-best witness of what
+  // has left this machine; with neither, nothing has.
+  const base = remoteRefExists(sidecarPath, inbox)
+    ? `origin/${inbox}`
+    : remoteRefExists(sidecarPath, config.branch)
+      ? `origin/${config.branch}`
+      : undefined;
+  const counted = git(sidecarPath, ["rev-list", "--count", base ? `${base}..HEAD` : "HEAD"], {
+    check: false,
+  });
+  return counted.status === 0 ? Number(counted.stdout.trim()) || 0 : 0;
 }
 
-export function cloneIfMissing(root: string, config: SidecarConfig, bootstrapMain: boolean): boolean {
-  const sidecarPath = resolveSidecarPath(root, config);
-  if (
-    fs.existsSync(sidecarPath) &&
-    hasGitMetadata(sidecarPath) &&
-    !checkoutNeedsFamilyRelink(root, config, sidecarPath)
-  ) {
-    return false;
+/**
+ * Discards a secondary's independent clone and rebuilds it as a linked worktree
+ * of the checkout its repo family shares.
+ *
+ * Deliberately destructive, and deliberately without a rescue path. Whatever a
+ * sync has pushed comes back on its own, because ensureInboxBranch tracks the
+ * inbox branch off the remote again; the caller's job is to be sure a sync has
+ * run, which is what `sidecar refresh` refuses without. Paying for that with the
+ * user's confirmation rather than with ref surgery is the whole point: nothing
+ * here can half-succeed and leave the family's refs worse than it found them.
+ *
+ * The checkout id is the one thing carried across. It names the inbox branch,
+ * and nothing prunes abandoned inbox branches from the remote, so a fresh id
+ * would strand this checkout's pushed history under a name no machine claims
+ * again.
+ */
+export function refreshFamilyCheckout(root: string, config: SidecarConfig): string {
+  const sidecarPath = requireSidecarCheckout(root, config);
+  const primaryPath = familySidecarCheckout(root, config);
+  if (!primaryPath) {
+    throw new SidecarError(
+      `could not find the sidecar checkout this repo family shares; run \`sidecar status\` in this repo's default working copy first`,
+    );
   }
-  cloneOrUpdate(root, config, bootstrapMain);
-  return true;
+  const checkoutId = checkoutRandom(sidecarPath);
+
+  fs.rmSync(sidecarPath, { recursive: true, force: true });
+  // A refresh killed between the remove and the add leaves the primary holding
+  // an admin entry for a path that is no longer there, and `worktree add`
+  // refuses a path it still has registered. Pruning first lets a retry through.
+  git(primaryPath, ["worktree", "prune", "--expire", "now"], { check: false });
+  const added = git(primaryPath, ["worktree", "add", "--detach", sidecarPath], { check: false });
+  if (added.status !== 0) {
+    // The old checkout is already gone, so say what rebuilds one rather than
+    // leaving the user to guess from a git error.
+    throw new SidecarError(
+      `${added.stderr.trim() || "could not add the linked worktree"}; the previous checkout has been removed — run \`sidecar clone\` to rebuild one`,
+    );
+  }
+  // Detached above for the reason cloneOrUpdate is: the inbox branch is named
+  // after the checkout id, which has to be in place before ensureInboxBranch can
+  // resolve it.
+  fs.writeFileSync(path.join(gitDir(sidecarPath), "sidecar-id"), `${checkoutId}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+
+  ensureCommitIdentity(sidecarPath);
+  ensureRedactionFilter(sidecarPath, config.redaction);
+  // The shared store's remote-tracking refs can predate this checkout's last
+  // push, and ensureInboxBranch reads them to decide where the inbox starts.
+  // Without this the rebuilt worktree forks its inbox from an older main and
+  // the pushed history it should have recovered only returns on a later merge.
+  fetch(sidecarPath, true, false);
+  ensureInboxBranch(sidecarPath, config, expandInbox(config, sidecarPath));
+  logSidecarEvent("checkout-refresh", { root, sidecarPath, checkoutId });
+  return sidecarPath;
 }
 
 export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain: boolean): void {
@@ -741,11 +706,6 @@ export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain
 
   const inbox = expandInbox(config, sidecarPath);
   ensureInboxBranch(sidecarPath, config, inbox);
-  if (maybeRelinkFamilyCheckout(root, config, sidecarPath)) {
-    ensureCommitIdentity(sidecarPath);
-    ensureRedactionFilter(sidecarPath, config.redaction);
-    ensureInboxBranch(sidecarPath, config, inbox);
-  }
   console.log(`sidecar checkout ready at ${paint("brand", sidecarPath)}`);
 }
 
@@ -875,9 +835,6 @@ export function ensureSidecarCheckout(root: string, config: SidecarConfig): stri
     cloneOrUpdate(root, config, true);
   } else {
     repairLinkedCheckout(root, config, sidecarPath);
-    if (checkoutNeedsFamilyRelink(root, config, sidecarPath)) {
-      cloneOrUpdate(root, config, true);
-    }
   }
   return requireSidecarCheckout(root, config);
 }

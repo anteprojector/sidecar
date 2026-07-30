@@ -9,7 +9,7 @@ import { PACKAGE_SPEC, findGlobalSidecarExecutable, shouldUseGlobalRegistry } fr
 import { type SidecarConfig, expandInbox, isStandalone, loadProject, requireSidecarCheckout, resolveSidecarPath } from "./config.js";
 import { instancesPath, listInstanceStatuses, readInstances, readSettings, sidecarLogPath } from "./state.js";
 import { daemonServiceStatus } from "./service.js";
-import { pendingInboxBranches, readFleetHealth } from "./sync.js";
+import { checkoutIsUnlinkedFromFamily, pendingInboxBranches, readFleetHealth } from "./sync.js";
 import { formatRelativeTime, formatTimestampPair, labelLine } from "./ui.js";
 import { type HealthRecord, type HealthState, summarizeHealthStates } from "./health.js";
 
@@ -60,6 +60,11 @@ export function cmdStatus(args: string[]): number {
   else if (branch === inbox) statusLine("branch", branch);
   else statusLine("branch", `${branch} — not the inbox branch; sync will switch back`, "attn");
   statusLine("dirty", dirty ? "yes" : "no", dirty ? "attn" : "quiet");
+  // Nothing converts this on its own, so the only way a user learns the command
+  // exists is a line here and on a manual sync.
+  if (checkoutIsUnlinkedFromFamily(root, config, sidecarPath)) {
+    statusLine("family", "independent clone — syncs via the remote; `sidecar refresh` links it", "attn");
+  }
   printDaemonLine();
   printLastSyncLine(root);
 
@@ -90,6 +95,7 @@ function cmdStatusJson(): number {
     globalInstall: shouldUseGlobalRegistry() || Boolean(findGlobalSidecarExecutable()),
     currentBranch: branch || undefined,
     dirty: checkoutPresent ? Boolean(git(sidecarPath, ["status", "--porcelain"]).stdout.trim()) : undefined,
+    familyLinked: checkoutPresent ? !checkoutIsUnlinkedFromFamily(root, config, sidecarPath) : undefined,
     daemon: daemonHealth().text,
     lastSyncAt: readInstances().find((instance) => instance.root === root)?.lastSyncAt,
     pendingInbox: checkoutPresent ? pendingStatusInboxBranches(sidecarPath, config) : undefined,

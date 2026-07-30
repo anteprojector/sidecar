@@ -8,11 +8,18 @@ import path from "node:path";
 import { colorLevel, stripColor } from "./color.js";
 import { SidecarError, getValue, nowIso, parseOptions } from "./util.js";
 import { ensureCommitIdentity, git, gitRaw } from "./git.js";
-import { expandInbox, loadProject, redactionModeConfigValue, requireSidecarCheckout } from "./config.js";
+import {
+  expandInbox,
+  loadProject,
+  redactionModeConfigValue,
+  requireSidecarCheckout,
+  resolveSidecarPath,
+} from "./config.js";
 import { registerCurrentInstance, withSyncLock } from "./state.js";
 import {
   LOCAL_SYNC_ENV,
   SOFT_SYNC_ENV,
+  checkoutIsUnlinkedFromFamily,
   ensureInboxBranch,
   ensureRedactionFilter,
   fileRedactionDelta,
@@ -100,6 +107,16 @@ export function cmdSync(args: string[]): number {
   if (synced) {
     registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
     reportSyncHealth(root, config, { status: "ok" });
+    // Only on a sync someone asked for. The daemon runs the same command on its
+    // interval, where a standing note about a working checkout is log noise.
+    if (!soft) {
+      const sidecarPath = resolveSidecarPath(root, config);
+      if (checkoutIsUnlinkedFromFamily(root, config, sidecarPath)) {
+        console.log(
+          "sidecar: this checkout is an independent clone, so it settles with its siblings through the remote; `sidecar refresh` links it to the one this repo family shares",
+        );
+      }
+    }
   }
   return 0;
 }

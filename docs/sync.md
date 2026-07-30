@@ -65,6 +65,15 @@ its own next sync. When the family cannot be resolved at all — an unreadable
 primary, mismatched remotes — a checkout simply gets its own clone, which is
 what it would have had anyway.
 
+An independent clone is slower, not broken: it still syncs, it just trades with
+its siblings through the remote rather than the store they already share, so
+local settling needs the network. Checkouts made before family linking worked
+are in exactly that state, as are jj workspaces from before sidecar could
+resolve a relative `.jj/repo` pointer. `sidecar status` names them, and
+[`sidecar refresh`](commands.md#sidecar-refresh---force---yes) converts one when
+you ask. Nothing converts a checkout on its own — rewriting a directory of your
+notes is not something an install hook should decide to do.
+
 A per-family lock (per-repo, when nothing shares the clone) serializes
 syncs, and the two kinds of sync react differently
 to finding it held. A manual `sidecar sync` (or `sidecar snapshot`) is a

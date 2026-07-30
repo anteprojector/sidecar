@@ -296,42 +296,143 @@ describe("sidecar CLI integration", () => {
     expect(fs.existsSync(marker)).toBe(true);
   });
 
-  test("clone --if-missing self-heals an independent secondary checkout", () => {
+  test("clone --if-missing leaves an independent secondary checkout alone", () => {
+    const { worktree, remote, state } = initWorktreeFamily();
+    const checkout = seedIndependentSidecar(worktree, remote);
+
+    runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
+
+    // An install hook must never convert a checkout holding the user's notes.
+    expect(fs.statSync(path.join(checkout, ".git")).isDirectory()).toBe(true);
+  }, 30_000);
+
+  test("refresh rebuilds an independent secondary checkout as a linked worktree", () => {
     const { main, worktree, remote, state } = initWorktreeFamily();
     const checkout = seedIndependentSidecar(worktree, remote);
-    fs.writeFileSync(path.join(checkout, "local-only.md"), "preserve me\n", "utf8");
-    git(checkout, ["add", "local-only.md"]);
-    git(checkout, ["commit", "-m", "Local unpushed note"]);
+    const inbox = expandInbox(readConfig(path.join(worktree, ".sidecar")), checkout);
+    fs.writeFileSync(path.join(checkout, "pushed.md"), "already on the remote\n", "utf8");
+    git(checkout, ["add", "pushed.md"]);
+    git(checkout, ["commit", "-m", "Pushed note"]);
+    git(checkout, ["push", "-u", "origin", inbox]);
 
-    const output = runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
+    const output = runSidecar(["refresh", "--yes"], worktree, { SIDECAR_STATE_DIR: state });
 
-    expect(output).toContain("relinked sidecar checkout");
+    expect(output).toContain("refreshed sidecar checkout");
     expect(fs.statSync(path.join(checkout, ".git")).isFile()).toBe(true);
     expect(git(checkout, ["rev-parse", "--git-common-dir"]).stdout.trim()).toContain(
       path.join(main, "sidecar", ".git"),
     );
-    expect(fs.readFileSync(path.join(checkout, "local-only.md"), "utf8")).toBe("preserve me\n");
-    expect(git(checkout, ["status", "--porcelain"]).stdout).toBe("");
-    expect(
-      gitRaw(["--git-dir", remote, "cat-file", "-e", "main:local-only.md"], { check: false }).status,
-    ).not.toBe(0);
+    // The checkout id survives, so the rebuilt worktree claims the same inbox
+    // branch rather than stranding the old one on the remote.
+    expect(git(checkout, ["branch", "--show-current"]).stdout.trim()).toBe(inbox);
+    // Pushed work comes back through the remote, which is what lets refresh
+    // discard the checkout without rescuing anything itself.
+    expect(fs.readFileSync(path.join(checkout, "pushed.md"), "utf8")).toBe("already on the remote\n");
   }, 30_000);
 
-  test("self-healing snapshots dirty files before replacing the independent clone", () => {
+  test("refresh refuses while the checkout holds unpushed commits", () => {
+    const { worktree, remote, state } = initWorktreeFamily();
+    const checkout = seedIndependentSidecar(worktree, remote);
+    fs.writeFileSync(path.join(checkout, "local-only.md"), "not pushed\n", "utf8");
+    git(checkout, ["add", "local-only.md"]);
+    git(checkout, ["commit", "-m", "Local unpushed note"]);
+
+    const result = runSidecarRaw(["refresh", "--yes"], worktree, { SIDECAR_STATE_DIR: state });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("1 commit(s) the remote has not seen");
+    expect(result.stderr).toContain("sidecar sync");
+    // Refusing means refusing: the checkout is exactly as it was.
+    expect(fs.statSync(path.join(checkout, ".git")).isDirectory()).toBe(true);
+    expect(fs.readFileSync(path.join(checkout, "local-only.md"), "utf8")).toBe("not pushed\n");
+  }, 30_000);
+
+  test("refresh refuses while the checkout is dirty", () => {
     const { worktree, remote, state } = initWorktreeFamily();
     const checkout = seedIndependentSidecar(worktree, remote);
     fs.writeFileSync(path.join(checkout, "dirty.md"), "unsaved\n", "utf8");
 
-    const output = runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
+    const result = runSidecarRaw(["refresh", "--yes"], worktree, { SIDECAR_STATE_DIR: state });
 
-    expect(output).toContain("committed sidecar snapshot");
-    expect(output).toContain("relinked sidecar checkout");
-    expect(fs.statSync(path.join(checkout, ".git")).isFile()).toBe(true);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("1 uncommitted file(s)");
+    expect(fs.statSync(path.join(checkout, ".git")).isDirectory()).toBe(true);
     expect(fs.readFileSync(path.join(checkout, "dirty.md"), "utf8")).toBe("unsaved\n");
-    expect(git(checkout, ["status", "--porcelain"]).stdout).toBe("");
-    expect(git(checkout, ["log", "-1", "--format=%s"]).stdout.trim()).toBe(
-      "sidecar snapshot before workspace relink",
-    );
+  }, 30_000);
+
+  test("refresh --force discards unpushed work it was asked to discard", () => {
+    const { worktree, remote, state } = initWorktreeFamily();
+    const checkout = seedIndependentSidecar(worktree, remote);
+    fs.writeFileSync(path.join(checkout, "local-only.md"), "not pushed\n", "utf8");
+    git(checkout, ["add", "local-only.md"]);
+    git(checkout, ["commit", "-m", "Local unpushed note"]);
+
+    runSidecar(["refresh", "--force", "--yes"], worktree, { SIDECAR_STATE_DIR: state });
+
+    expect(fs.statSync(path.join(checkout, ".git")).isFile()).toBe(true);
+    expect(fs.existsSync(path.join(checkout, "local-only.md"))).toBe(false);
+  }, 30_000);
+
+  test("refresh without --yes changes nothing when there is no terminal to ask", () => {
+    const { worktree, remote, state } = initWorktreeFamily();
+    const checkout = seedIndependentSidecar(worktree, remote);
+
+    const output = runSidecar(["refresh"], worktree, { SIDECAR_STATE_DIR: state });
+
+    expect(output).toContain("nothing changed");
+    expect(fs.statSync(path.join(checkout, ".git")).isDirectory()).toBe(true);
+  }, 30_000);
+
+  test("refresh is a no-op on a checkout that already shares the family store", () => {
+    const { worktree, state } = initWorktreeFamily();
+    runSidecar(["clone"], worktree, { SIDECAR_STATE_DIR: state });
+
+    const output = runSidecar(["refresh", "--yes"], worktree, { SIDECAR_STATE_DIR: state });
+
+    expect(output).toContain("nothing to refresh");
+  }, 30_000);
+
+  /**
+   * The precondition that has to be checked before anything is destroyed rather
+   * than discovered partway through: git allows one worktree to hold a branch, so
+   * a family whose inbox template collides cannot give the rebuilt worktree its
+   * inbox back. An earlier version of this migration detected the same case in
+   * mid-flight and unwound into deleting the branch out of the sibling that held
+   * it, taking that checkout's unpushed commits with it.
+   */
+  test("refresh refuses a colliding inbox without touching either checkout", () => {
+    const { main, worktree, remote, state } = initWorktreeFamily(["--inbox", "sidecar-inbox/{user}/{host}"]);
+    const primaryCheckout = path.join(main, "sidecar");
+    const inbox = expandInbox(readConfig(path.join(main, ".sidecar")), primaryCheckout);
+    fs.writeFileSync(path.join(primaryCheckout, "primary-notes.md"), "primary work\n", "utf8");
+    git(primaryCheckout, ["add", "primary-notes.md"]);
+    git(primaryCheckout, ["commit", "-m", "Primary local note"]);
+    const primaryTip = git(primaryCheckout, ["rev-parse", `refs/heads/${inbox}`]).stdout.trim();
+
+    const checkout = seedIndependentSidecar(worktree, remote);
+
+    const result = runSidecarRaw(["refresh", "--yes"], worktree, { SIDECAR_STATE_DIR: state });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("already checked out elsewhere");
+    // The sibling that holds the branch keeps it, and keeps its own history.
+    expect(git(primaryCheckout, ["rev-parse", `refs/heads/${inbox}`]).stdout.trim()).toBe(primaryTip);
+    expect(git(primaryCheckout, ["branch", "--show-current"]).stdout.trim()).toBe(inbox);
+    expect(fs.readFileSync(path.join(primaryCheckout, "primary-notes.md"), "utf8")).toBe("primary work\n");
+    // And the checkout that asked is untouched too.
+    expect(fs.statSync(path.join(checkout, ".git")).isDirectory()).toBe(true);
+  }, 30_000);
+
+  test("status and a manual sync both name refresh for an independent checkout", () => {
+    const { worktree, remote, state } = initWorktreeFamily();
+    seedIndependentSidecar(worktree, remote);
+
+    const status = runSidecar(["status"], worktree, { SIDECAR_STATE_DIR: state });
+    expect(status).toContain("independent clone");
+    expect(status).toContain("sidecar refresh");
+
+    const sync = runSidecar(["sync"], worktree, { SIDECAR_STATE_DIR: state });
+    expect(sync).toContain("sidecar refresh");
   }, 30_000);
 
   test("a second working copy links to the primary's checkout instead of cloning again", () => {
@@ -2004,8 +2105,13 @@ function initStandaloneRepo(): { repo: string; remote: string; state: string } {
  * `.sidecar` has to be committed before the worktree is added, or the new
  * working copy checks out a commit that never heard of the sidecar.
  */
-function initWorktreeFamily(): { main: string; worktree: string; remote: string; state: string } {
-  const { main, remote } = initSidecarProject();
+function initWorktreeFamily(initArgs: string[] = []): {
+  main: string;
+  worktree: string;
+  remote: string;
+  state: string;
+} {
+  const { main, remote } = initSidecarProject(initArgs);
   git(main, ["add", ".sidecar", ".gitignore"]);
   git(main, ["commit", "-m", "Add sidecar config"]);
   const worktree = path.join(tempDir(), "worktree");
@@ -2123,8 +2229,10 @@ function testSyncLockDir(main: string): string {
   }
 }
 
-function runSidecar(args: string[], cwd: string, env: Record<string, string> = {}): string {
-  const result = spawnSync(process.execPath, [cliPath, ...args], {
+// For the commands that are supposed to fail: runSidecar throws on a nonzero
+// exit, which is the wrong shape for asserting on a refusal.
+function runSidecarRaw(args: string[], cwd: string, env: Record<string, string> = {}) {
+  return spawnSync(process.execPath, [cliPath, ...args], {
     cwd,
     encoding: "utf8",
     env: {
@@ -2134,6 +2242,10 @@ function runSidecar(args: string[], cwd: string, env: Record<string, string> = {
       ...env,
     },
   });
+}
+
+function runSidecar(args: string[], cwd: string, env: Record<string, string> = {}): string {
+  const result = runSidecarRaw(args, cwd, env);
   if (result.status !== 0) {
     throw new Error(
       [`sidecar ${args.join(" ")} failed with ${result.status}`, result.stdout, result.stderr]
