@@ -17,6 +17,7 @@ automatically by `export *`.
 - `ui.ts` — label/value output rows, human timestamps, blocking TTY prompts.
 - `sync.ts` — the engine: snapshot, inbox merge + conflict forking, clone/settle, redaction filter wiring, health heartbeat.
 - `cmd-init.ts` / `cmd-status.ts` / `cmd-daemon.ts` / `cmd-sync.ts` — command handlers, thin over the modules above.
+- `cmd-refresh.ts` — the exception to "thin": `sidecar refresh` owns its own engine code, because it is the only path that deletes a checkout and the guards keeping that safe belong next to it rather than beside the clone/settle functions they resemble.
 - `commands.ts` — the COMMANDS table + dispatch. **Adding a command = one table entry here plus a handler in a cmd-\*.ts**; usage text and typo suggestions derive from the table.
 - `bin.ts` — entry point; resolves which install runs the command (newest wins between global and project-local) before `main()` does any work.
 

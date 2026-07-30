@@ -6,6 +6,7 @@ import { colorLevel, paint } from "./color.js";
 import { SidecarError } from "./util.js";
 import { packageVersion } from "./install.js";
 import { cmdClone, cmdDeinit, cmdInit } from "./cmd-init.js";
+import { cmdRefresh } from "./cmd-refresh.js";
 import { cmdHealth, cmdInstances, cmdStatus, cmdTail } from "./cmd-status.js";
 import { cmdDaemon, cmdRegisterInstall, cmdSetInstallSource, cmdUpdate } from "./cmd-daemon.js";
 import { cmdMerge, cmdRedact, cmdRedactions, cmdSnapshot, cmdSync } from "./cmd-sync.js";
@@ -68,6 +69,18 @@ const COMMANDS: Command[] = [
   { name: "tail", run: cmdTail, section: "sync", usage: "tail [-f|--follow] [-n|--lines count]" },
   { name: "update", run: cmdUpdate, section: "sync", usage: "update" },
   { name: "clone", run: cmdClone, section: "advanced", usage: "clone [--if-missing]" },
+  {
+    name: "refresh",
+    run: cmdRefresh,
+    section: "advanced",
+    usage: "refresh [--force] [--yes]",
+    // No summary: this usage string is exactly as wide as the notes column, so a
+    // summary would run straight into it with no gap.
+    notes: [
+      "delete the sidecar checkout and clone it again",
+      "discards anything unpushed; refuses until `sidecar sync` has run",
+    ],
+  },
   { name: "deinit", run: cmdDeinit, section: "advanced", usage: "deinit" },
   { name: "snapshot", run: cmdSnapshot, section: "advanced", usage: "snapshot [--push] [-m message]" },
   { name: "merge", run: cmdMerge, section: "advanced", usage: "merge [--fork-files] [--no-push]" },

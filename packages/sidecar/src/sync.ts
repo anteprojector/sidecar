@@ -19,6 +19,7 @@ import {
   git,
   gitBytes,
   gitCommonDir,
+  gitDir,
   gitRaw,
   hasAnyCommit,
   hasGitMetadata,
@@ -502,7 +503,7 @@ function mergeInboxBranchesAt(
  * postinstall — and the worktree it needs has to hang off something. A primary
  * that declares no sidecar, or a different one, is not ours to populate.
  */
-function familySidecarCheckout(root: string, config: SidecarConfig): string | undefined {
+export function familySidecarCheckout(root: string, config: SidecarConfig): string | undefined {
   const primary = familyPrimaryRoot(root);
   if (!primary) return undefined;
 
@@ -542,7 +543,46 @@ function repairLinkedCheckout(root: string, config: SidecarConfig, sidecarPath: 
   );
 }
 
-export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain: boolean): void {
+/**
+ * A secondary checkout that never joined its repo family's shared Git store: a
+ * full clone from before family linking worked, or from a jj workspace whose
+ * default workspace could not be resolved. A clone's `.git` is a directory; a
+ * linked worktree's is a file.
+ *
+ * This is a diagnosis, not a fault, and nothing acts on it unasked. An
+ * independent clone syncs correctly — it just trades with its siblings through
+ * the remote instead of the object store they already share, so it is slower
+ * and needs the network to settle. `sidecar refresh` converts it, destructively,
+ * when the user asks.
+ */
+export function checkoutIsUnlinkedFromFamily(
+  root: string,
+  config: SidecarConfig,
+  sidecarPath: string,
+): boolean {
+  if (isStandalone(config)) return false;
+  try {
+    if (!fs.statSync(path.join(sidecarPath, ".git")).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+
+  const primary = familyPrimaryRoot(root);
+  if (!primary) return false;
+  try {
+    const primaryConfig = readConfig(path.join(primary, ".sidecar"));
+    return primaryConfig.remote === config.remote;
+  } catch {
+    return false;
+  }
+}
+
+export function cloneOrUpdate(
+  root: string,
+  config: SidecarConfig,
+  bootstrapMain: boolean,
+  options?: { checkoutId?: string },
+): void {
   const sidecarPath = resolveSidecarPath(root, config);
   if (fs.existsSync(sidecarPath) && !hasGitMetadata(sidecarPath)) {
     if (fs.readdirSync(sidecarPath).length) {
@@ -577,6 +617,16 @@ export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain
     fetch(sidecarPath, true);
   } else {
     throw new SidecarError(`${sidecarPath} is not usable as a sidecar checkout`);
+  }
+
+  // Before expandInbox below, which reads the id to name the inbox branch. A
+  // refresh passes the id of the checkout it just replaced so the rebuilt one
+  // claims the same inbox instead of stranding it on the remote.
+  if (options?.checkoutId) {
+    fs.writeFileSync(path.join(gitDir(sidecarPath), "sidecar-id"), `${options.checkoutId}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
   }
 
   ensureCommitIdentity(sidecarPath);

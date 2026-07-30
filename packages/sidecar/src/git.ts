@@ -177,7 +177,8 @@ function jjDefaultWorkspace(root: string): string | undefined {
   const pointer = path.join(root, ".jj", "repo");
   try {
     if (!fs.statSync(pointer).isFile()) return undefined;
-    const workspace = path.dirname(path.dirname(fs.readFileSync(pointer, "utf8").trim()));
+    const repo = path.resolve(path.dirname(pointer), fs.readFileSync(pointer, "utf8").trim());
+    const workspace = path.dirname(path.dirname(repo));
     return fs.existsSync(path.join(workspace, ".jj")) ? workspace : undefined;
   } catch {
     return undefined;

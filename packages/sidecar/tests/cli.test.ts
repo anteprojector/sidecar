@@ -10,6 +10,7 @@ import {
   checkoutRandom,
   ensureMainBranch,
   expandInbox,
+  familyPrimaryRoot,
   fetch,
   fileLabel,
   forkConflicts,
@@ -52,6 +53,28 @@ afterEach(() => {
   for (const root of tempRoots.splice(0)) {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+describe("repo families", () => {
+  test.each(["relative", "absolute"])("finds the default workspace from a %s jj repo pointer", (kind) => {
+    const family = tempDir();
+    const primary = path.join(family, "primary");
+    const secondary = path.join(family, "secondary");
+    const primaryRepo = path.join(primary, ".jj", "repo");
+    const secondaryPointer = path.join(secondary, ".jj", "repo");
+    fs.mkdirSync(primaryRepo, { recursive: true });
+    fs.mkdirSync(path.dirname(secondaryPointer), { recursive: true });
+    fs.writeFileSync(
+      secondaryPointer,
+      kind === "relative"
+        ? path.relative(path.dirname(secondaryPointer), primaryRepo)
+        : primaryRepo,
+      "utf8",
+    );
+
+    expect(familyPrimaryRoot(secondary)).toBe(primary);
+    expect(familyPrimaryRoot(primary)).toBeUndefined();
+  });
 });
 
 describe("config", () => {
