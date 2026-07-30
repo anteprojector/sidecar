@@ -15,7 +15,7 @@ import {
   nowIso,
   parseOptions,
 } from "./util.js";
-import { git, gitToplevel, gitToplevelOptional, hasGitMetadata } from "./git.js";
+import { git, gitToplevel, gitToplevelOptional } from "./git.js";
 import {
   GLOBAL_EXEC_ENV,
   PACKAGE_NAME,
@@ -38,7 +38,6 @@ import {
   pathIsRepoRoot,
   readConfig,
   redactionModeConfigValue,
-  resolveSidecarPath,
   validateBranch,
   validateInboxTemplate,
   validateRemote,
@@ -46,7 +45,7 @@ import {
 } from "./config.js";
 import { readSettings, registerCurrentInstance, unregisterInstance, withSyncLock, writeSettings } from "./state.js";
 import { SKIP_SERVICE_ENV, daemonServiceStatus } from "./service.js";
-import { cloneOrUpdate, removeRedactionFilter, syncProject } from "./sync.js";
+import { cloneIfMissing, cloneOrUpdate, removeRedactionFilter, syncProject } from "./sync.js";
 import { promptLine, promptYesNo, promptYesNoDefaultNo } from "./ui.js";
 import { DEFAULT_REDACTION_MODE, REDACTION_MODES, type RedactionMode } from "./redaction.js";
 
@@ -463,10 +462,10 @@ export function cmdClone(args: string[]): number {
 
   const [root, config] = loadProject();
   if (parsed.flags.has("--if-missing")) {
-    const sidecarPath = resolveSidecarPath(root, config);
-    if (fs.existsSync(sidecarPath) && hasGitMetadata(sidecarPath)) return 0;
+    if (!cloneIfMissing(root, config, !parsed.flags.has("--no-bootstrap-main"))) return 0;
+  } else {
+    cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   }
-  cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   registerCurrentInstance(root, config, { event: "clone" });
   return 0;
 }

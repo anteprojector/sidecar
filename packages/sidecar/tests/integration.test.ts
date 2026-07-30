@@ -5,7 +5,15 @@ import { spawn, spawnSync } from "node:child_process";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { git, gitRaw, packageVersion, syncLockDir } from "../src/cli.js";
+import {
+  checkoutRandom,
+  expandInbox,
+  git,
+  gitRaw,
+  packageVersion,
+  readConfig,
+  syncLockDir,
+} from "../src/cli.js";
 
 const tempRoots: string[] = [];
 const cliPath = path.resolve("dist/cli.js");
@@ -287,6 +295,44 @@ describe("sidecar CLI integration", () => {
     expect(output).not.toContain("sidecar checkout ready");
     expect(fs.existsSync(marker)).toBe(true);
   });
+
+  test("clone --if-missing self-heals an independent secondary checkout", () => {
+    const { main, worktree, remote, state } = initWorktreeFamily();
+    const checkout = seedIndependentSidecar(worktree, remote);
+    fs.writeFileSync(path.join(checkout, "local-only.md"), "preserve me\n", "utf8");
+    git(checkout, ["add", "local-only.md"]);
+    git(checkout, ["commit", "-m", "Local unpushed note"]);
+
+    const output = runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
+
+    expect(output).toContain("relinked sidecar checkout");
+    expect(fs.statSync(path.join(checkout, ".git")).isFile()).toBe(true);
+    expect(git(checkout, ["rev-parse", "--git-common-dir"]).stdout.trim()).toContain(
+      path.join(main, "sidecar", ".git"),
+    );
+    expect(fs.readFileSync(path.join(checkout, "local-only.md"), "utf8")).toBe("preserve me\n");
+    expect(git(checkout, ["status", "--porcelain"]).stdout).toBe("");
+    expect(
+      gitRaw(["--git-dir", remote, "cat-file", "-e", "main:local-only.md"], { check: false }).status,
+    ).not.toBe(0);
+  }, 30_000);
+
+  test("self-healing snapshots dirty files before replacing the independent clone", () => {
+    const { worktree, remote, state } = initWorktreeFamily();
+    const checkout = seedIndependentSidecar(worktree, remote);
+    fs.writeFileSync(path.join(checkout, "dirty.md"), "unsaved\n", "utf8");
+
+    const output = runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
+
+    expect(output).toContain("committed sidecar snapshot");
+    expect(output).toContain("relinked sidecar checkout");
+    expect(fs.statSync(path.join(checkout, ".git")).isFile()).toBe(true);
+    expect(fs.readFileSync(path.join(checkout, "dirty.md"), "utf8")).toBe("unsaved\n");
+    expect(git(checkout, ["status", "--porcelain"]).stdout).toBe("");
+    expect(git(checkout, ["log", "-1", "--format=%s"]).stdout.trim()).toBe(
+      "sidecar snapshot before workspace relink",
+    );
+  }, 30_000);
 
   test("a second working copy links to the primary's checkout instead of cloning again", () => {
     const { main, worktree, state } = initWorktreeFamily();
@@ -1965,6 +2011,17 @@ function initWorktreeFamily(): { main: string; worktree: string; remote: string;
   const worktree = path.join(tempDir(), "worktree");
   git(main, ["worktree", "add", worktree, "-b", "feature"]);
   return { main, worktree, remote, state: path.join(main, ".sidecar-test-state") };
+}
+
+function seedIndependentSidecar(worktree: string, remote: string): string {
+  const checkout = path.join(worktree, "sidecar");
+  gitRaw(["clone", "--branch", "main", remote, checkout]);
+  git(checkout, ["config", "user.name", "Test User"]);
+  git(checkout, ["config", "user.email", "test@example.com"]);
+  checkoutRandom(checkout);
+  const config = readConfig(path.join(worktree, ".sidecar"));
+  git(checkout, ["switch", "-c", expandInbox(config, checkout)]);
+  return checkout;
 }
 
 function initBareRemote(): string {
