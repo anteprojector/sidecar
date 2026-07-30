@@ -76,7 +76,7 @@ const COMMANDS: Command[] = [
     // No summary: this usage string is exactly as wide as the notes column, so a
     // summary would run straight into it with no gap.
     notes: [
-      "rebuild an independent checkout as a linked worktree",
+      "delete the sidecar checkout and clone it again",
       "discards anything unpushed; refuses until `sidecar sync` has run",
     ],
   },

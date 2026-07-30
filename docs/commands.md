@@ -12,8 +12,7 @@ sidecar health             # show how every machine sharing this sidecar is sync
 sidecar sync               # snapshot, push, merge, and push canonical state
 sidecar snapshot           # commit local changes to the inbox branch, nothing else
 sidecar clone              # clone or update the configured sidecar repo
-sidecar refresh            # rebuild this checkout as a linked worktree of the
-                           # one this repo's other working copies share
+sidecar refresh            # delete the sidecar checkout and clone it again
 sidecar merge --fork-files # merge inbox branches and preserve conflicts
 sidecar redactions         # preview what redaction changes on the next push
 sidecar instances          # list known local sidecar checkouts
@@ -129,16 +128,17 @@ never converts or replaces one.
 
 ### `sidecar refresh [--force] [--yes]`
 
-Rebuilds this working copy's sidecar checkout as a linked worktree of the one
-its repo family shares. Only useful for a checkout that is an independent
-clone — one made before family linking worked, or in a jj workspace whose
-default workspace could not be resolved. `sidecar status` reports that state,
-and `refresh` exits without doing anything when the checkout is already linked.
+Deletes the sidecar checkout and clones it again. The blunt repair: a checkout can
+be wrong in more ways than sidecar has fixes for — an independent clone that
+should be a linked worktree, a wedged merge, a corrupt object store, a wrong
+origin, a branch tangle — and rebuilding fixes all of them without having to name
+any of them. In a repo with several working copies the rebuilt checkout is a
+linked worktree again, exactly as `sidecar clone` would have made it.
 
-This is destructive on purpose and nothing runs it for you. The checkout
-directory is replaced, so everything that has reached the remote comes back
-(the rebuilt worktree tracks the same inbox branch, under the same checkout id)
-and everything that has not is gone. Rather than try to rescue the difference,
+Destructive on purpose, and nothing runs it for you. Everything that has reached
+the remote comes back — the rebuilt checkout keeps the same checkout id, so it
+claims the same inbox branch and the same identity in `sidecar health` — and
+everything that has not is gone. Rather than try to rescue the difference,
 `refresh` refuses while there is one:
 
 ```
@@ -152,12 +152,36 @@ uncommitted file(s); run `sidecar sync` to push them, then refresh — or
 | `--force` | refresh anyway, discarding unpushed commits and uncommitted files |
 | `--yes`, `-y` | skip the confirmation prompt |
 
-It also refuses, before touching anything, when the inbox branch is already
-checked out elsewhere in the family — git allows one worktree to hold a branch,
-so the rebuilt worktree could not take its inbox back. That only happens with an
-inbox template shared across working copies; putting `{random}` back in the
-template fixes it. Without a terminal and without `--yes`, `refresh` reports
-that nothing changed and exits successfully.
+Without a terminal and without `--yes`, `refresh` reports that nothing changed and
+exits successfully.
+
+Two more things it refuses before touching anything, both because it cannot finish
+cleanly rather than because it would rather not:
+
+- **Other checkouts share this one's Git store.** Deleting the checkout that owns
+  the store strands every linked worktree of it. Refresh those working copies
+  instead; `--force` replaces this one anyway and leaves them to be refreshed too.
+- **The inbox branch is checked out somewhere else.** Git allows one worktree to
+  hold a branch, so the rebuilt checkout could not take its inbox back. This only
+  happens with an inbox template shared across working copies; putting `{random}`
+  back in the template fixes it.
+
+A checkout too broken for git to read is the one case that needs `--force` on its
+own: what it still holds cannot be weighed, so refresh will not assume the answer
+is "nothing".
+
+#### Standalone
+
+A [standalone](standalone.md) repo *is* the sidecar, source and all, so there is
+nothing to delete and `refresh` re-establishes instead of rebuilding: it rewires
+the redaction filter, settles the canonical branch onto `origin/<branch>`, and puts
+the repo back on its inbox branch. A diverged tip is parked under
+`refs/sidecar-discarded/` rather than dropped.
+
+`--force` additionally moves the inbox branch back to the canonical branch, which
+is the only thing that clears an inbox that has diverged; that tip is parked the
+same way. A standalone repo that git cannot read is never rebuilt — it is your
+repo, and sidecar says so instead of guessing.
 
 ### `sidecar instances [--json]`
 

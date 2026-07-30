@@ -578,92 +578,174 @@ export function checkoutIsUnlinkedFromFamily(
 }
 
 /**
- * Whether a branch is checked out anywhere in a repo's worktrees. Git allows one
- * worktree to hold a branch, so this is what makes a refresh a precondition
- * failure rather than a half-finished one.
+ * Which of a repo's worktrees holds a branch, if any.
+ *
+ * Git allows one worktree to hold a branch, so this is what lets a refresh fail as
+ * a precondition rather than partway through. It answers with the path rather than
+ * a boolean because the checkout being refreshed is itself in the list — a caller
+ * that cannot tell the holder from itself refuses every rebuild of a checkout that
+ * was already linked.
  */
-export function branchIsCheckedOut(repo: string, branch: string): boolean {
+export function worktreeHoldingBranch(repo: string, branch: string): string | undefined {
   const result = git(repo, ["worktree", "list", "--porcelain"], { check: false });
-  if (result.status !== 0) return false;
-  return result.stdout.split(/\r?\n/).some((line) => line === `branch refs/heads/${branch}`);
+  if (result.status !== 0) return undefined;
+  let current: string | undefined;
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (line.startsWith("worktree ")) current = line.slice("worktree ".length).trim();
+    else if (line === `branch refs/heads/${branch}`) return current;
+  }
+  return undefined;
 }
 
-/** How many commits this checkout holds that the remote has never seen. */
-export function unpushedInboxCommits(sidecarPath: string, config: SidecarConfig, inbox: string): number {
+/**
+ * Whether the checkout is a Git repository in its own right.
+ *
+ * Not `rev-parse --git-dir`: a checkout whose `.git` is corrupt is not a repo, and
+ * git's discovery then walks up and answers for the repo the checkout sits inside.
+ * Every later status and rev-list would describe the user's own repo instead of
+ * the sidecar — and a guard that reads the wrong repo is worse than no guard.
+ */
+export function checkoutIsOwnRepo(sidecarPath: string): boolean {
+  const top = git(sidecarPath, ["rev-parse", "--show-toplevel"], { check: false });
+  if (top.status !== 0) return false;
+  return realpathOr(top.stdout.trim()) === realpathOr(sidecarPath);
+}
+
+/**
+ * How many commits this checkout holds that no branch on the remote has.
+ *
+ * Measured against every origin ref at once rather than against origin/<inbox>,
+ * because a settled checkout is legitimately ahead of its own inbox branch: a sync
+ * merges the inbox into main, pushes main, then fast-forwards the inbox to it. Those
+ * commits are on the remote under another name, and counting them as unpushed would
+ * make refresh refuse forever right after a successful sync.
+ */
+export function unpushedCommits(sidecarPath: string): number {
   if (!hasAnyCommit(sidecarPath)) return 0;
-  // With the inbox absent from the remote, main is the next-best witness of what
-  // has left this machine; with neither, nothing has.
-  const base = remoteRefExists(sidecarPath, inbox)
-    ? `origin/${inbox}`
-    : remoteRefExists(sidecarPath, config.branch)
-      ? `origin/${config.branch}`
-      : undefined;
-  const counted = git(sidecarPath, ["rev-list", "--count", base ? `${base}..HEAD` : "HEAD"], {
+  const counted = git(sidecarPath, ["rev-list", "--count", "HEAD", "--not", "--remotes=origin"], {
     check: false,
   });
   return counted.status === 0 ? Number(counted.stdout.trim()) || 0 : 0;
 }
 
 /**
- * Discards a secondary's independent clone and rebuilds it as a linked worktree
- * of the checkout its repo family shares.
- *
- * Deliberately destructive, and deliberately without a rescue path. Whatever a
- * sync has pushed comes back on its own, because ensureInboxBranch tracks the
- * inbox branch off the remote again; the caller's job is to be sure a sync has
- * run, which is what `sidecar refresh` refuses without. Paying for that with the
- * user's confirmation rather than with ref surgery is the whole point: nothing
- * here can half-succeed and leave the family's refs worse than it found them.
- *
- * The checkout id is the one thing carried across. It names the inbox branch,
- * and nothing prunes abandoned inbox branches from the remote, so a fresh id
- * would strand this checkout's pushed history under a name no machine claims
- * again.
+ * Checkouts hanging off this one as linked worktrees — the ones that deleting it
+ * would break. Empty unless this checkout owns the store: asked of a linked
+ * worktree, `worktree list` answers for the whole family.
  */
-export function refreshFamilyCheckout(root: string, config: SidecarConfig): string {
-  const sidecarPath = requireSidecarCheckout(root, config);
-  const primaryPath = familySidecarCheckout(root, config);
-  if (!primaryPath) {
-    throw new SidecarError(
-      `could not find the sidecar checkout this repo family shares; run \`sidecar status\` in this repo's default working copy first`,
-    );
+export function dependentWorktrees(sidecarPath: string): string[] {
+  try {
+    if (!fs.statSync(path.join(sidecarPath, ".git")).isDirectory()) return [];
+  } catch {
+    return [];
   }
-  const checkoutId = checkoutRandom(sidecarPath);
-
-  fs.rmSync(sidecarPath, { recursive: true, force: true });
-  // A refresh killed between the remove and the add leaves the primary holding
-  // an admin entry for a path that is no longer there, and `worktree add`
-  // refuses a path it still has registered. Pruning first lets a retry through.
-  git(primaryPath, ["worktree", "prune", "--expire", "now"], { check: false });
-  const added = git(primaryPath, ["worktree", "add", "--detach", sidecarPath], { check: false });
-  if (added.status !== 0) {
-    // The old checkout is already gone, so say what rebuilds one rather than
-    // leaving the user to guess from a git error.
-    throw new SidecarError(
-      `${added.stderr.trim() || "could not add the linked worktree"}; the previous checkout has been removed — run \`sidecar clone\` to rebuild one`,
-    );
-  }
-  // Detached above for the reason cloneOrUpdate is: the inbox branch is named
-  // after the checkout id, which has to be in place before ensureInboxBranch can
-  // resolve it.
-  fs.writeFileSync(path.join(gitDir(sidecarPath), "sidecar-id"), `${checkoutId}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-
-  ensureCommitIdentity(sidecarPath);
-  ensureRedactionFilter(sidecarPath, config.redaction);
-  // The shared store's remote-tracking refs can predate this checkout's last
-  // push, and ensureInboxBranch reads them to decide where the inbox starts.
-  // Without this the rebuilt worktree forks its inbox from an older main and
-  // the pushed history it should have recovered only returns on a later merge.
-  fetch(sidecarPath, true, false);
-  ensureInboxBranch(sidecarPath, config, expandInbox(config, sidecarPath));
-  logSidecarEvent("checkout-refresh", { root, sidecarPath, checkoutId });
-  return sidecarPath;
+  const result = git(sidecarPath, ["worktree", "list", "--porcelain"], { check: false });
+  if (result.status !== 0) return [];
+  const self = realpathOr(sidecarPath);
+  return result.stdout
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => line.slice("worktree ".length).trim())
+    .filter((entry) => entry && realpathOr(entry) !== self);
 }
 
-export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain: boolean): void {
+/**
+ * This checkout's id without requiring it to be a working repo.
+ *
+ * Deliberately forgiving: a checkout too broken to answer `git rev-parse` is one
+ * of the things refresh exists to replace, and a lost id costs only a new inbox
+ * branch name.
+ */
+function existingCheckoutId(sidecarPath: string): string | undefined {
+  const candidates: string[] = [];
+  const reported = git(sidecarPath, ["rev-parse", "--git-dir"], { check: false });
+  if (reported.status === 0) candidates.push(path.resolve(sidecarPath, reported.stdout.trim()));
+  candidates.push(path.join(sidecarPath, ".git"));
+  for (const candidate of candidates) {
+    try {
+      const id = slug(fs.readFileSync(path.join(candidate, "sidecar-id"), "utf8"));
+      if (id) return id;
+    } catch {
+      // Next candidate; a missing or unreadable id is not an error here.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Deletes the sidecar checkout and clones it again from scratch.
+ *
+ * Deliberately blunt, and deliberately without a rescue path. Whatever a sync has
+ * pushed comes back on its own — cloneOrUpdate rebuilds the checkout the way this
+ * working copy would have got it in the first place, tracking the same inbox
+ * branch off the remote — so the caller's job is to be sure a sync has run, which
+ * is what `sidecar refresh` refuses without. Buying that with the user's
+ * confirmation rather than with ref surgery is the point: there is no step here
+ * that can half-succeed and leave the repo worse than it found it.
+ *
+ * Being blunt is also what makes it general. A checkout can be wrong in more ways
+ * than sidecar has repairs for — an independent clone that should be a linked
+ * worktree, a wedged merge, a corrupt object store, a wrong origin, a diverged
+ * main — and rebuilding fixes all of them without having to name any of them.
+ *
+ * The checkout id is the one thing carried across. It names the inbox branch and
+ * the health branch, and nothing prunes abandoned ones from the remote, so a
+ * fresh id would strand this checkout's pushed history under a name no machine
+ * claims again and leave a machine in `sidecar health` that never reports.
+ */
+export function refreshCheckout(root: string, config: SidecarConfig): void {
+  const sidecarPath = resolveSidecarPath(root, config);
+  const checkoutId = existingCheckoutId(sidecarPath);
+
+  fs.rmSync(sidecarPath, { recursive: true, force: true });
+  // Something may still hold an admin entry for the path this checkout occupied:
+  // the family's clone if it was a linked worktree, or the family's clone again
+  // if an earlier refresh died between the remove and the add. `worktree add`
+  // refuses a path it still has registered, so clear it before rebuilding.
+  const family = familySidecarCheckout(root, config);
+  if (family) git(family, ["worktree", "prune", "--expire", "now"], { check: false });
+
+  cloneOrUpdate(root, config, true, { checkoutId });
+  logSidecarEvent("checkout-refresh", { root, sidecarPath, checkoutId: checkoutId ?? null });
+}
+
+/**
+ * The standalone answer to the same question, where deleting the checkout is not
+ * on the table: it is the user's own repo, with their own source in it.
+ *
+ * So instead of rebuilding, re-establish. Rewire the redaction filter, settle the
+ * canonical branch onto the remote's copy — ensureMainBranch parks a diverged tip
+ * under refs/sidecar-discarded/ on its way past — and put the checkout back on
+ * its inbox branch. `resetInbox` goes one step further and moves the inbox back
+ * to the canonical branch, which is the only thing that clears an inbox that has
+ * diverged; the tip it drops is parked the same way.
+ */
+export function refreshStandaloneCheckout(root: string, config: SidecarConfig, resetInbox: boolean): void {
+  ensureCommitIdentity(root);
+  ensureRedactionFilter(root, config.redaction);
+  fetch(root, true, false);
+  ensureMainBranch(root, config);
+
+  const inbox = expandInbox(config, root);
+  // After ensureMainBranch the checkout is on the canonical branch, so the inbox
+  // is not checked out and can be moved.
+  if (resetInbox && branchExists(root, inbox) && branchExists(root, config.branch)) {
+    const tip = git(root, ["rev-parse", "--short", inbox]).stdout.trim();
+    const discarded = `refs/sidecar-discarded/${inbox}/${utcTimestamp()}-${tip}`;
+    git(root, ["update-ref", discarded, inbox], { check: false });
+    git(root, ["branch", "-f", inbox, config.branch]);
+    console.log(`reset ${paint("brand", inbox)} to ${config.branch}; old tip kept at ${paint("brand", discarded)}`);
+  }
+  ensureInboxBranch(root, config, inbox);
+  logSidecarEvent("checkout-refresh", { root, standalone: true, resetInbox });
+}
+
+export function cloneOrUpdate(
+  root: string,
+  config: SidecarConfig,
+  bootstrapMain: boolean,
+  options?: { checkoutId?: string },
+): void {
   const sidecarPath = resolveSidecarPath(root, config);
   if (fs.existsSync(sidecarPath) && !hasGitMetadata(sidecarPath)) {
     if (fs.readdirSync(sidecarPath).length) {
@@ -677,8 +759,16 @@ export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain
     // Detached, because the inbox branch is named after this worktree's own git
     // dir — which does not exist until the worktree does. ensureInboxBranch
     // below puts it on its branch.
-    if (primaryPath) git(primaryPath, ["worktree", "add", "--detach", sidecarPath]);
-    else gitRaw(["clone", "--", config.remote, sidecarPath]);
+    if (primaryPath) {
+      git(primaryPath, ["worktree", "add", "--detach", sidecarPath]);
+      // A clone fetches on its own; a worktree inherits whatever the shared store
+      // last fetched, which can be older than the remote. ensureInboxBranch reads
+      // those refs to choose where this inbox starts, so a stale origin/<inbox>
+      // would fork the checkout off an older main.
+      fetch(sidecarPath, true, false);
+    } else {
+      gitRaw(["clone", "--", config.remote, sidecarPath]);
+    }
   } else if (hasGitMetadata(sidecarPath)) {
     const existing = git(sidecarPath, ["remote", "get-url", "origin"], { check: false });
     if (existing.status !== 0) {
@@ -698,6 +788,16 @@ export function cloneOrUpdate(root: string, config: SidecarConfig, bootstrapMain
     fetch(sidecarPath, true);
   } else {
     throw new SidecarError(`${sidecarPath} is not usable as a sidecar checkout`);
+  }
+
+  // Before expandInbox below, which reads the id to name the inbox branch. A
+  // refresh passes the id of the checkout it just replaced so the rebuilt one
+  // claims the same inbox instead of stranding it on the remote.
+  if (options?.checkoutId) {
+    fs.writeFileSync(path.join(gitDir(sidecarPath), "sidecar-id"), `${options.checkoutId}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
   }
 
   ensureCommitIdentity(sidecarPath);
