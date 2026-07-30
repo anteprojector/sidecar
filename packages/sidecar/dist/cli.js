@@ -2648,87 +2648,6 @@ function checkoutIsUnlinkedFromFamily(root, config, sidecarPath) {
     return false;
   }
 }
-function worktreeHoldingBranch(repo, branch) {
-  const result = git(repo, ["worktree", "list", "--porcelain"], { check: false });
-  if (result.status !== 0)
-    return;
-  let current;
-  for (const line of result.stdout.split(/\r?\n/)) {
-    if (line.startsWith("worktree "))
-      current = line.slice("worktree ".length).trim();
-    else if (line === `branch refs/heads/${branch}`)
-      return current;
-  }
-  return;
-}
-function checkoutIsOwnRepo(sidecarPath) {
-  const top = git(sidecarPath, ["rev-parse", "--show-toplevel"], { check: false });
-  if (top.status !== 0)
-    return false;
-  return realpathOr(top.stdout.trim()) === realpathOr(sidecarPath);
-}
-function unpushedCommits(sidecarPath) {
-  if (!hasAnyCommit(sidecarPath))
-    return 0;
-  const counted = git(sidecarPath, ["rev-list", "--count", "HEAD", "--not", "--remotes=origin"], {
-    check: false
-  });
-  return counted.status === 0 ? Number(counted.stdout.trim()) || 0 : 0;
-}
-function dependentWorktrees(sidecarPath) {
-  try {
-    if (!fs7.statSync(path7.join(sidecarPath, ".git")).isDirectory())
-      return [];
-  } catch {
-    return [];
-  }
-  const result = git(sidecarPath, ["worktree", "list", "--porcelain"], { check: false });
-  if (result.status !== 0)
-    return [];
-  const self = realpathOr(sidecarPath);
-  return result.stdout.split(/\r?\n/).filter((line) => line.startsWith("worktree ")).map((line) => line.slice("worktree ".length).trim()).filter((entry) => entry && realpathOr(entry) !== self);
-}
-function existingCheckoutId(sidecarPath) {
-  const candidates = [];
-  const reported = git(sidecarPath, ["rev-parse", "--git-dir"], { check: false });
-  if (reported.status === 0)
-    candidates.push(path7.resolve(sidecarPath, reported.stdout.trim()));
-  candidates.push(path7.join(sidecarPath, ".git"));
-  for (const candidate of candidates) {
-    try {
-      const id = slug(fs7.readFileSync(path7.join(candidate, "sidecar-id"), "utf8"));
-      if (id)
-        return id;
-    } catch {}
-  }
-  return;
-}
-function refreshCheckout(root, config) {
-  const sidecarPath = resolveSidecarPath(root, config);
-  const checkoutId = existingCheckoutId(sidecarPath);
-  fs7.rmSync(sidecarPath, { recursive: true, force: true });
-  const family = familySidecarCheckout(root, config);
-  if (family)
-    git(family, ["worktree", "prune", "--expire", "now"], { check: false });
-  cloneOrUpdate(root, config, true, { checkoutId });
-  logSidecarEvent("checkout-refresh", { root, sidecarPath, checkoutId: checkoutId ?? null });
-}
-function refreshStandaloneCheckout(root, config, resetInbox) {
-  ensureCommitIdentity(root);
-  ensureRedactionFilter(root, config.redaction);
-  fetch(root, true, false);
-  ensureMainBranch(root, config);
-  const inbox = expandInbox(config, root);
-  if (resetInbox && branchExists(root, inbox) && branchExists(root, config.branch)) {
-    const tip = git(root, ["rev-parse", "--short", inbox]).stdout.trim();
-    const discarded = `refs/sidecar-discarded/${inbox}/${utcTimestamp()}-${tip}`;
-    git(root, ["update-ref", discarded, inbox], { check: false });
-    git(root, ["branch", "-f", inbox, config.branch]);
-    console.log(`reset ${paint("brand", inbox)} to ${config.branch}; old tip kept at ${paint("brand", discarded)}`);
-  }
-  ensureInboxBranch(root, config, inbox);
-  logSidecarEvent("checkout-refresh", { root, standalone: true, resetInbox });
-}
 function cloneOrUpdate(root, config, bootstrapMain, options) {
   const sidecarPath = resolveSidecarPath(root, config);
   if (fs7.existsSync(sidecarPath) && !hasGitMetadata(sidecarPath)) {
@@ -2739,12 +2658,10 @@ function cloneOrUpdate(root, config, bootstrapMain, options) {
   }
   if (!fs7.existsSync(sidecarPath)) {
     const primaryPath = familySidecarCheckout(root, config);
-    if (primaryPath) {
+    if (primaryPath)
       git(primaryPath, ["worktree", "add", "--detach", sidecarPath]);
-      fetch(sidecarPath, true, false);
-    } else {
+    else
       gitRaw(["clone", "--", config.remote, sidecarPath]);
-    }
   } else if (hasGitMetadata(sidecarPath)) {
     const existing = git(sidecarPath, ["remote", "get-url", "origin"], { check: false });
     if (existing.status !== 0) {
@@ -3553,74 +3470,6 @@ function cmdClone(args) {
   registerCurrentInstance(root, config, { event: "clone" });
   return 0;
 }
-function cmdRefresh(args) {
-  const parsed = parseOptions(args, {
-    boolean: new Set(["--force", "--yes", "-y"]),
-    value: new Set
-  });
-  if (parsed.positional.length)
-    throw new SidecarError("usage: sidecar refresh [--force] [--yes]");
-  const [root, config] = loadProject();
-  const force = parsed.flags.has("--force");
-  const standalone = isStandalone(config);
-  const sidecarPath = requireSidecarCheckout(root, config);
-  const readable = checkoutIsOwnRepo(sidecarPath);
-  if (!readable && standalone) {
-    throw new SidecarError(`${sidecarPath} is not a readable Git repository, and in standalone mode that repo is your own — sidecar will not rebuild it`);
-  }
-  if (!readable && !force) {
-    throw new SidecarError(`${sidecarPath} is not a readable Git repository, so what it still holds cannot be checked; \`sidecar refresh --force\` replaces it anyway`);
-  }
-  let inbox;
-  if (readable) {
-    inbox = expandInbox(config, sidecarPath);
-    fetch(sidecarPath, true, false);
-    const unpushed = unpushedCommits(sidecarPath);
-    const dirtyFiles = git(sidecarPath, ["status", "--porcelain"], { check: false }).stdout.split(`
-`).filter(Boolean).length;
-    if ((unpushed || dirtyFiles) && !force) {
-      const held = [
-        unpushed ? `${unpushed} commit(s) the remote has not seen` : "",
-        dirtyFiles ? `${dirtyFiles} uncommitted file(s)` : ""
-      ].filter(Boolean);
-      throw new SidecarError(`this checkout still holds ${held.join(" and ")}; run \`sidecar sync\` to push them, then refresh — or \`sidecar refresh --force\` to discard them`);
-    }
-  }
-  if (standalone) {
-    console.log(`${paint("repo", root)} is its own sidecar, so refresh does not rebuild it.`);
-    console.log(`it rewires the redaction filter and settles ${config.branch} onto ${paint("brand", `origin/${config.branch}`)}${force ? `, then resets the inbox branch to ${config.branch}` : ""}.`);
-  } else {
-    const dependents = dependentWorktrees(sidecarPath);
-    if (dependents.length && !force) {
-      throw new SidecarError(`${dependents.length} other checkout(s) share this one's Git store (${dependents.join(", ")}); refresh those working copies instead, or \`sidecar refresh --force\` to replace this one and leave them to be refreshed too`);
-    }
-    const family = familySidecarCheckout(root, config);
-    const holder = inbox && family ? worktreeHoldingBranch(family, inbox) : undefined;
-    if (holder && realpathOr(holder) !== realpathOr(sidecarPath)) {
-      throw new SidecarError(`${inbox} is already checked out at ${holder}; give this working copy its own inbox (a {random} in the .sidecar inbox template) before refreshing`);
-    }
-    console.log(`refresh deletes ${paint("brand", sidecarPath)} and clones it again from ${paint("brand", config.remote)}, ${paint("attn", "discarding anything not pushed")}.`);
-    if (family)
-      console.log(`the rebuilt checkout will share this repo family's Git store.`);
-  }
-  const confirmed = parsed.flags.has("--yes") || parsed.flags.has("-y") || promptYesNoDefaultNo("continue?");
-  if (!confirmed) {
-    console.log("nothing changed");
-    return 0;
-  }
-  withSyncLock(root, "throw", () => {
-    if (readable && !force && isDirty(sidecarPath)) {
-      throw new SidecarError("the sidecar checkout changed while waiting for confirmation; rerun refresh");
-    }
-    if (standalone)
-      refreshStandaloneCheckout(root, config, force);
-    else
-      refreshCheckout(root, config);
-  });
-  registerCurrentInstance(root, config, { event: "refresh" });
-  console.log(`refreshed sidecar at ${paint("brand", sidecarPath)}`);
-  return 0;
-}
 function promptSidecarPath(root) {
   if (!process.stdin.isTTY)
     return DEFAULT_PATH;
@@ -3858,8 +3707,172 @@ var init_cmd_init = __esm(() => {
   init_redaction();
 });
 
-// src/cmd-status.ts
+// src/cmd-refresh.ts
 import fs10 from "node:fs";
+import path9 from "node:path";
+function worktreeHoldingBranch(repo, branch) {
+  const result = git(repo, ["worktree", "list", "--porcelain"], { check: false });
+  if (result.status !== 0)
+    return;
+  let current;
+  for (const line of result.stdout.split(/\r?\n/)) {
+    if (line.startsWith("worktree "))
+      current = line.slice("worktree ".length).trim();
+    else if (line === `branch refs/heads/${branch}`)
+      return current;
+  }
+  return;
+}
+function checkoutIsOwnRepo(sidecarPath) {
+  const top = git(sidecarPath, ["rev-parse", "--show-toplevel"], { check: false });
+  if (top.status !== 0)
+    return false;
+  return realpathOr(top.stdout.trim()) === realpathOr(sidecarPath);
+}
+function unpushedCommits(sidecarPath) {
+  if (!hasAnyCommit(sidecarPath))
+    return 0;
+  const counted = git(sidecarPath, ["rev-list", "--count", "HEAD", "--not", "--remotes=origin"], {
+    check: false
+  });
+  return counted.status === 0 ? Number(counted.stdout.trim()) || 0 : 0;
+}
+function dependentWorktrees(sidecarPath) {
+  try {
+    if (!fs10.statSync(path9.join(sidecarPath, ".git")).isDirectory())
+      return [];
+  } catch {
+    return [];
+  }
+  const result = git(sidecarPath, ["worktree", "list", "--porcelain"], { check: false });
+  if (result.status !== 0)
+    return [];
+  const self = realpathOr(sidecarPath);
+  return result.stdout.split(/\r?\n/).filter((line) => line.startsWith("worktree ")).map((line) => line.slice("worktree ".length).trim()).filter((entry) => entry && realpathOr(entry) !== self);
+}
+function existingCheckoutId(sidecarPath) {
+  const candidates = [];
+  const reported = git(sidecarPath, ["rev-parse", "--git-dir"], { check: false });
+  if (reported.status === 0)
+    candidates.push(path9.resolve(sidecarPath, reported.stdout.trim()));
+  candidates.push(path9.join(sidecarPath, ".git"));
+  for (const candidate of candidates) {
+    try {
+      const id = slug(fs10.readFileSync(path9.join(candidate, "sidecar-id"), "utf8"));
+      if (id)
+        return id;
+    } catch {}
+  }
+  return;
+}
+function refreshCheckout(root, config) {
+  const sidecarPath = resolveSidecarPath(root, config);
+  const checkoutId = existingCheckoutId(sidecarPath);
+  fs10.rmSync(sidecarPath, { recursive: true, force: true });
+  const family = familySidecarCheckout(root, config);
+  if (family) {
+    git(family, ["worktree", "prune", "--expire", "now"], { check: false });
+    fetch(family, true, false);
+  }
+  cloneOrUpdate(root, config, true, { checkoutId });
+  logSidecarEvent("checkout-refresh", { root, sidecarPath, checkoutId: checkoutId ?? null });
+}
+function refreshStandaloneCheckout(root, config, resetInbox) {
+  ensureCommitIdentity(root);
+  ensureRedactionFilter(root, config.redaction);
+  fetch(root, true, false);
+  ensureMainBranch(root, config);
+  const inbox = expandInbox(config, root);
+  if (resetInbox && branchExists(root, inbox) && branchExists(root, config.branch)) {
+    const tip = git(root, ["rev-parse", "--short", inbox]).stdout.trim();
+    const discarded = `refs/sidecar-discarded/${inbox}/${utcTimestamp()}-${tip}`;
+    git(root, ["update-ref", discarded, inbox], { check: false });
+    git(root, ["branch", "-f", inbox, config.branch]);
+    console.log(`reset ${paint("brand", inbox)} to ${config.branch}; old tip kept at ${paint("brand", discarded)}`);
+  }
+  ensureInboxBranch(root, config, inbox);
+  logSidecarEvent("checkout-refresh", { root, standalone: true, resetInbox });
+}
+function cmdRefresh(args) {
+  const parsed = parseOptions(args, {
+    boolean: new Set(["--force", "--yes", "-y"]),
+    value: new Set
+  });
+  if (parsed.positional.length)
+    throw new SidecarError("usage: sidecar refresh [--force] [--yes]");
+  const [root, config] = loadProject();
+  const force = parsed.flags.has("--force");
+  const standalone = isStandalone(config);
+  const sidecarPath = requireSidecarCheckout(root, config);
+  const readable = checkoutIsOwnRepo(sidecarPath);
+  if (!readable && standalone) {
+    throw new SidecarError(`${sidecarPath} is not a readable Git repository, and in standalone mode that repo is your own — sidecar will not rebuild it`);
+  }
+  if (!readable && !force) {
+    throw new SidecarError(`${sidecarPath} is not a readable Git repository, so what it still holds cannot be checked; \`sidecar refresh --force\` replaces it anyway`);
+  }
+  let inbox;
+  if (readable) {
+    inbox = expandInbox(config, sidecarPath);
+    fetch(sidecarPath, true, false);
+    const unpushed = unpushedCommits(sidecarPath);
+    const dirtyFiles = git(sidecarPath, ["status", "--porcelain"], { check: false }).stdout.split(`
+`).filter(Boolean).length;
+    if ((unpushed || dirtyFiles) && !force) {
+      const held = [
+        unpushed ? `${unpushed} commit(s) the remote has not seen` : "",
+        dirtyFiles ? `${dirtyFiles} uncommitted file(s)` : ""
+      ].filter(Boolean);
+      throw new SidecarError(`this checkout still holds ${held.join(" and ")}; run \`sidecar sync\` to push them, then refresh — or \`sidecar refresh --force\` to discard them`);
+    }
+  }
+  if (standalone) {
+    console.log(`${paint("repo", root)} is its own sidecar, so refresh does not rebuild it.`);
+    console.log(`it rewires the redaction filter and settles ${config.branch} onto ${paint("brand", `origin/${config.branch}`)}${force ? `, then resets the inbox branch to ${config.branch}` : ""}.`);
+  } else {
+    const dependents = dependentWorktrees(sidecarPath);
+    if (dependents.length && !force) {
+      throw new SidecarError(`${dependents.length} other checkout(s) share this one's Git store (${dependents.join(", ")}); refresh those working copies instead, or \`sidecar refresh --force\` to replace this one and leave them to be refreshed too`);
+    }
+    const family = familySidecarCheckout(root, config);
+    const holder = inbox && family ? worktreeHoldingBranch(family, inbox) : undefined;
+    if (holder && realpathOr(holder) !== realpathOr(sidecarPath)) {
+      throw new SidecarError(`${inbox} is already checked out at ${holder}; give this working copy its own inbox (a {random} in the .sidecar inbox template) before refreshing`);
+    }
+    console.log(`refresh deletes ${paint("brand", sidecarPath)} and clones it again from ${paint("brand", config.remote)}, ${paint("attn", "discarding anything not pushed")}.`);
+    if (family)
+      console.log(`the rebuilt checkout will share this repo family's Git store.`);
+  }
+  const confirmed = parsed.flags.has("--yes") || parsed.flags.has("-y") || promptYesNoDefaultNo("continue?");
+  if (!confirmed) {
+    console.log("nothing changed");
+    return 0;
+  }
+  withSyncLock(root, "throw", () => {
+    if (readable && !force && isDirty(sidecarPath)) {
+      throw new SidecarError("the sidecar checkout changed while waiting for confirmation; rerun refresh");
+    }
+    if (standalone)
+      refreshStandaloneCheckout(root, config, force);
+    else
+      refreshCheckout(root, config);
+  });
+  registerCurrentInstance(root, config, { event: "refresh" });
+  console.log(`refreshed sidecar at ${paint("brand", sidecarPath)}`);
+  return 0;
+}
+var init_cmd_refresh = __esm(() => {
+  init_color();
+  init_util();
+  init_git();
+  init_config();
+  init_state();
+  init_sync();
+  init_ui();
+});
+
+// src/cmd-status.ts
+import fs11 from "node:fs";
 function statusLine(label, value, role) {
   labelLine(STATUS_LABEL_WIDTH, label, value, role);
 }
@@ -4080,16 +4093,16 @@ function cmdTail(args) {
     throw new SidecarError("--lines requires a positive integer");
   }
   const filePath = sidecarLogPath();
-  if (!fs10.existsSync(filePath)) {
+  if (!fs11.existsSync(filePath)) {
     if (parsed.flags.has("-f") || parsed.flags.has("--follow")) {
       followLog(filePath, 0);
       return 0;
     }
     return 0;
   }
-  const stat = fs10.statSync(filePath);
+  const stat = fs11.statSync(filePath);
   if (stat.size > 0) {
-    process.stdout.write(lastLines(fs10.readFileSync(filePath, "utf8"), lines));
+    process.stdout.write(lastLines(fs11.readFileSync(filePath, "utf8"), lines));
   }
   if (parsed.flags.has("-f") || parsed.flags.has("--follow")) {
     followLog(filePath, stat.size);
@@ -4112,7 +4125,7 @@ function followLog(filePath, startOffset) {
     sleep(1000);
     let stat;
     try {
-      stat = fs10.statSync(filePath);
+      stat = fs11.statSync(filePath);
     } catch {
       offset = 0;
       continue;
@@ -4121,17 +4134,17 @@ function followLog(filePath, startOffset) {
       offset = 0;
     if (stat.size <= offset)
       continue;
-    const fd = fs10.openSync(filePath, "r");
+    const fd = fs11.openSync(filePath, "r");
     try {
       const length = stat.size - offset;
       const buffer = Buffer.alloc(length);
-      const bytesRead = fs10.readSync(fd, buffer, 0, length, offset);
+      const bytesRead = fs11.readSync(fd, buffer, 0, length, offset);
       if (bytesRead > 0) {
         process.stdout.write(buffer.subarray(0, bytesRead).toString("utf8"));
         offset += bytesRead;
       }
     } finally {
-      fs10.closeSync(fd);
+      fs11.closeSync(fd);
     }
   }
 }
@@ -4162,8 +4175,8 @@ __export(exports_daemon, {
   checkAndInstallUpdate: () => checkAndInstallUpdate,
   WATCH_LIMIT: () => WATCH_LIMIT
 });
-import fs11 from "node:fs";
-import path9 from "node:path";
+import fs12 from "node:fs";
+import path10 from "node:path";
 import { spawn as spawn2 } from "node:child_process";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 async function runDaemonLoop(options) {
@@ -4255,7 +4268,7 @@ async function runCycle(state) {
   let failed = 0;
   let skipped = 0;
   for (const instance of readInstances()) {
-    if (!fs11.existsSync(instance.configPath)) {
+    if (!fs12.existsSync(instance.configPath)) {
       const misses = (state.misses.get(instance.root) ?? 0) + 1;
       state.misses.set(instance.root, misses);
       if (misses >= PRUNE_AFTER_MISSES) {
@@ -4360,7 +4373,7 @@ async function syncIfDirty(state, root, trigger) {
 }
 async function checkoutIsDirty(root) {
   const sidecarPath = readInstances().find((instance) => instance.root === root)?.sidecarPath;
-  if (!sidecarPath || !fs11.existsSync(sidecarPath))
+  if (!sidecarPath || !fs12.existsSync(sidecarPath))
     return false;
   const result = await runChild("git", ["-C", sidecarPath, "status", "--porcelain"], { timeoutMs: 30000 });
   return result.status === 0 && Boolean(result.stdout.trim());
@@ -4368,7 +4381,7 @@ async function checkoutIsDirty(root) {
 function localSidecarCliPath(root) {
   if (!projectDependsOnSidecar(root))
     return;
-  const candidate = path9.join(root, "node_modules", PACKAGE_NAME, "dist", "cli.js");
+  const candidate = path10.join(root, "node_modules", PACKAGE_NAME, "dist", "cli.js");
   if (!isFile(candidate))
     return;
   const localVersion = installedPackageVersion(root);
@@ -4380,7 +4393,7 @@ function currentCliPath() {
   return process.argv[1] || fileURLToPath3(import.meta.url);
 }
 function selectWatchTargets(instances, limit = WATCH_LIMIT) {
-  return [...instances].filter((instance) => fs11.existsSync(instance.configPath) && fs11.existsSync(instance.sidecarPath)).sort((left, right) => instanceRecency(right) - instanceRecency(left)).slice(0, limit);
+  return [...instances].filter((instance) => fs12.existsSync(instance.configPath) && fs12.existsSync(instance.sidecarPath)).sort((left, right) => instanceRecency(right) - instanceRecency(left)).slice(0, limit);
 }
 function instanceRecency(instance) {
   const time = Date.parse(instance.lastSyncAt ?? instance.updatedAt ?? instance.registeredAt);
@@ -4510,7 +4523,7 @@ async function watchRegistry(state) {
     const watcher = chokidar.watch(sidecarStateDir(), { ignoreInitial: true, depth: 0 });
     watcher.on("all", (...args) => {
       const filePath = typeof args[1] === "string" ? args[1] : "";
-      if (path9.basename(filePath) !== "instances.json")
+      if (path10.basename(filePath) !== "instances.json")
         return;
       if (state.registryTimer)
         return;
@@ -4548,18 +4561,18 @@ function compileGitignoreMatcher(lines) {
 function watchIgnoreMatcher(sidecarPath) {
   let gitignore;
   try {
-    const ignoreFile = path9.join(sidecarPath, ".gitignore");
-    if (fs11.existsSync(ignoreFile)) {
-      gitignore = compileGitignoreMatcher(fs11.readFileSync(ignoreFile, "utf8").split(`
+    const ignoreFile = path10.join(sidecarPath, ".gitignore");
+    if (fs12.existsSync(ignoreFile)) {
+      gitignore = compileGitignoreMatcher(fs12.readFileSync(ignoreFile, "utf8").split(`
 `));
     }
   } catch {}
-  const root = path9.resolve(sidecarPath);
+  const root = path10.resolve(sidecarPath);
   return (candidate) => {
-    const relative = path9.relative(root, candidate);
+    const relative = path10.relative(root, candidate);
     if (!relative)
       return false;
-    const normalized = relative.split(path9.sep).join("/");
+    const normalized = relative.split(path10.sep).join("/");
     if (normalized.startsWith(".."))
       return true;
     if (normalized === ".git" || normalized.startsWith(".git/"))
@@ -4635,10 +4648,10 @@ function restartAfterUpdate() {
 }
 async function acquireDaemonPid() {
   const pidPath = daemonPidPath();
-  fs11.mkdirSync(path9.dirname(pidPath), { recursive: true });
+  fs12.mkdirSync(path10.dirname(pidPath), { recursive: true });
   while (true) {
     try {
-      fs11.writeFileSync(pidPath, `${process.pid}
+      fs12.writeFileSync(pidPath, `${process.pid}
 `, { encoding: "utf8", flag: "wx" });
       return;
     } catch (error) {
@@ -4654,7 +4667,7 @@ async function acquireDaemonPid() {
       continue;
     }
     logSidecarEvent("daemon-pid-heal", { holder: holder ?? null });
-    fs11.rmSync(pidPath, { force: true });
+    fs12.rmSync(pidPath, { force: true });
   }
 }
 function installShutdownHandlers() {
@@ -4669,12 +4682,12 @@ function installShutdownHandlers() {
 function removeOwnPidFile() {
   try {
     if (readPid(daemonPidPath()) === process.pid)
-      fs11.rmSync(daemonPidPath(), { force: true });
+      fs12.rmSync(daemonPidPath(), { force: true });
   } catch {}
 }
 function readPid(pidPath) {
   try {
-    const pid = Number(fs11.readFileSync(pidPath, "utf8").trim());
+    const pid = Number(fs12.readFileSync(pidPath, "utf8").trim());
     return Number.isInteger(pid) && pid > 0 ? pid : undefined;
   } catch {
     return;
@@ -4715,21 +4728,21 @@ function runChild(command, args, options) {
 }
 function isFile(filePath) {
   try {
-    return fs11.statSync(filePath).isFile();
+    return fs12.statSync(filePath).isFile();
   } catch {
     return false;
   }
 }
 function realpathOr2(filePath) {
   try {
-    return fs11.realpathSync(filePath);
+    return fs12.realpathSync(filePath);
   } catch {
-    return path9.resolve(filePath);
+    return path10.resolve(filePath);
   }
 }
 function isInsidePath2(child, parent) {
-  const relative = path9.relative(parent, child);
-  return Boolean(relative) && !relative.startsWith("..") && !path9.isAbsolute(relative);
+  const relative = path10.relative(parent, child);
+  return Boolean(relative) && !relative.startsWith("..") && !path10.isAbsolute(relative);
 }
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -4932,9 +4945,9 @@ var init_cmd_daemon = __esm(() => {
 });
 
 // src/cmd-sync.ts
-import fs12 from "node:fs";
+import fs13 from "node:fs";
 import os6 from "node:os";
-import path10 from "node:path";
+import path11 from "node:path";
 function cmdSnapshot(args) {
   const parsed = parseOptions(args, {
     boolean: new Set(["--push"]),
@@ -5039,7 +5052,7 @@ function cmdRedactions(args) {
   let shown = 0;
   let items = 0;
   for (const relPath of files) {
-    const delta = fileRedactionDelta(path10.join(sidecarPath, relPath), config.redaction);
+    const delta = fileRedactionDelta(path11.join(sidecarPath, relPath), config.redaction);
     if (!delta)
       continue;
     if (shown)
@@ -5059,12 +5072,12 @@ ${items} redaction(s) in ${shown} file(s) will be pushed this way (mode: ${confi
   return 0;
 }
 function printRedactionDiff(original, redacted) {
-  const scratch = fs12.mkdtempSync(path10.join(os6.tmpdir(), "sidecar-redactions-"));
+  const scratch = fs13.mkdtempSync(path11.join(os6.tmpdir(), "sidecar-redactions-"));
   try {
-    const localPath = path10.join(scratch, "local");
-    const pushedPath = path10.join(scratch, "pushed");
-    fs12.writeFileSync(localPath, original, "utf8");
-    fs12.writeFileSync(pushedPath, redacted, "utf8");
+    const localPath = path11.join(scratch, "local");
+    const pushedPath = path11.join(scratch, "pushed");
+    fs13.writeFileSync(localPath, original, "utf8");
+    fs13.writeFileSync(pushedPath, redacted, "utf8");
     const color = colorLevel() > 0 ? ["--color"] : [];
     const diff = gitRaw(["diff", "--no-index", ...color, "--", localPath, pushedPath], { check: false });
     const lines = diff.stdout.split(`
@@ -5075,16 +5088,16 @@ function printRedactionDiff(original, redacted) {
     if (body)
       console.log(body);
   } finally {
-    fs12.rmSync(scratch, { recursive: true, force: true });
+    fs13.rmSync(scratch, { recursive: true, force: true });
   }
 }
 function cmdRedact(args) {
   const parsed = parseOptions(args, { boolean: new Set, value: new Set(["--mode"]) });
   const mode = redactionModeConfigValue(getValue(parsed, "--mode", DEFAULT_REDACTION_MODE), "--mode");
-  const output = redactBuffer(fs12.readFileSync(0), mode);
+  const output = redactBuffer(fs13.readFileSync(0), mode);
   let offset = 0;
   while (offset < output.length) {
-    offset += fs12.writeSync(1, output, offset, output.length - offset);
+    offset += fs13.writeSync(1, output, offset, output.length - offset);
   }
   return 0;
 }
@@ -5167,6 +5180,7 @@ var init_commands = __esm(() => {
   init_util();
   init_install();
   init_cmd_init();
+  init_cmd_refresh();
   init_cmd_status();
   init_cmd_daemon();
   init_cmd_sync();
@@ -5293,6 +5307,7 @@ var init_cli = __esm(() => {
   init_sync();
   init_commands();
   init_cmd_init();
+  init_cmd_refresh();
   init_cmd_status();
   init_cmd_daemon();
   init_cmd_sync();
@@ -5300,8 +5315,8 @@ var init_cli = __esm(() => {
 
 // src/bin.ts
 init_cli();
-import fs13 from "node:fs";
-import path11 from "node:path";
+import fs14 from "node:fs";
+import path12 from "node:path";
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 var SKIP_LOCAL_EXEC_ENV3 = "SIDECAR_SKIP_LOCAL_EXEC";
@@ -5330,15 +5345,15 @@ if (!process.env[SKIP_LOCAL_EXEC_ENV3]) {
 }
 process.exit(await main());
 function findLocalInstall(start, self) {
-  let current = path11.resolve(start);
+  let current = path12.resolve(start);
   while (true) {
     if (projectDependsOnSidecar2(current)) {
-      const candidate = path11.join(current, "node_modules", PACKAGE_NAME2, "dist", "cli.js");
+      const candidate = path12.join(current, "node_modules", PACKAGE_NAME2, "dist", "cli.js");
       if (isFile2(candidate) && !sameFile(candidate, self)) {
         return { executable: candidate, newer: localIsNewer(current) };
       }
     }
-    const parent = path11.dirname(current);
+    const parent = path12.dirname(current);
     if (parent === current)
       return;
     current = parent;
@@ -5349,11 +5364,11 @@ function localIsNewer(projectRoot) {
   return localVersion !== undefined && compareVersions(localVersion, packageVersion()) > 0;
 }
 function projectDependsOnSidecar2(projectRoot) {
-  const manifestPath = path11.join(projectRoot, "package.json");
+  const manifestPath = path12.join(projectRoot, "package.json");
   if (!isFile2(manifestPath))
     return false;
   try {
-    const manifest = JSON.parse(fs13.readFileSync(manifestPath, "utf8"));
+    const manifest = JSON.parse(fs14.readFileSync(manifestPath, "utf8"));
     return Boolean(manifest.dependencies?.[PACKAGE_NAME2] || manifest.devDependencies?.[PACKAGE_NAME2] || manifest.optionalDependencies?.[PACKAGE_NAME2] || manifest.peerDependencies?.[PACKAGE_NAME2]);
   } catch {
     return false;
@@ -5361,14 +5376,14 @@ function projectDependsOnSidecar2(projectRoot) {
 }
 function isFile2(filePath) {
   try {
-    return fs13.statSync(filePath).isFile();
+    return fs14.statSync(filePath).isFile();
   } catch {
     return false;
   }
 }
 function sameFile(first, second) {
   try {
-    return fs13.realpathSync(first) === fs13.realpathSync(second);
+    return fs14.realpathSync(first) === fs14.realpathSync(second);
   } catch {
     return false;
   }

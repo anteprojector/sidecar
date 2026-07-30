@@ -19,6 +19,7 @@ export * from "./ui.js";
 export * from "./sync.js";
 export * from "./commands.js";
 export * from "./cmd-init.js";
+export * from "./cmd-refresh.js";
 export * from "./cmd-status.js";
 export * from "./cmd-daemon.js";
 export * from "./cmd-sync.js";

@@ -5,7 +5,8 @@
 import { colorLevel, paint } from "./color.js";
 import { SidecarError } from "./util.js";
 import { packageVersion } from "./install.js";
-import { cmdClone, cmdDeinit, cmdInit, cmdRefresh } from "./cmd-init.js";
+import { cmdClone, cmdDeinit, cmdInit } from "./cmd-init.js";
+import { cmdRefresh } from "./cmd-refresh.js";
 import { cmdHealth, cmdInstances, cmdStatus, cmdTail } from "./cmd-status.js";
 import { cmdDaemon, cmdRegisterInstall, cmdSetInstallSource, cmdUpdate } from "./cmd-daemon.js";
 import { cmdMerge, cmdRedact, cmdRedactions, cmdSnapshot, cmdSync } from "./cmd-sync.js";

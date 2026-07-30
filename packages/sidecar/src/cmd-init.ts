@@ -14,16 +14,8 @@ import {
   getValue,
   nowIso,
   parseOptions,
-  realpathOr,
 } from "./util.js";
-import {
-  fetch,
-  git,
-  gitToplevel,
-  gitToplevelOptional,
-  hasGitMetadata,
-  isDirty,
-} from "./git.js";
+import { git, gitToplevel, gitToplevelOptional, hasGitMetadata } from "./git.js";
 import {
   GLOBAL_EXEC_ENV,
   PACKAGE_NAME,
@@ -39,7 +31,6 @@ import {
   DEFAULT_INBOX,
   DEFAULT_PATH,
   type SidecarConfig,
-  expandInbox,
   findConfigRootOptional,
   isStandalone,
   isStandalonePath,
@@ -47,7 +38,6 @@ import {
   pathIsRepoRoot,
   readConfig,
   redactionModeConfigValue,
-  requireSidecarCheckout,
   resolveSidecarPath,
   validateBranch,
   validateInboxTemplate,
@@ -56,18 +46,7 @@ import {
 } from "./config.js";
 import { readSettings, registerCurrentInstance, unregisterInstance, withSyncLock, writeSettings } from "./state.js";
 import { SKIP_SERVICE_ENV, daemonServiceStatus } from "./service.js";
-import {
-  checkoutIsOwnRepo,
-  cloneOrUpdate,
-  dependentWorktrees,
-  familySidecarCheckout,
-  refreshCheckout,
-  refreshStandaloneCheckout,
-  removeRedactionFilter,
-  syncProject,
-  unpushedCommits,
-  worktreeHoldingBranch,
-} from "./sync.js";
+import { cloneOrUpdate, removeRedactionFilter, syncProject } from "./sync.js";
 import { promptLine, promptYesNo, promptYesNoDefaultNo } from "./ui.js";
 import { DEFAULT_REDACTION_MODE, REDACTION_MODES, type RedactionMode } from "./redaction.js";
 
@@ -489,129 +468,6 @@ export function cmdClone(args: string[]): number {
   }
   cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
   registerCurrentInstance(root, config, { event: "clone" });
-  return 0;
-}
-
-/**
- * Rebuilds this repo's sidecar checkout from the remote.
- *
- * The blunt instrument, and the only thing that converts or replaces a checkout —
- * it runs because someone typed it, never because an install hook or the daemon
- * decided to. Being blunt is what makes it general: a checkout can be wrong in
- * more ways than sidecar has repairs for, and deleting it fixes all of them
- * without having to name any of them.
- *
- * Everything that has reached the remote survives; everything that has not is
- * discarded. Rather than try to rescue the difference, refuse while there is a
- * difference to rescue and name the command that removes it. `--force` is for
- * people who mean to throw the work away.
- *
- * Standalone has no checkout to delete — the repo itself is the sidecar, source
- * and all — so there it re-establishes instead of rebuilding. See
- * refreshStandaloneCheckout.
- */
-export function cmdRefresh(args: string[]): number {
-  const parsed = parseOptions(args, {
-    boolean: new Set(["--force", "--yes", "-y"]),
-    value: new Set(),
-  });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar refresh [--force] [--yes]");
-
-  const [root, config] = loadProject();
-  const force = parsed.flags.has("--force");
-  const standalone = isStandalone(config);
-  const sidecarPath = requireSidecarCheckout(root, config);
-
-  // A checkout too broken to answer git is one of the things refresh exists to
-  // replace. It is also one whose contents cannot be weighed, so it takes an
-  // explicit --force rather than a silent assumption that nothing was in there.
-  const readable = checkoutIsOwnRepo(sidecarPath);
-  if (!readable && standalone) {
-    throw new SidecarError(
-      `${sidecarPath} is not a readable Git repository, and in standalone mode that repo is your own — sidecar will not rebuild it`,
-    );
-  }
-  if (!readable && !force) {
-    throw new SidecarError(
-      `${sidecarPath} is not a readable Git repository, so what it still holds cannot be checked; \`sidecar refresh --force\` replaces it anyway`,
-    );
-  }
-
-  let inbox: string | undefined;
-  if (readable) {
-    inbox = expandInbox(config, sidecarPath);
-    // origin/<inbox> is what decides how much is unpushed, so it has to be as
-    // current as the network allows before anything is counted against it. A
-    // stale one over-counts, which errs toward refusing.
-    fetch(sidecarPath, true, false);
-    const unpushed = unpushedCommits(sidecarPath);
-    const dirtyFiles = git(sidecarPath, ["status", "--porcelain"], { check: false })
-      .stdout.split("\n")
-      .filter(Boolean).length;
-    if ((unpushed || dirtyFiles) && !force) {
-      const held = [
-        unpushed ? `${unpushed} commit(s) the remote has not seen` : "",
-        dirtyFiles ? `${dirtyFiles} uncommitted file(s)` : "",
-      ].filter(Boolean);
-      throw new SidecarError(
-        `this checkout still holds ${held.join(" and ")}; run \`sidecar sync\` to push them, then refresh — or \`sidecar refresh --force\` to discard them`,
-      );
-    }
-  }
-
-  if (standalone) {
-    console.log(`${paint("repo", root)} is its own sidecar, so refresh does not rebuild it.`);
-    console.log(
-      `it rewires the redaction filter and settles ${config.branch} onto ${paint("brand", `origin/${config.branch}`)}${
-        force ? `, then resets the inbox branch to ${config.branch}` : ""
-      }.`,
-    );
-  } else {
-    // Deleting a checkout that owns the store strands every linked worktree of
-    // it, which is a much bigger blast radius than the one repo being refreshed.
-    const dependents = dependentWorktrees(sidecarPath);
-    if (dependents.length && !force) {
-      throw new SidecarError(
-        `${dependents.length} other checkout(s) share this one's Git store (${dependents.join(", ")}); refresh those working copies instead, or \`sidecar refresh --force\` to replace this one and leave them to be refreshed too`,
-      );
-    }
-
-    const family = familySidecarCheckout(root, config);
-    const holder = inbox && family ? worktreeHoldingBranch(family, inbox) : undefined;
-    // This checkout holding its own inbox is the normal case, not a collision.
-    if (holder && realpathOr(holder) !== realpathOr(sidecarPath)) {
-      // Git allows one worktree to hold a branch, so the rebuilt checkout could
-      // not take its inbox back. Checked before anything is removed, never after.
-      throw new SidecarError(
-        `${inbox} is already checked out at ${holder}; give this working copy its own inbox (a {random} in the .sidecar inbox template) before refreshing`,
-      );
-    }
-
-    console.log(
-      `refresh deletes ${paint("brand", sidecarPath)} and clones it again from ${paint("brand", config.remote)}, ${paint("attn", "discarding anything not pushed")}.`,
-    );
-    if (family) console.log(`the rebuilt checkout will share this repo family's Git store.`);
-  }
-
-  const confirmed = parsed.flags.has("--yes") || parsed.flags.has("-y") || promptYesNoDefaultNo("continue?");
-  if (!confirmed) {
-    // A non-TTY lands here too: an unattended refresh has to be asked for in the
-    // arguments, never inferred from a prompt nobody could answer.
-    console.log("nothing changed");
-    return 0;
-  }
-
-  withSyncLock(root, "throw", () => {
-    // Re-read under the lock: the prompt above is unbounded, and a sync or an
-    // agent could have written to the checkout while it sat there.
-    if (readable && !force && isDirty(sidecarPath)) {
-      throw new SidecarError("the sidecar checkout changed while waiting for confirmation; rerun refresh");
-    }
-    if (standalone) refreshStandaloneCheckout(root, config, force);
-    else refreshCheckout(root, config);
-  });
-  registerCurrentInstance(root, config, { event: "refresh" });
-  console.log(`refreshed sidecar at ${paint("brand", sidecarPath)}`);
   return 0;
 }
 
