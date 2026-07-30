@@ -454,7 +454,9 @@ describe("sidecar CLI integration", () => {
 
   test("standalone refresh rewires and settles instead of deleting the repo", () => {
     const { repo, remote, state } = initStandaloneRepo();
-    runSidecar(["init", remote, "--path", "."], repo, { SIDECAR_STATE_DIR: state });
+    // Redaction off so this exercises the settle. With it on, refresh declines to
+    // switch branches at all — see the test below.
+    runSidecar(["init", remote, "--path", ".", "--redaction", "none"], repo, { SIDECAR_STATE_DIR: state });
     const inbox = git(repo, ["branch", "--show-current"]).stdout.trim();
 
     // The user's own source, and sidecar's own wiring, both have to survive.
@@ -470,9 +472,60 @@ describe("sidecar CLI integration", () => {
     expect(git(repo, ["branch", "--show-current"]).stdout.trim()).toBe(inbox);
   }, 30_000);
 
+  /**
+   * Settling a standalone repo costs two branch switches, and under redaction a
+   * switch materializes the redacted committed blob over the original the working
+   * tree still holds — the reason deinit refuses the same switch. Git declined the
+   * second one on its own, which is not a guarantee, and when it did it left the
+   * repo parked off its inbox branch with refresh failing halfway through.
+   */
+  test("standalone refresh under redaction rewires but leaves branches alone", () => {
+    const { repo, remote, state } = initStandaloneRepo();
+    fs.writeFileSync(path.join(repo, "secrets.conf"), 'api_key = "sk-live-ABCDEF1234567890abcdef"\n', "utf8");
+    git(repo, ["add", "secrets.conf"]);
+    git(repo, ["commit", "-m", "Add a redactable file"]);
+    // --no-clone plus snapshot --push, rather than a plain init: init ends with a
+    // full sync, and a standalone inbox merge under redaction wants to write the
+    // redacted blob over the original in the working tree, so it fails — on main as
+    // on this branch. This reaches the state the test is about without going through
+    // that, and pushes so the unpushed-work guard is not what refuses.
+    runSidecar(["init", remote, "--path", ".", "--redaction", "secrets", "--no-clone"], repo, {
+      SIDECAR_STATE_DIR: state,
+    });
+    runSidecar(["snapshot", "--push"], repo, { SIDECAR_STATE_DIR: state });
+    const inbox = git(repo, ["branch", "--show-current"]).stdout.trim();
+    expect(git(repo, ["show", `${inbox}:secrets.conf`]).stdout).toContain("<API_KEY>");
+
+    const result = runSidecarRaw(["refresh", "--yes"], repo, { SIDECAR_STATE_DIR: state });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("refreshed sidecar at");
+    expect(result.stderr).toContain("would replace local files with their redacted pushed contents");
+    // The original survives, the repo keeps its inbox branch, and the filter is still
+    // wired: the part of a refresh that is safe here happened.
+    expect(fs.readFileSync(path.join(repo, "secrets.conf"), "utf8")).toContain("sk-live-ABCDEF");
+    expect(git(repo, ["branch", "--show-current"]).stdout.trim()).toBe(inbox);
+    expect(fs.readFileSync(path.join(repo, ".git", "info", "attributes"), "utf8")).toContain("filter=sidecar");
+  }, 30_000);
+
+  test("refresh refuses a sidecar path that escapes the repo", () => {
+    const { main } = initSidecarProject();
+    const state = path.join(main, ".sidecar-test-state");
+    const config = fs.readFileSync(path.join(main, ".sidecar"), "utf8");
+    // Nothing validates `path` on read, and refresh is the only recursive delete.
+    fs.writeFileSync(path.join(main, ".sidecar"), config.replace(/^path = .*$/m, 'path = ".."'), "utf8");
+
+    const result = runSidecarRaw(["refresh", "--force", "--yes"], main, { SIDECAR_STATE_DIR: state });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/not inside|not a readable Git repository|missing sidecar checkout/);
+    expect(fs.existsSync(path.dirname(main))).toBe(true);
+    expect(fs.existsSync(main)).toBe(true);
+  }, 30_000);
+
   test("standalone refresh --force resets a diverged inbox and parks its tip", () => {
     const { repo, remote, state } = initStandaloneRepo();
-    runSidecar(["init", remote, "--path", "."], repo, { SIDECAR_STATE_DIR: state });
+    runSidecar(["init", remote, "--path", ".", "--redaction", "none"], repo, { SIDECAR_STATE_DIR: state });
     const inbox = git(repo, ["branch", "--show-current"]).stdout.trim();
     fs.writeFileSync(path.join(repo, "diverged.md"), "local only\n", "utf8");
     git(repo, ["add", "diverged.md"]);

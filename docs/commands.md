@@ -183,6 +183,19 @@ is the only thing that clears an inbox that has diverged; that tip is parked the
 same way. A standalone repo that git cannot read is never rebuilt — it is your
 repo, and sidecar says so instead of guessing.
 
+**Under redaction, a standalone refresh rewires the filter and stops there.**
+Settling needs two branch switches, and switching materializes the *committed*
+blob — which is the redacted one, while your working tree still holds the
+original. That is the same switch [`deinit`](#sidecar-deinit) refuses, for the
+same reason. Refresh reports what it left alone and exits successfully:
+
+```
+refreshed sidecar at /path/to/repo
+sidecar: left main and the inbox branch untouched: settling them means switching
+branches, which under redaction would replace local files with their redacted
+pushed contents
+```
+
 ### `sidecar instances [--json]`
 
 List every sidecar checkout registered on this machine, with config, checkout,

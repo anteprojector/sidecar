@@ -3767,6 +3767,13 @@ function existingCheckoutId(sidecarPath) {
 }
 function refreshCheckout(root, config) {
   const sidecarPath = resolveSidecarPath(root, config);
+  if (isStandalone(config)) {
+    throw new SidecarError("refusing to delete a standalone sidecar, which is the repo itself");
+  }
+  const relative = path9.relative(root, sidecarPath);
+  if (!relative || relative.startsWith("..") || path9.isAbsolute(relative)) {
+    throw new SidecarError(`refusing to delete ${sidecarPath}, which is not inside ${root}`);
+  }
   const checkoutId = existingCheckoutId(sidecarPath);
   fs10.rmSync(sidecarPath, { recursive: true, force: true });
   const family = familySidecarCheckout(root, config);
@@ -3781,6 +3788,10 @@ function refreshStandaloneCheckout(root, config, resetInbox) {
   ensureCommitIdentity(root);
   ensureRedactionFilter(root, config.redaction);
   fetch(root, true, false);
+  if (config.redaction !== "none") {
+    logSidecarEvent("checkout-refresh", { root, standalone: true, settled: false });
+    return `left ${config.branch} and the inbox branch untouched: settling them means switching branches, which under redaction would replace local files with their redacted pushed contents`;
+  }
   ensureMainBranch(root, config);
   const inbox = expandInbox(config, root);
   if (resetInbox && branchExists(root, inbox) && branchExists(root, config.branch)) {
@@ -3791,7 +3802,8 @@ function refreshStandaloneCheckout(root, config, resetInbox) {
     console.log(`reset ${paint("brand", inbox)} to ${config.branch}; old tip kept at ${paint("brand", discarded)}`);
   }
   ensureInboxBranch(root, config, inbox);
-  logSidecarEvent("checkout-refresh", { root, standalone: true, resetInbox });
+  logSidecarEvent("checkout-refresh", { root, standalone: true, settled: true, resetInbox });
+  return;
 }
 function cmdRefresh(args) {
   const parsed = parseOptions(args, {
@@ -3828,7 +3840,7 @@ function cmdRefresh(args) {
   }
   if (standalone) {
     console.log(`${paint("repo", root)} is its own sidecar, so refresh does not rebuild it.`);
-    console.log(`it rewires the redaction filter and settles ${config.branch} onto ${paint("brand", `origin/${config.branch}`)}${force ? `, then resets the inbox branch to ${config.branch}` : ""}.`);
+    console.log(config.redaction === "none" ? `it rewires the redaction filter and settles ${config.branch} onto ${paint("brand", `origin/${config.branch}`)}${force ? `, then resets the inbox branch to ${config.branch}` : ""}.` : `it rewires the redaction filter and, because redaction is on, leaves your branches where they are.`);
   } else {
     const dependents = dependentWorktrees(sidecarPath);
     if (dependents.length && !force) {
@@ -3848,17 +3860,20 @@ function cmdRefresh(args) {
     console.log("nothing changed");
     return 0;
   }
+  let declined;
   withSyncLock(root, "throw", () => {
     if (readable && !force && isDirty(sidecarPath)) {
       throw new SidecarError("the sidecar checkout changed while waiting for confirmation; rerun refresh");
     }
     if (standalone)
-      refreshStandaloneCheckout(root, config, force);
+      declined = refreshStandaloneCheckout(root, config, force);
     else
       refreshCheckout(root, config);
   });
   registerCurrentInstance(root, config, { event: "refresh" });
   console.log(`refreshed sidecar at ${paint("brand", sidecarPath)}`);
+  if (declined)
+    console.error(`sidecar: ${declined}`);
   return 0;
 }
 var init_cmd_refresh = __esm(() => {

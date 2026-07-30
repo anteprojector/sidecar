@@ -155,8 +155,20 @@ function existingCheckoutId(sidecarPath: string): string | undefined {
  */
 export function refreshCheckout(root: string, config: SidecarConfig): void {
   const sidecarPath = resolveSidecarPath(root, config);
-  const checkoutId = existingCheckoutId(sidecarPath);
 
+  // Both guards sit on the delete rather than in the caller because this is the
+  // only recursive delete in the codebase, and `path` is a committed config value
+  // that nothing validates on read — until refresh, no code path deleted the
+  // sidecar path outright, so a wrong one could not cost anything.
+  if (isStandalone(config)) {
+    throw new SidecarError("refusing to delete a standalone sidecar, which is the repo itself");
+  }
+  const relative = path.relative(root, sidecarPath);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new SidecarError(`refusing to delete ${sidecarPath}, which is not inside ${root}`);
+  }
+
+  const checkoutId = existingCheckoutId(sidecarPath);
   fs.rmSync(sidecarPath, { recursive: true, force: true });
   // Something may still hold an admin entry for the path this checkout occupied:
   // the family's clone if it was a linked worktree, or the family's clone again
@@ -189,13 +201,31 @@ export function refreshCheckout(root: string, config: SidecarConfig): void {
  * its inbox branch. `resetInbox` goes one step further and moves the inbox back
  * to the canonical branch, which is the only thing that clears an inbox that has
  * diverged; the tip it drops is parked the same way.
+ *
+ * Returns what it declined to do, for the caller to report.
  */
-export function refreshStandaloneCheckout(root: string, config: SidecarConfig, resetInbox: boolean): void {
+export function refreshStandaloneCheckout(
+  root: string,
+  config: SidecarConfig,
+  resetInbox: boolean,
+): string | undefined {
   ensureCommitIdentity(root);
   ensureRedactionFilter(root, config.redaction);
   fetch(root, true, false);
-  ensureMainBranch(root, config);
 
+  // Switching materializes committed blobs, and under redaction those are the
+  // redacted versions while the working tree still holds the originals — the same
+  // reason deinit refuses to switch a standalone repo back to its canonical branch.
+  // Settling costs two switches, off the inbox and back onto it, so under redaction
+  // the rewire above is the whole of a standalone refresh. Git happens to refuse
+  // the second switch itself, which is not a guarantee worth leaning on and leaves
+  // the repo parked off its inbox branch when it does.
+  if (config.redaction !== "none") {
+    logSidecarEvent("checkout-refresh", { root, standalone: true, settled: false });
+    return `left ${config.branch} and the inbox branch untouched: settling them means switching branches, which under redaction would replace local files with their redacted pushed contents`;
+  }
+
+  ensureMainBranch(root, config);
   const inbox = expandInbox(config, root);
   // After ensureMainBranch the checkout is on the canonical branch, so the inbox
   // is not checked out and can be moved.
@@ -207,7 +237,8 @@ export function refreshStandaloneCheckout(root: string, config: SidecarConfig, r
     console.log(`reset ${paint("brand", inbox)} to ${config.branch}; old tip kept at ${paint("brand", discarded)}`);
   }
   ensureInboxBranch(root, config, inbox);
-  logSidecarEvent("checkout-refresh", { root, standalone: true, resetInbox });
+  logSidecarEvent("checkout-refresh", { root, standalone: true, settled: true, resetInbox });
+  return undefined;
 }
 
 /**
@@ -280,9 +311,11 @@ export function cmdRefresh(args: string[]): number {
   if (standalone) {
     console.log(`${paint("repo", root)} is its own sidecar, so refresh does not rebuild it.`);
     console.log(
-      `it rewires the redaction filter and settles ${config.branch} onto ${paint("brand", `origin/${config.branch}`)}${
-        force ? `, then resets the inbox branch to ${config.branch}` : ""
-      }.`,
+      config.redaction === "none"
+        ? `it rewires the redaction filter and settles ${config.branch} onto ${paint("brand", `origin/${config.branch}`)}${
+            force ? `, then resets the inbox branch to ${config.branch}` : ""
+          }.`
+        : `it rewires the redaction filter and, because redaction is on, leaves your branches where they are.`,
     );
   } else {
     // Deleting a checkout that owns the store strands every linked worktree of
@@ -319,17 +352,21 @@ export function cmdRefresh(args: string[]): number {
     return 0;
   }
 
+  let declined: string | undefined;
   withSyncLock(root, "throw", () => {
     // Re-read under the lock: the prompt above is unbounded, and a sync or an
     // agent could have written to the checkout while it sat there.
     if (readable && !force && isDirty(sidecarPath)) {
       throw new SidecarError("the sidecar checkout changed while waiting for confirmation; rerun refresh");
     }
-    if (standalone) refreshStandaloneCheckout(root, config, force);
+    if (standalone) declined = refreshStandaloneCheckout(root, config, force);
     else refreshCheckout(root, config);
   });
   registerCurrentInstance(root, config, { event: "refresh" });
   console.log(`refreshed sidecar at ${paint("brand", sidecarPath)}`);
+  // A closing warning rather than a failure, the way deinit reports the steps it
+  // would not take: the refresh did everything it was willing to do.
+  if (declined) console.error(`sidecar: ${declined}`);
   return 0;
 }
 
