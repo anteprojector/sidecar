@@ -36,11 +36,14 @@
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
+    "@types/picomatch": "^4",
     "typescript": "^5.8.2",
     "vitest": "^3.0.8"
   },
   "dependencies": {
     "chokidar": "^4.0.3",
+    "ignore": "^7.0.8",
+    "picomatch": "^4.0.5",
     "smol-toml": "^1.7.0"
   }
 }

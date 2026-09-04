@@ -40,5 +40,9 @@ Daemon commands — and the plumbing commands `set-install-source` and
 `register-install` — always run the global executable, never a project-local
 copy.
 
+The `redact` clean-filter command always runs the executable wired into Git.
+It never delegates to a package inside the checkout being filtered, because
+synced content must not be able to replace the redaction program.
+
 See [uninstall.md](uninstall.md) for removing sidecar and everything it
 leaves on the machine, plus troubleshooting.

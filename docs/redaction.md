@@ -5,6 +5,10 @@ are exactly where pasted API keys, connection strings, and personal data end
 up. Redaction strips those before they leave the machine — without touching
 your local files.
 
+For credentials that scripts need at runtime, prefer environment variables
+whose values stay outside the synced checkout. The [agent guide](agents.md#use-environment-variables-without-syncing-their-values)
+shows how to share setup instructions without sharing the credentials.
+
 ## How it works
 
 Redaction runs as a git *clean filter* in the sidecar checkout: content is
@@ -40,23 +44,11 @@ Pattern-based detection has false positives, so redaction is never silent:
 - A `redaction` event with counts (never content) lands in the machine log
   (`sidecar tail`).
 
-## Opting a file out
-
-Put the marker `sidecar:no-redact` on its own line near the top of the file
-(within the first 30 lines, typically as a comment):
-
-```markdown
-<!-- sidecar:no-redact -->
-```
-
-That file is pushed verbatim. Because your local original was never
-modified, adding the pragma to a file that was being redacted *heals* it:
-the next sync pushes the true content. Prose that merely mentions the
-marker mid-sentence does not trigger it — it must start its own line.
-
 ## Modes
 
-Set `redaction` in `.sidecar` (or `sidecar init --redaction <mode>`):
+Set `redaction` in `.sidecar` (or `sidecar init --redaction <mode>`).
+Override the mode for matching paths in the peer's [rules file](rules.md).
+Comments and in-file markers do not override redaction policy.
 
 | mode | effect |
 |---|---|
@@ -67,6 +59,9 @@ Set `redaction` in `.sidecar` (or `sidecar init --redaction <mode>`):
 Changing the mode re-runs every tracked file through the filter on the next
 sync, so the whole tree converges to the new mode — `none → secrets+pii`
 re-redacts everything, `secrets+pii → none` re-commits your originals.
+Upgrading from a version with an in-file redaction bypass also reprocesses
+tracked files on the next snapshot, including files whose contents did not
+change.
 
 The mode governs your files. Two things sidecar generates about itself are
 always redacted at the `secrets` level whatever the mode says: the machine-level
@@ -82,7 +77,7 @@ about your notes, not an instruction to publish your own credentials.
   machine edits the same file, the version that syncs back to you contains
   the placeholders, replacing your local original. Files you only edit from
   one machine are never affected. Keep real secrets out of files you edit
-  from multiple machines — or opt those files out.
+  from multiple machines.
 - **Anything already pushed is in the remote's history.** Switching to a
   stricter mode redacts future pushes; it cannot rewrite what an earlier
   mode already published.

@@ -5,36 +5,6 @@ export type RedactionMode = "none" | "secrets" | "secrets+pii";
 export const DEFAULT_REDACTION_MODE: RedactionMode = "secrets";
 export const REDACTION_MODES: readonly RedactionMode[] = ["none", "secrets", "secrets+pii"];
 
-// Files carrying this marker near the top opt out of redaction entirely; the
-// local original is committed as-is.
-export const NO_REDACT_PRAGMA = "sidecar:no-redact";
-// Deep enough to clear the preamble a file may be obliged to open with — a
-// licence header, YAML front matter, an XML declaration, a shebang and module
-// docstring — so the marker can go where a reader would put it rather than
-// having to fight for line one. `split`'s limit stops the scan there, so the
-// window costs nothing on a large file.
-const PRAGMA_SCAN_LINES = 30;
-// The marker has to start its own line, but anything punctuation-like may lead
-// it: rather than enumerate comment syntaxes, allow a short run of non-word
-// characters, which is every leader in practice (# // /* <!-- ; * -- % " ! '
-// (* {- ::). Four is the width of `<!--`, the one that matters most here since
-// the notes these files hold are usually Markdown.
-//
-// Punctuation only, and never a word: that is what keeps prose from disarming
-// redaction by mentioning the marker. "see: sidecar:no-redact" and "the
-// sidecar:no-redact marker" both open on word characters and so do not match.
-// The asymmetry is deliberate — failing to recognise a marker only leaves
-// redaction on, while matching one by accident commits secrets in the clear.
-const NO_REDACT_PRAGMA_REGEX = new RegExp(
-  String.raw`^\s*[^\w\s]{0,4}\s*${NO_REDACT_PRAGMA}\b`,
-);
-
-export function hasNoRedactPragma(text: string): boolean {
-  return text
-    .split(/\r\n|\r|\n/, PRAGMA_SCAN_LINES)
-    .some((line) => NO_REDACT_PRAGMA_REGEX.test(line));
-}
-
 // Digit-leading keys (2FA_TOKEN) are as sensitive as any other.
 const KEY_NAME_PATTERN = String.raw`[A-Za-z0-9_][A-Za-z0-9_-]*`;
 // `key: "value"`, `key='value'`, and `"key": "value"` in one pattern: the key

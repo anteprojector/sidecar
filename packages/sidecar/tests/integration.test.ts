@@ -182,7 +182,7 @@ describe("sidecar CLI integration", () => {
       "utf8",
     );
 
-    const output = runSidecar(["deinit"], main, { SIDECAR_STATE_DIR: stateDir });
+    const output = runSidecar(["deinit", "--yes"], main, { SIDECAR_STATE_DIR: stateDir });
 
     expect(output).toContain(`removed sidecar from ${fs.realpathSync(main)}`);
     expect(fs.existsSync(path.join(main, ".sidecar"))).toBe(false);
@@ -202,7 +202,7 @@ describe("sidecar CLI integration", () => {
 
   test("deinit outside a repo and away from any config warns and exits successfully", () => {
     const outside = tempDir();
-    const result = spawnSync(process.execPath, [cliPath, "deinit"], {
+    const result = spawnSync(process.execPath, [cliPath, "deinit", "--yes"], {
       cwd: outside,
       encoding: "utf8",
       env: { ...process.env, SIDECAR_STATE_DIR: path.join(outside, "state") },
@@ -218,7 +218,7 @@ describe("sidecar CLI integration", () => {
     fs.mkdirSync(path.join(main, "sidecar"));
     fs.writeFileSync(path.join(main, "sidecar", "keep.txt"), "not managed by Sidecar\n", "utf8");
 
-    const result = spawnSync(process.execPath, [cliPath, "deinit"], {
+    const result = spawnSync(process.execPath, [cliPath, "deinit", "--yes"], {
       cwd: main,
       encoding: "utf8",
       env: { ...process.env, SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state") },
@@ -705,7 +705,7 @@ describe("sidecar CLI integration", () => {
     const { main, worktree, state } = initWorktreeFamily();
     runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
 
-    runSidecar(["deinit"], worktree, { SIDECAR_STATE_DIR: state });
+    runSidecar(["deinit", "--yes"], worktree, { SIDECAR_STATE_DIR: state });
 
     expect(fs.existsSync(path.join(worktree, "sidecar"))).toBe(false);
     // A deleted-but-registered worktree would block a later add at that path.
@@ -1594,7 +1594,7 @@ describe("sidecar CLI integration", () => {
 
     const output = runSidecar(["merge"], main);
 
-    expect(output).toContain("resolved 4 conflict(s) by last writer");
+    expect(output).toContain("complete file version(s) by last writer");
     expect(output).toContain("merged 1 inbox branch(es)");
     const show = (file: string) => gitRaw(["--git-dir", remote, "show", `main:${file}`], { check: false });
     expect(show("notes/plan.md").stdout).toBe("inbox\n");
@@ -1957,8 +1957,7 @@ describe("sidecar CLI integration", () => {
     runSidecar(["sync"], repo, { SIDECAR_STATE_DIR: state });
 
     expect(fs.readFileSync(path.join(repo, "aliases.sh"), "utf8")).toBe("alias g=git\n");
-    // Two machines and six syncs; this one has always run close to the default.
-  }, 30000);
+  });
 
   test("standalone init forks the inbox from HEAD on a repo ahead of its origin", () => {
     const { repo, remote, state } = initStandaloneRepo();
@@ -2036,8 +2035,7 @@ describe("sidecar CLI integration", () => {
     runSidecar(["sync"], second, { SIDECAR_STATE_DIR: state });
     runSidecar(["sync"], repo, { SIDECAR_STATE_DIR: state });
     expect(fs.readFileSync(path.join(repo, "aliases.sh"), "utf8")).toBe("alias g=git\n");
-    // Two machines, two inits, and four syncs; runs close to the default.
-  }, 30000);
+  });
 
   test("deinit releases a standalone repo instead of deleting it", () => {
     const { repo, state } = initStandaloneRepo();
@@ -2046,7 +2044,7 @@ describe("sidecar CLI integration", () => {
     runSidecar(["init", "--path", ".", "--redaction", "none"], repo, { SIDECAR_STATE_DIR: state });
     expect(git(repo, ["config", "--get", "filter.sidecar-redact.clean"]).stdout.trim()).toBeTruthy();
 
-    const output = runSidecar(["deinit"], repo, { SIDECAR_STATE_DIR: state });
+    const output = runSidecar(["deinit", "--yes"], repo, { SIDECAR_STATE_DIR: state });
 
     expect(output).toContain("switched back to main");
     expect(fs.existsSync(path.join(repo, ".sidecar"))).toBe(false);
@@ -2066,7 +2064,7 @@ describe("sidecar CLI integration", () => {
     const { repo, state } = initStandaloneRepo();
     runSidecar(["init", "--path", ".", "--redaction", "secrets"], repo, { SIDECAR_STATE_DIR: state });
 
-    const result = spawnSync(process.execPath, [cliPath, "deinit"], {
+    const result = spawnSync(process.execPath, [cliPath, "deinit", "--yes"], {
       cwd: repo,
       encoding: "utf8",
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0", SIDECAR_STATE_DIR: state },
@@ -2088,7 +2086,7 @@ describe("sidecar CLI integration", () => {
     runSidecar(["init", "--path", ".", "--redaction", "secrets"], repo, { SIDECAR_STATE_DIR: state });
     fs.writeFileSync(path.join(repo, ".sidecar"), "not [ valid { toml\n", "utf8");
 
-    const result = spawnSync(process.execPath, [cliPath, "deinit"], {
+    const result = spawnSync(process.execPath, [cliPath, "deinit", "--yes"], {
       cwd: repo,
       encoding: "utf8",
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0", SIDECAR_STATE_DIR: state },
@@ -2363,23 +2361,27 @@ describe("sidecar peers", () => {
 
     const output = runSidecar(["init", privateRemote, "--peer", "private", "--ignored"], main);
 
-    expect(output).toContain("ignored .sidecar.private via .git/info/exclude");
+    expect(output).toContain("ignored .sidecar.private and .sidecar-rules.private via .git/info/exclude");
     expect(output).toContain("ignored private/ via .git/info/exclude");
     const excludePath = path.join(main, ".git", "info", "exclude");
     expect(fs.readFileSync(excludePath, "utf8")).toContain("/.sidecar.private\n");
+    expect(fs.readFileSync(excludePath, "utf8")).toContain("/.sidecar-rules.private\n");
     expect(fs.readFileSync(excludePath, "utf8")).toContain("/private/\n");
+    fs.writeFileSync(path.join(main, ".sidecar-rules.private"), '[[rules]]\nglob = "**"\nresolve = "fork"\n');
     // The committed ignore file and the tree carry no trace of the peer.
     expect(fs.readFileSync(path.join(main, ".gitignore"), "utf8")).toBe("/sidecar/\n");
     expect(git(main, ["status", "--porcelain"]).stdout).not.toMatch(/private/);
     expect(fs.existsSync(path.join(main, "private", ".git"))).toBe(true);
 
-    runSidecar(["deinit", "--peer", "private"], main);
+    runSidecar(["deinit", "--yes", "--peer", "private"], main);
 
     expect(fs.existsSync(path.join(main, ".sidecar.private"))).toBe(false);
+    expect(fs.existsSync(path.join(main, ".sidecar-rules.private"))).toBe(false);
     expect(fs.existsSync(path.join(main, "private"))).toBe(false);
     // The exclude file is shared by every working copy of the repo, and another
     // may still declare the peer, so its lines are left where they are.
     expect(fs.readFileSync(excludePath, "utf8")).toContain("/.sidecar.private\n");
+    expect(fs.readFileSync(excludePath, "utf8")).toContain("/.sidecar-rules.private\n");
     expect(fs.readFileSync(excludePath, "utf8")).toContain("/private/\n");
     expect(fs.existsSync(path.join(main, ".sidecar"))).toBe(true);
   });
@@ -2389,7 +2391,7 @@ describe("sidecar peers", () => {
     const notesRemote = initBareRemote();
     runSidecar(["init", notesRemote, "--peer", "notes"], main);
 
-    const result = spawnSync(process.execPath, [cliPath, "deinit"], {
+    const result = spawnSync(process.execPath, [cliPath, "deinit", "--yes"], {
       cwd: main,
       encoding: "utf8",
       env: { ...process.env, SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state") },
@@ -2399,7 +2401,7 @@ describe("sidecar peers", () => {
     expect(result.stderr).toContain("several sidecar peers (default, notes)");
     expect(fs.existsSync(path.join(main, ".sidecar.notes"))).toBe(true);
 
-    const output = runSidecar(["deinit", "--peer", "notes"], main);
+    const output = runSidecar(["deinit", "--yes", "--peer", "notes"], main);
 
     expect(output).toContain("(peer notes)");
     expect(fs.existsSync(path.join(main, ".sidecar.notes"))).toBe(false);

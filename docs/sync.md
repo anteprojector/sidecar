@@ -65,8 +65,13 @@ merge does with a file both machines edited:
 
 | mode | effect |
 |---|---|
-| `fork` | the default: every version is kept as a separate file beside the original's path, `notes/plan.conflict.main.abc1234.md` and `notes/plan.conflict.sidecar-inbox-zack-79ff.def5678.md`, with a manifest under `.sidecar-conflicts/` naming them. Nothing is lost; someone folds the forks back by hand. |
-| `lww` | last writer wins, per path: the side that wrote the file more recently keeps it, and a manifest under `.sidecar-conflicts/` names the dropped version's oid when it had one (still reachable through the merge's second parent). A dropped deletion records `null`. A side that deleted the path wins by deleting it; a tie goes to the incoming branch. |
+| `fork` | the default: Git combines clean edits normally. On a conflict, versions become separate files beside the original's path, such as `notes/plan.conflict.main.abc1234.md`, with a manifest under `.sidecar-conflicts/` naming them. Someone folds the forks back by hand. |
+| `lww` | whole-file last writer wins: keep one complete version, even when Git could combine edits cleanly. A winning deletion removes the path. A manifest under `.sidecar-conflicts/` identifies discarded versions; their blobs remain reachable through the merge's parents. |
+
+For example, two machines editing different lines of `state.json` produce
+a combined file under `fork` if Git can merge them cleanly. Under `lww`, one
+machine's complete `state.json` wins; the other edit is not folded into it.
+Rules can select the mode per path, so one sync can use both behaviors.
 
 "More recently" means the file's own change time, not the commit's: every
 snapshot records when each file it commits last changed, so a write that sat
@@ -76,12 +81,19 @@ commit, as does a snapshot of more than a few hundred paths or a commit made
 by hand. The times are compared across machines, so their clocks need to
 roughly agree.
 
-`lww` is for a tree that has one writer at a time — a machine-setup repo you
-edit from one laptop and then another, a directory a single daemon writes —
-where a conflict means two machines briefly overlapped and the newer state is
-the one that matters. Under one writer no merge ever conflicts, so the mode
-only decides what happens when that rule is broken. `fork` is for notes several
-people edit at once, where every version may be wanted.
+Only concurrent writes need a timestamp contest. A change on one side of
+the shared history is kept, even if its machine's clock went backward. An
+explicit revert is also a write. Sidecar carries the selected write time
+through its merges so a merge commit does not make an old value look new.
+Equal timestamps use a deterministic tie-break: a deletion wins over a file;
+otherwise the greater Git mode/object-ID key wins. This picks consistently,
+not by semantic importance or which branch happened to merge last.
+
+`lww` suits replaceable state with one logical writer, such as a daemon's
+state file or machine settings edited from one laptop at a time. It does
+not accumulate independent contributions. `fork` suits shared notes where
+both people's edits may be wanted. Renames are path changes, not a request
+to merge the old and new files' contents.
 
 If two machines merge at once, the loser's push of the canonical branch is
 rejected; it refetches, resets local `main` to the remote, and re-merges what
@@ -89,7 +101,7 @@ is still pending. That reset is the only destructive step in a sync, so the
 discarded tip is parked at `refs/sidecar-discarded/<branch>/<timestamp>-<tip>` first
 (local only — it is never pushed or fetched).
 
-Every sync also publishes a one-file heartbeat to `sidecar-health/<user>/<id>`,
+Remote syncs also publish a one-file heartbeat to `sidecar-health/<user>/<id>`,
 a namespace the merge deliberately passes over, so a failure on one machine is
 visible from all the others without anything reaching the canonical branch. See
 [Fleet health](commands.md#fleet-health).
@@ -104,6 +116,8 @@ a sync merges inbox branches and settles this machine's checkouts first,
 before anything touches the network, so two agents in sibling worktrees see
 each other's notes in seconds even when the remote is unreachable. The
 remote round trip runs behind it; `sidecar sync --local` stops before it.
+Local-only sync requires an existing, initialized checkout and leaves the
+remote health heartbeat and last remote sync time unchanged.
 
 Settling is deliberately timid: only a clean sibling checkout parked on its
 inbox branch is fast-forwarded, and one that cannot be settled is left for
@@ -159,7 +173,7 @@ half ignored.
 Naming: a peer's name is lowercase letters, digits, and hyphens, and its
 checkout defaults to a directory of the same name. `--peer default` names
 `.sidecar` itself. A dot after `sidecar` always means a peer; a hyphen, as in
-`.sidecar-conflicts/`, always means something sidecar writes. The suffixes an
+`.sidecar-conflicts/` or `.sidecar-rules`, names a companion file or directory. The suffixes an
 editor or a backup would leave — `.sidecar.swp`, `.sidecar.bak`, and the
 like — are never read as peers.
 
@@ -170,7 +184,12 @@ and reports every failure before exiting. `sidecar deinit` and
 than one peer declared they do nothing until `--peer` says which. A bare `sidecar init` in a fresh clone joins every peer the repo
 declares, which is what a clone needs; a remote or a `--peer` names one.
 
-`--ignored` keeps a peer out of the tree: its config file and its checkout
+Each peer can also have a [rules file](rules.md) beside its config:
+`.sidecar-rules` for the default peer, `.sidecar-rules.<name>` for a named
+peer. Rules select merge and redaction policy by checkout-relative glob;
+there is no inheritance between peers.
+
+`--ignored` keeps a peer out of the tree: its config, rules file, and checkout
 go in `.git/info/exclude`, git's ignore file that never leaves the machine,
 rather than the committed `.gitignore`. Every clone that wants the peer runs
 the same init, since nothing in the repo records it. That also means an

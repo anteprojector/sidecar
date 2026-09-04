@@ -14,7 +14,9 @@ const PACKAGE_NAME = "sidecarsync";
 // daemon command would write a launchd plist pointing at node_modules.
 const GLOBAL_ONLY_COMMANDS = new Set(["daemon", "deinit", "register-install", "set-install-source", "update"]);
 
-if (!process.env[SKIP_LOCAL_EXEC_ENV]) {
+// Git runs the clean filter from the synced checkout. Its package files must
+// never select executable code: use the exact install bound into Git config.
+if (process.argv[2] !== "redact" && !process.env[SKIP_LOCAL_EXEC_ENV]) {
   const local = findLocalInstall(process.cwd(), fileURLToPath(import.meta.url));
   if (local) {
     // A project-local install exists and this process is the global one, so

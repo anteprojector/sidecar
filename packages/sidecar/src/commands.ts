@@ -85,7 +85,7 @@ const COMMANDS: Command[] = [
       "discards anything unpushed; refuses until `sidecar sync` has run",
     ],
   },
-  { name: "deinit", run: cmdDeinit, section: "advanced", usage: "deinit [--peer name]" },
+  { name: "deinit", run: cmdDeinit, section: "advanced", usage: "deinit [--yes] [--peer name]" },
   { name: "snapshot", run: cmdSnapshot, section: "advanced", usage: "snapshot [--push] [-m message] [--peer name]" },
   { name: "merge", run: cmdMerge, section: "advanced", usage: "merge [--fork-files] [--no-push] [--peer name]" },
   {

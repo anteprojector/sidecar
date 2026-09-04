@@ -138,9 +138,97 @@ export function readInstances(): SidecarInstance[] {
   }
 }
 
-export function writeInstances(instances: SidecarInstance[]): void {
+// Registry writes are transactions: atomic replacement alone protects readers,
+// but would still let two processes overwrite each other's registrations.
+function updateInstances(update: (instances: SidecarInstance[]) => SidecarInstance[]): void {
+  const release = acquireRegistryLock();
+  try {
+    const instances = readInstances();
+    const next = update(instances);
+    if (next === instances) return;
+    const temporary = `${instancesPath()}.${crypto.randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+      fs.renameSync(temporary, instancesPath());
+    } finally {
+      fs.rmSync(temporary, { force: true });
+    }
+  } finally {
+    release();
+  }
+}
+
+function acquireRegistryLock(): () => void {
   ensureStateDir();
-  fs.writeFileSync(instancesPath(), `${JSON.stringify(instances, null, 2)}\n`, "utf8");
+  const lockDir = path.join(sidecarStateDir(), "instances.lock");
+  const prepared = fs.mkdtempSync(path.join(sidecarStateDir(), ".instances-lock-"));
+  const owner = `${process.pid}-${crypto.randomUUID()}`;
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  const deadline = Date.now() + 10_000;
+  let acquired = false;
+  try {
+    // Publish a nonempty directory atomically. There is no acquisition window
+    // with a missing owner, and rename cannot replace another nonempty lock.
+    fs.writeFileSync(path.join(prepared, owner), "", "utf8");
+    while (true) {
+      try {
+        fs.renameSync(prepared, lockDir);
+        acquired = true;
+        return () => removeRegistryLockOwner(lockDir, owner);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST" && code !== "ENOTEMPTY" && code !== "EPERM" && code !== "EACCES") throw error;
+      }
+      reapRegistryLock(lockDir);
+      if (Date.now() >= deadline) {
+        throw new SidecarError(`timed out waiting for the instance registry lock: ${lockDir}`);
+      }
+      Atomics.wait(sleeper, 0, 0, 10);
+    }
+  } finally {
+    if (!acquired) fs.rmSync(prepared, { recursive: true, force: true });
+  }
+}
+
+function removeRegistryLockOwner(lockDir: string, owner: string): void {
+  // Remove only the observed owner's unique entry, never a replacement lock.
+  // Concurrent reapers can race with acquisition safely: rmdir refuses a new
+  // holder's nonempty directory, unlike recursive removal.
+  try {
+    fs.unlinkSync(path.join(lockDir, owner));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  removeEmptyRegistryLock(lockDir);
+}
+
+function removeEmptyRegistryLock(lockDir: string): void {
+  try {
+    fs.rmdirSync(lockDir);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTEMPTY" && code !== "EEXIST") throw error;
+  }
+}
+
+function reapRegistryLock(lockDir: string): void {
+  let owners: string[];
+  try {
+    owners = fs.readdirSync(lockDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (owners.length === 0) removeEmptyRegistryLock(lockDir);
+  for (const owner of owners) {
+    const pid = Number(owner.split("-", 1)[0]);
+    if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") removeRegistryLockOwner(lockDir, owner);
+    }
+  }
 }
 
 /** The peer an instance belongs to. Entries written before peers existed are all the default. */
@@ -156,9 +244,10 @@ function sameConfigPath(left: string, right: string): boolean {
 }
 
 export function unregisterInstance(configPath: string): void {
-  const instances = readInstances();
-  const remaining = instances.filter((instance) => !sameConfigPath(instance.configPath, configPath));
-  if (remaining.length !== instances.length) writeInstances(remaining);
+  updateInstances((instances) => {
+    const remaining = instances.filter((instance) => !sameConfigPath(instance.configPath, configPath));
+    return remaining.length === instances.length ? instances : remaining;
+  });
 }
 
 export function registerCurrentInstance(
@@ -170,31 +259,31 @@ export function registerCurrentInstance(
 
   const sidecarPath = resolveSidecarPath(root, config);
   const configPath = peerConfigPath(root, config.peer);
-  const existing = readInstances();
-  const previous = existing.find((instance) => instance.configPath === configPath);
-  const timestamp = nowIso();
-  const instance: SidecarInstance = {
+  const inbox = hasGitMetadata(sidecarPath) ? expandInbox(config, sidecarPath) : expandInbox(config);
+  updateInstances((existing) => {
+    const previous = existing.find((instance) => sameConfigPath(instance.configPath, configPath));
+    const timestamp = nowIso();
+    const instance: SidecarInstance = {
+      root,
+      configPath,
+      sidecarPath,
+      remote: config.remote,
+      branch: config.branch,
+      inbox,
+      registeredAt: previous?.registeredAt ?? timestamp,
+      updatedAt: timestamp,
+      lastSyncAt: options.lastSyncAt ?? previous?.lastSyncAt,
+    };
+    return [instance, ...existing.filter((entry) => !sameConfigPath(entry.configPath, configPath))].sort(
+      (left, right) => left.root.localeCompare(right.root) || left.configPath.localeCompare(right.configPath),
+    );
+  });
+  logSidecarEvent(options.event, {
     root,
-    configPath,
+    ...(config.peer === DEFAULT_PEER ? {} : { peer: config.peer }),
     sidecarPath,
     remote: config.remote,
-    branch: config.branch,
-    inbox: hasGitMetadata(sidecarPath) ? expandInbox(config, sidecarPath) : expandInbox(config),
-    registeredAt: previous?.registeredAt ?? timestamp,
-    updatedAt: timestamp,
-    lastSyncAt: options.lastSyncAt ?? previous?.lastSyncAt,
-  };
-
-  const next = [instance, ...existing.filter((entry) => entry.configPath !== configPath)].sort(
-    (left, right) => left.root.localeCompare(right.root) || left.configPath.localeCompare(right.configPath),
-  );
-  writeInstances(next);
-  logSidecarEvent(options.event, {
-    root: instance.root,
-    ...(config.peer === DEFAULT_PEER ? {} : { peer: config.peer }),
-    sidecarPath: instance.sidecarPath,
-    remote: instance.remote,
-    inbox: instance.inbox,
+    inbox,
   });
 }
 

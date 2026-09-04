@@ -86,7 +86,8 @@ git for-each-ref refs/sidecar-discarded/
 ## Tell your agents
 
 Coding agents reach for git by habit — committing, branching, pushing to
-"save" work. In a standalone repo that fights the daemon. Recommended
+"save" work. In a standalone repo that fights the daemon. See the
+[agent guide and Sidecar skill](agents.md) for the full workflow. Recommended
 AGENTS.md snippet:
 
 ````markdown
@@ -94,11 +95,19 @@ This repo is auto-synced by sidecar: every change is committed, merged
 across machines, and pushed automatically. Saving a file is the whole job —
 do not commit, push, or switch branches. The checkout lives on a
 sidecar-owned `sidecar-inbox/*` branch; manual git mutations race the
-daemon, and the next sync reverts them. Read-only git (log, diff, show) is
-fine.
+daemon. Read-only git (log, diff, show) is fine. Use the Sidecar skill when
+available, and keep real secret values outside this repo.
 ````
 
 ## Redaction and executed files
+
+Standalone mode shares configuration as well as content. Anyone whose changes
+sync into this repo can change `.sidecar` and its [rules](rules.md), including
+redaction policy. Trust
+those writers to control sync policy: disabling redaction can publish local
+originals on a subsequent sync, without another edit to those files. A private
+remote limits who can read the result; it does not make every writer safe to
+trust with this authority.
 
 A standalone repo's files are the artifact. You clone them onto a new machine
 and *run* them, so a redaction false positive doesn't mangle a note — it ships
@@ -120,6 +129,8 @@ Nothing deletes the repo — it's yours. `deinit` removes `.sidecar`, unwires th
 redaction git filter, unregisters the repo from the daemon, and switches back
 to `main`. If redaction was on, it leaves the branch alone and tells you why:
 switching would replace your local files with their redacted pushed contents.
+
+Deinit asks for confirmation before making changes. Scripts can pass `--yes`.
 
 You're left with a normal git repo holding a `.sidecar` deletion to commit.
 

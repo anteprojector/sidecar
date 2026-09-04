@@ -13,6 +13,8 @@ import {
   familyPrimaryRoot,
   fetch,
   fileLabel,
+  fileRedactionDelta,
+  redactBuffer,
   forkConflicts,
   forkPath,
   git,
@@ -53,7 +55,7 @@ import {
   formatRelativeTime,
 } from "../src/cli.js";
 import { colorLevel, paint, stripColor } from "../src/color.js";
-import { hasNoRedactPragma, redactText } from "../src/redaction.js";
+import { redactText } from "../src/redaction.js";
 
 const tempRoots: string[] = [];
 const integrationTest = process.env.SIDECAR_INTEGRATION === "1" ? test : test.skip;
@@ -584,30 +586,28 @@ describe("redaction", () => {
     expect(redactText(input, "none")).toBe(input);
   });
 
-  test("detects the no-redact pragma only in the first lines", () => {
-    expect(hasNoRedactPragma("<!-- sidecar:no-redact -->\nPASSWORD=hunter2\n")).toBe(true);
-    expect(hasNoRedactPragma("# sidecar:no-redact\n")).toBe(true);
-    expect(hasNoRedactPragma("// sidecar:no-redact extras\n")).toBe(true);
-    // Deep enough to sit under a licence header or front matter, and no deeper.
-    expect(hasNoRedactPragma(`${"filler\n".repeat(20)}sidecar:no-redact\n`)).toBe(true);
-    expect(hasNoRedactPragma(`${"filler\n".repeat(30)}sidecar:no-redact\n`)).toBe(false);
-  });
+  test.each(["sidecar:no-redact", "<!-- sidecar:no-redact -->", "# sidecar:no-redact", "// sidecar:no-redact"])(
+    "file content cannot disable the clean filter: %s",
+    (marker) => {
+      const content = `${marker}\nGITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n`;
+      const expected = `${marker}\nGITHUB_TOKEN=<TOKEN>\n`;
+      for (const mode of ["secrets", "secrets+pii"] as const) {
+        expect(redactBuffer(Buffer.from(content), mode).toString("utf8")).toBe(expected);
+      }
+      expect(redactBuffer(Buffer.from(content), "none").toString("utf8")).toBe(content);
+    },
+  );
 
-  test("any punctuation leader introduces the pragma", () => {
-    for (const leader of ["#", "//", "///", "//!", "/*", " * ", ";;", "--", "%", '"', "!", "'", "(*", "{-", "::", "<!--"]) {
-      expect(hasNoRedactPragma(`${leader} sidecar:no-redact\n`)).toBe(true);
-    }
-    // Indented, as it would be inside a block comment or a nested mapping.
-    expect(hasNoRedactPragma("      # sidecar:no-redact\n")).toBe(true);
-  });
-
-  test("prose mentioning the pragma does not disable redaction", () => {
-    expect(hasNoRedactPragma("notes about sidecar:no-redact behavior\n")).toBe(false);
-    expect(hasNoRedactPragma("the sidecar:no-redact marker is neat\n")).toBe(false);
-    // A word before the marker is prose, however short and however punctuated.
-    expect(hasNoRedactPragma("see: sidecar:no-redact\n")).toBe(false);
-    expect(hasNoRedactPragma("1. sidecar:no-redact\n")).toBe(false);
-    expect(hasNoRedactPragma("Set sidecar:no-redact at the top\n")).toBe(false);
+  test("preview still reports secrets in files containing the former bypass marker", () => {
+    const filePath = path.join(tempDir(), "notes.md");
+    const content = "<!-- sidecar:no-redact -->\nGITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n";
+    fs.writeFileSync(filePath, content);
+    expect(fileRedactionDelta(filePath, "secrets")).toEqual({
+      text: content,
+      redacted: "<!-- sidecar:no-redact -->\nGITHUB_TOKEN=<TOKEN>\n",
+      items: 1,
+    });
+    expect(fs.readFileSync(filePath, "utf8")).toBe(content);
   });
 
   test("unterminated quoted values cannot trigger exponential backtracking", () => {
@@ -638,20 +638,20 @@ describe("redaction", () => {
     expect(redacted).toContain("2FA_TOKEN=<TOKEN>");
   });
 
-  integrationTest("commits pragma files verbatim", () => {
+  integrationTest("redacts files containing the former bypass marker", () => {
     const repo = initRepo();
     const content = "sidecar:no-redact\nGITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n";
     fs.writeFileSync(path.join(repo, "raw.md"), content, "utf8");
 
     snapshot(repo, repo, "sidecar-inbox/test/random");
 
-    expect(git(repo, ["show", "HEAD:raw.md"]).stdout).toBe(content);
+    expect(git(repo, ["show", "HEAD:raw.md"]).stdout).toBe("sidecar:no-redact\nGITHUB_TOKEN=<TOKEN>\n");
   });
 
   integrationTest("mode 'none' configures a passthrough filter", () => {
     const repo = initRepo();
     ensureRedactionFilter(repo, "none");
-    expect(git(repo, ["config", "filter.sidecar-redact.clean"]).stdout.trim()).toBe("cat");
+    expect(git(repo, ["config", "filter.sidecar-redact.clean"]).stdout.trim()).toContain("redact --checkout-policy --path %f");
 
     fs.writeFileSync(path.join(repo, "notes.md"), "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n", "utf8");
     snapshot(repo, repo, "sidecar-inbox/test/random", undefined, "none");
@@ -966,16 +966,19 @@ describe.skipIf(process.env.SIDECAR_INTEGRATION !== "1")("last-writer-wins confl
 
     fs.symlinkSync("base-target", path.join(repo, "item"));
     git(repo, ["add", "item"]);
-    git(repo, ["commit", "-m", "base"]);
+    // Explicit clocks keep this test about the newer entry, not same-second
+    // deterministic OID ties (the outside target includes a random temp path).
+    const baseTime = 1_700_000_000;
+    withCommitTime(baseTime, () => git(repo, ["commit", "-m", "base"]));
     git(repo, ["branch", "sidecar-inbox/test/lww"]);
     fs.unlinkSync(path.join(repo, "item"));
     fs.symlinkSync(outside, path.join(repo, "item"));
-    git(repo, ["commit", "-am", "trunk"]);
+    withCommitTime(baseTime + 10, () => git(repo, ["commit", "-am", "trunk"]));
 
     git(repo, ["switch", "sidecar-inbox/test/lww"]);
     fs.unlinkSync(path.join(repo, "item"));
     fs.symlinkSync("inbox-target", path.join(repo, "item"));
-    git(repo, ["commit", "-am", "inbox"]);
+    withCommitTime(baseTime + 20, () => git(repo, ["commit", "-am", "inbox"]));
     git(repo, ["switch", "trunk"]);
     git(repo, ["merge", "--no-ff", "sidecar-inbox/test/lww"], { check: false });
 
