@@ -107,6 +107,22 @@ describe("config", () => {
     expect(() => readConfig(configPath)).toThrow(/invalid resolve mode "newest"; expected one of fork, lww/);
   });
 
+  test("reads debounce and interval as seconds or suffixed durations", () => {
+    const root = tempDir();
+    const configPath = path.join(root, ".sidecar");
+    fs.writeFileSync(configPath, 'remote = "git@github.com:org/repo.git"\ndebounce = "10m"\ninterval = 3600\n', "utf8");
+    const config = readConfig(configPath);
+    expect(config.debounce).toBe(600);
+    expect(config.interval).toBe(3600);
+    writeConfig(configPath, config);
+    expect(fs.readFileSync(configPath, "utf8")).toContain("debounce = 600\ninterval = 3600\n");
+    expect(readConfig(configPath)).toMatchObject({ debounce: 600, interval: 3600 });
+    fs.writeFileSync(configPath, 'remote = "git@github.com:org/repo.git"\n', "utf8");
+    expect(readConfig(configPath)).toMatchObject({ debounce: undefined, interval: undefined });
+    fs.writeFileSync(configPath, 'remote = "git@github.com:org/repo.git"\ninterval = "soon"\n', "utf8");
+    expect(() => readConfig(configPath)).toThrow(/interval: invalid duration "soon"/);
+  });
+
   test("parses TOML strings with comments and escapes", () => {
     const root = tempDir();
     const configPath = path.join(root, ".sidecar");

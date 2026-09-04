@@ -38,6 +38,7 @@ import {
   loadProject,
   pathIsRepoRoot,
   readConfig,
+  durationConfigValue,
   redactionModeConfigValue,
   resolveModeConfigValue,
   validateBranch,
@@ -164,11 +165,11 @@ function removeCheckout(checkoutPath: string): void {
 export function cmdInit(args: string[]): number {
   const parsed = parseOptions(args, {
     boolean: new Set(["--no-clone", "--no-bootstrap-main", "--local-install"]),
-    value: new Set(["--path", "--branch", "--inbox", "--redaction", "--resolve"]),
+    value: new Set(["--path", "--branch", "--inbox", "--redaction", "--resolve", "--debounce", "--interval"]),
   });
   if (parsed.positional.length > 1) {
     throw new SidecarError(
-      "usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction mode] [--resolve fork|lww]",
+      "usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction mode] [--resolve fork|lww] [--debounce 10m] [--interval 1h]",
     );
   }
 
@@ -187,7 +188,9 @@ export function cmdInit(args: string[]): number {
       existing.branch === getValue(parsed, "--branch", existing.branch) &&
       existing.inbox === getValue(parsed, "--inbox", existing.inbox) &&
       existing.redaction === getValue(parsed, "--redaction", existing.redaction) &&
-      existing.resolve === getValue(parsed, "--resolve", existing.resolve);
+      existing.resolve === getValue(parsed, "--resolve", existing.resolve) &&
+      existing.debounce === durationConfigValue(parsed.values.get("--debounce"), "--debounce") &&
+      existing.interval === durationConfigValue(parsed.values.get("--interval"), "--interval");
     if (unchanged || !promptOverwriteConfig(configPath, existing.remote, remote)) {
       existingRoot = root;
     }
@@ -260,6 +263,8 @@ function buildInitConfig(root: string, remote: string | undefined, parsed: Parse
     resolve: parsed.values.has("--resolve")
       ? resolveModeConfigValue(getValue(parsed, "--resolve", DEFAULT_RESOLVE), "--resolve")
       : DEFAULT_RESOLVE,
+    debounce: durationConfigValue(parsed.values.get("--debounce"), "--debounce"),
+    interval: durationConfigValue(parsed.values.get("--interval"), "--interval"),
   };
 }
 

@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
 
-import { SidecarError, currentHost, currentUser, slug } from "./util.js";
+import { SidecarError, currentHost, currentUser, parseDuration, slug } from "./util.js";
 import { gitDir, gitRaw, hasGitMetadata } from "./git.js";
 import { HEALTH_BRANCH_PREFIX, inboxPrefixCollidesWithHealth } from "./health.js";
 import { DEFAULT_REDACTION_MODE, REDACTION_MODES, type RedactionMode } from "./redaction.js";
@@ -36,6 +36,14 @@ export type SidecarConfig = {
   inbox: string;
   redaction: RedactionMode;
   resolve: ResolveMode;
+  /**
+   * This repo's sync cadence, in seconds, overriding the daemon's defaults:
+   * `debounce` is the least time between remote round trips once edits land,
+   * `interval` the most time between them while the repo is quiet. Either
+   * may be absent. The daemon's own cycle is the floor on `interval`.
+   */
+  debounce?: number;
+  interval?: number;
 };
 
 export function loadProject(): [string, SidecarConfig] {
@@ -68,6 +76,8 @@ export function writeConfig(configPath: string, config: SidecarConfig): void {
     `inbox = ${JSON.stringify(config.inbox)}`,
     `redaction = ${JSON.stringify(config.redaction ?? DEFAULT_REDACTION_MODE)}`,
     `resolve = ${JSON.stringify(config.resolve ?? DEFAULT_RESOLVE)}`,
+    ...(config.debounce === undefined ? [] : [`debounce = ${config.debounce}`]),
+    ...(config.interval === undefined ? [] : [`interval = ${config.interval}`]),
     "",
   ].join("\n");
   fs.writeFileSync(configPath, text, "utf8");
@@ -100,6 +110,8 @@ export function readConfig(configPath: string): SidecarConfig {
       configPath,
     ),
     resolve: resolveModeConfigValue(stringConfigValue(configPath, values, "resolve", DEFAULT_RESOLVE), configPath),
+    debounce: durationConfigValue(values.debounce, `${configPath} debounce`),
+    interval: durationConfigValue(values.interval, `${configPath} interval`),
   };
   validateRemote(config.remote);
   validateBranch(config.branch);
@@ -112,6 +124,15 @@ export function redactionModeConfigValue(value: string, source: string): Redacti
   throw new SidecarError(
     `${source}: invalid redaction mode ${JSON.stringify(value)}; expected one of ${REDACTION_MODES.join(", ")}`,
   );
+}
+
+export function durationConfigValue(value: unknown, source: string): number | undefined {
+  if (value === undefined) return undefined;
+  const seconds = parseDuration(value);
+  if (seconds === undefined) {
+    throw new SidecarError(`${source}: invalid duration ${JSON.stringify(value)}; use seconds, or a number with an s, m, or h suffix like "10m"`);
+  }
+  return seconds;
 }
 
 export function resolveModeConfigValue(value: string, source: string): ResolveMode {

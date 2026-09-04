@@ -23,6 +23,25 @@ Windows) that:
   keep failing, and steps aside for a newer global install — whether updated
   in place or reinstalled somewhere else on PATH
 
+### Cadence
+
+The daemon's `--debounce` (60 s) and `--interval` (10 min) are defaults. A
+repo that wants a different rhythm says so in its committed `.sidecar`, so
+every machine syncing it agrees:
+
+```toml
+debounce = "10m"   # least time between remote round trips once edits land
+interval = "1h"    # most time between round trips while the repo is quiet
+```
+
+Seconds, or a number with an `s`, `m`, or `h` suffix; `sidecar init
+--debounce 10m --interval 1h` writes them. Local settling between sibling
+checkouts is unaffected: it stays at the seconds-scale window. The daemon's
+own cycle is the floor on `interval`, since a repo is only looked at when the
+daemon polls. A directory written continuously by another program — a build
+cache, an agent's state — is the usual reason: one round trip an hour says
+everything a commit every minute would, at a hundredth of the history.
+
 ## Inbox branches and conflict-free merging
 
 Each sync snapshots local changes onto a per-machine inbox branch and pushes

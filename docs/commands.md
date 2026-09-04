@@ -43,6 +43,8 @@ uncommitted files land on the remote immediately. See
 | `--inbox <template>` | inbox branch template (default `sidecar-inbox/{user}/{random}`) |
 | `--redaction <mode>` | what gets redacted on push: `secrets+pii`, `secrets`, or `none` — defaults to `secrets`; see [redaction.md](redaction.md) |
 | `--resolve <mode>` | what a merge does when two machines edited one file: `fork` (default) keeps every version as separate files; `lww` keeps the newer write per path and names the dropped one in the manifest — see [Conflicts](sync.md#conflicts) |
+| `--debounce <duration>` | this repo's least time between remote round trips once edits land (`90s`, `10m`, `1h`, or seconds); the daemon's `--debounce` otherwise — see [Cadence](sync.md#cadence) |
+| `--interval <duration>` | this repo's most time between round trips while it is quiet; the daemon's `--interval` otherwise, which is also the floor |
 | `--no-clone` | write config and registration only; skip cloning |
 | `--no-bootstrap-main` | don't create the canonical branch on an empty remote |
 | `--local-install` | add `sidecarsync` to `devDependencies` (plus the bun/pnpm trust entry) so fresh clones self-register on install |
@@ -143,7 +145,7 @@ Manages the background auto-sync daemon. Only available from a global install.
 | `disable` | stop the daemon and disable the service |
 | `restart` | reinstall the service definition and restart the daemon |
 | `autoupdate on\|off` | let the daemon update the global install daily, or pin it |
-| `run [--once] [--interval <seconds>] [--debounce <seconds>]` | run the daemon loop in the foreground; `--once` does a single cycle |
+| `run [--once] [--interval <seconds>] [--debounce <seconds>]` | run the daemon loop in the foreground; `--once` does a single cycle. Both durations are the defaults for repos whose `.sidecar` sets neither — see [Cadence](sync.md#cadence) |
 
 ### `sidecar update`
 

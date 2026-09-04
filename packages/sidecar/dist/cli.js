@@ -166,6 +166,17 @@ function currentUser() {
 function currentHost() {
   return os.hostname().split(".", 1)[0] || "unknown";
 }
+function parseDuration(value) {
+  if (typeof value === "number")
+    return Number.isFinite(value) && value >= 0 ? value : undefined;
+  if (typeof value !== "string")
+    return;
+  const match = /^\s*(\d+(?:\.\d+)?)\s*(s|m|h)?\s*$/i.exec(value);
+  if (!match)
+    return;
+  const scale = { s: 1, m: 60, h: 3600 }[(match[2] ?? "s").toLowerCase()];
+  return Number(match[1]) * scale;
+}
 function utcTimestamp() {
   return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 }
@@ -1633,6 +1644,8 @@ function writeConfig(configPath, config) {
     `inbox = ${JSON.stringify(config.inbox)}`,
     `redaction = ${JSON.stringify(config.redaction ?? DEFAULT_REDACTION_MODE)}`,
     `resolve = ${JSON.stringify(config.resolve ?? DEFAULT_RESOLVE)}`,
+    ...config.debounce === undefined ? [] : [`debounce = ${config.debounce}`],
+    ...config.interval === undefined ? [] : [`interval = ${config.interval}`],
     ""
   ].join(`
 `);
@@ -1661,7 +1674,9 @@ function readConfig(configPath) {
     branch: stringConfigValue(configPath, values, "branch", DEFAULT_BRANCH),
     inbox: stringConfigValue(configPath, values, "inbox", DEFAULT_INBOX),
     redaction: redactionModeConfigValue(stringConfigValue(configPath, values, "redaction", DEFAULT_REDACTION_MODE), configPath),
-    resolve: resolveModeConfigValue(stringConfigValue(configPath, values, "resolve", DEFAULT_RESOLVE), configPath)
+    resolve: resolveModeConfigValue(stringConfigValue(configPath, values, "resolve", DEFAULT_RESOLVE), configPath),
+    debounce: durationConfigValue(values.debounce, `${configPath} debounce`),
+    interval: durationConfigValue(values.interval, `${configPath} interval`)
   };
   validateRemote(config.remote);
   validateBranch(config.branch);
@@ -1672,6 +1687,15 @@ function redactionModeConfigValue(value, source) {
   if (REDACTION_MODES.includes(value))
     return value;
   throw new SidecarError(`${source}: invalid redaction mode ${JSON.stringify(value)}; expected one of ${REDACTION_MODES.join(", ")}`);
+}
+function durationConfigValue(value, source) {
+  if (value === undefined)
+    return;
+  const seconds = parseDuration(value);
+  if (seconds === undefined) {
+    throw new SidecarError(`${source}: invalid duration ${JSON.stringify(value)}; use seconds, or a number with an s, m, or h suffix like "10m"`);
+  }
+  return seconds;
 }
 function resolveModeConfigValue(value, source) {
   if (RESOLVE_MODES.includes(value))
@@ -3386,10 +3410,10 @@ function removeCheckout(checkoutPath) {
 function cmdInit(args) {
   const parsed = parseOptions(args, {
     boolean: new Set(["--no-clone", "--no-bootstrap-main", "--local-install"]),
-    value: new Set(["--path", "--branch", "--inbox", "--redaction", "--resolve"])
+    value: new Set(["--path", "--branch", "--inbox", "--redaction", "--resolve", "--debounce", "--interval"])
   });
   if (parsed.positional.length > 1) {
-    throw new SidecarError("usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction mode] [--resolve fork|lww]");
+    throw new SidecarError("usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction mode] [--resolve fork|lww] [--debounce 10m] [--interval 1h]");
   }
   const remote = parsed.positional[0];
   let existingRoot = remote ? undefined : findConfigRootOptional(process.cwd());
@@ -3397,7 +3421,7 @@ function cmdInit(args) {
   const configPath = path8.join(root, ".sidecar");
   if (remote && fs9.existsSync(configPath)) {
     const existing = readConfig(configPath);
-    const unchanged = existing.remote === remote && existing.path === getValue(parsed, "--path", existing.path) && existing.branch === getValue(parsed, "--branch", existing.branch) && existing.inbox === getValue(parsed, "--inbox", existing.inbox) && existing.redaction === getValue(parsed, "--redaction", existing.redaction) && existing.resolve === getValue(parsed, "--resolve", existing.resolve);
+    const unchanged = existing.remote === remote && existing.path === getValue(parsed, "--path", existing.path) && existing.branch === getValue(parsed, "--branch", existing.branch) && existing.inbox === getValue(parsed, "--inbox", existing.inbox) && existing.redaction === getValue(parsed, "--redaction", existing.redaction) && existing.resolve === getValue(parsed, "--resolve", existing.resolve) && existing.debounce === durationConfigValue(parsed.values.get("--debounce"), "--debounce") && existing.interval === durationConfigValue(parsed.values.get("--interval"), "--interval");
     if (unchanged || !promptOverwriteConfig(configPath, existing.remote, remote)) {
       existingRoot = root;
     }
@@ -3445,7 +3469,9 @@ function buildInitConfig(root, remote, parsed) {
     branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
     inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
     redaction: parsed.values.has("--redaction") ? redactionModeConfigValue(getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE), "--redaction") : promptRedactionMode(),
-    resolve: parsed.values.has("--resolve") ? resolveModeConfigValue(getValue(parsed, "--resolve", DEFAULT_RESOLVE), "--resolve") : DEFAULT_RESOLVE
+    resolve: parsed.values.has("--resolve") ? resolveModeConfigValue(getValue(parsed, "--resolve", DEFAULT_RESOLVE), "--resolve") : DEFAULT_RESOLVE,
+    debounce: durationConfigValue(parsed.values.get("--debounce"), "--debounce"),
+    interval: durationConfigValue(parsed.values.get("--interval"), "--interval")
   };
 }
 function printCheckoutVisibility(root, config) {
@@ -4159,6 +4185,7 @@ var init_cmd_status = __esm(() => {
 var exports_daemon = {};
 __export(exports_daemon, {
   selectWatchTargets: () => selectWatchTargets,
+  scheduleFor: () => scheduleFor,
   runDaemonLoop: () => runDaemonLoop,
   compileGitignoreMatcher: () => compileGitignoreMatcher,
   checkAndInstallUpdate: () => checkAndInstallUpdate,
@@ -4168,6 +4195,17 @@ import fs11 from "node:fs";
 import path9 from "node:path";
 import { spawn as spawn2 } from "node:child_process";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
+function scheduleFor(root, defaults) {
+  try {
+    const config = readConfig(path9.join(root, ".sidecar"));
+    return {
+      debounceSeconds: config.debounce ?? defaults.debounceSeconds,
+      intervalSeconds: Math.max(config.interval ?? defaults.intervalSeconds, defaults.intervalSeconds)
+    };
+  } catch {
+    return { debounceSeconds: defaults.debounceSeconds, intervalSeconds: defaults.intervalSeconds };
+  }
+}
 async function runDaemonLoop(options) {
   const state = {
     options,
@@ -4271,6 +4309,11 @@ async function runCycle(state) {
     }
     state.misses.delete(instance.root);
     if (state.cycleCount < (state.skipUntilCycle.get(instance.root) ?? 0)) {
+      skipped += 1;
+      continue;
+    }
+    const last = state.lastRemoteSyncAt.get(instance.root);
+    if (last !== undefined && Date.now() - last < scheduleFor(instance.root, state.options).intervalSeconds * 1000) {
       skipped += 1;
       continue;
     }
@@ -4483,12 +4526,12 @@ function armRemoteSync(state, root) {
   const timer = setTimeout(() => {
     state.remoteTimers.delete(root);
     syncInstance(state, root, "remote-due");
-  }, Math.max(SETTLE_WINDOW_MS, state.options.debounceSeconds * 1000 - elapsed));
+  }, Math.max(SETTLE_WINDOW_MS, scheduleFor(root, state.options).debounceSeconds * 1000 - elapsed));
   state.remoteTimers.set(root, timer);
 }
 function remoteIsDue(state, root) {
   const last = state.lastRemoteSyncAt.get(root) ?? 0;
-  return Date.now() - last >= state.options.debounceSeconds * 1000;
+  return Date.now() - last >= scheduleFor(root, state.options).debounceSeconds * 1000;
 }
 function openTrailingWindow(state, root, delayMs) {
   logSidecarEvent("daemon-watch-debounce", { root, windowSeconds: Math.round(delayMs / 1000) });
@@ -5171,7 +5214,7 @@ var init_commands = __esm(() => {
       name: "init",
       run: cmdInit,
       section: "common",
-      usage: "init [remote] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii] [--resolve fork|lww] [--local-install]",
+      usage: "init [remote] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii] [--resolve fork|lww] [--debounce 10m] [--interval 1h] [--local-install]",
       notes: [
         "--path . makes this repo itself the sidecar (standalone)",
         "--local-install adds the devDependency so fresh clones self-register"

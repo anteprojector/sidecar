@@ -20,6 +20,7 @@ import {
   packageVersion,
   pidIsSidecarDaemon,
   projectDependsOnSidecar,
+  readConfig,
   readInstances,
   readSettings,
   sidecarStateDir,
@@ -50,6 +51,26 @@ export type DaemonOptions = {
   intervalSeconds: number;
   debounceSeconds: number;
 };
+
+/**
+ * A repo's cadence: its own `.sidecar` `debounce` and `interval` where set,
+ * the daemon's defaults otherwise. Read on every use rather than cached, so
+ * an edit to the committed config takes effect at the next trigger — the
+ * same moment a synced-in edit from another machine would. An unreadable
+ * config means the defaults; the sync itself will report what is wrong.
+ */
+export function scheduleFor(root: string, defaults: DaemonOptions): { debounceSeconds: number; intervalSeconds: number } {
+  try {
+    const config = readConfig(path.join(root, ".sidecar"));
+    return {
+      debounceSeconds: config.debounce ?? defaults.debounceSeconds,
+      // The daemon polls at its own interval; a repo cannot ask to be seen more often than that.
+      intervalSeconds: Math.max(config.interval ?? defaults.intervalSeconds, defaults.intervalSeconds),
+    };
+  } catch {
+    return { debounceSeconds: defaults.debounceSeconds, intervalSeconds: defaults.intervalSeconds };
+  }
+}
 
 type ChokidarModule = typeof import("chokidar");
 
@@ -195,6 +216,13 @@ async function runCycle(state: DaemonState): Promise<void> {
     }
     state.misses.delete(instance.root);
     if (state.cycleCount < (state.skipUntilCycle.get(instance.root) ?? 0)) {
+      skipped += 1;
+      continue;
+    }
+    // A repo with its own interval is left alone until it has gone that long
+    // without a round trip; the poll only asks, and the answer is per repo.
+    const last = state.lastRemoteSyncAt.get(instance.root);
+    if (last !== undefined && Date.now() - last < scheduleFor(instance.root, state.options).intervalSeconds * 1000) {
       skipped += 1;
       continue;
     }
@@ -473,7 +501,7 @@ function armRemoteSync(state: DaemonState, root: string): void {
     },
     // The floor keeps an overdue sync rebooked against a busy family from
     // retrying in a hot loop instead of at the settle cadence.
-    Math.max(SETTLE_WINDOW_MS, state.options.debounceSeconds * 1000 - elapsed),
+    Math.max(SETTLE_WINDOW_MS, scheduleFor(root, state.options).debounceSeconds * 1000 - elapsed),
   );
   state.remoteTimers.set(root, timer);
 }
@@ -492,7 +520,7 @@ function armRemoteSync(state: DaemonState, root: string): void {
  */
 function remoteIsDue(state: DaemonState, root: string): boolean {
   const last = state.lastRemoteSyncAt.get(root) ?? 0;
-  return Date.now() - last >= state.options.debounceSeconds * 1000;
+  return Date.now() - last >= scheduleFor(root, state.options).debounceSeconds * 1000;
 }
 
 function openTrailingWindow(state: DaemonState, root: string, delayMs: number): void {
