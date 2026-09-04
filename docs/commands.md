@@ -33,8 +33,9 @@ non-interactively.
 
 Answering `.` to the path question — or passing `--path .` — makes the repo
 itself the sidecar; that init ends with a first sync, so `.sidecar` and any
-uncommitted files land on the remote immediately. See
-[standalone.md](standalone.md).
+uncommitted files land on the remote immediately. A directory that is not a
+repository yet becomes one when a remote is named: `sidecar init <remote>
+--path .`. See [standalone.md](standalone.md).
 
 | flag | effect |
 |---|---|

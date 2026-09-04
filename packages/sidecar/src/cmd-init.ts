@@ -15,7 +15,7 @@ import {
   nowIso,
   parseOptions,
 } from "./util.js";
-import { git, gitToplevel, gitToplevelOptional } from "./git.js";
+import { git, gitRaw, gitToplevel, gitToplevelOptional } from "./git.js";
 import {
   GLOBAL_EXEC_ENV,
   PACKAGE_NAME,
@@ -175,7 +175,7 @@ export function cmdInit(args: string[]): number {
 
   const remote = parsed.positional[0];
   let existingRoot = remote ? undefined : findConfigRootOptional(process.cwd());
-  const root = existingRoot ?? gitToplevel(process.cwd());
+  const root = existingRoot ?? initRoot(remote, parsed);
   const configPath = path.join(root, ".sidecar");
   if (remote && fs.existsSync(configPath)) {
     const existing = readConfig(configPath);
@@ -189,8 +189,8 @@ export function cmdInit(args: string[]): number {
       existing.inbox === getValue(parsed, "--inbox", existing.inbox) &&
       existing.redaction === getValue(parsed, "--redaction", existing.redaction) &&
       existing.resolve === getValue(parsed, "--resolve", existing.resolve) &&
-      existing.debounce === durationConfigValue(parsed.values.get("--debounce"), "--debounce") &&
-      existing.interval === durationConfigValue(parsed.values.get("--interval"), "--interval");
+      existing.debounce === durationConfigValue(parsed.values.get("--debounce") ?? existing.debounce, "--debounce") &&
+      existing.interval === durationConfigValue(parsed.values.get("--interval") ?? existing.interval, "--interval");
     if (unchanged || !promptOverwriteConfig(configPath, existing.remote, remote)) {
       existingRoot = root;
     }
@@ -233,6 +233,29 @@ export function cmdInit(args: string[]): number {
     if (synced) registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
   }
   return 0;
+}
+
+/**
+ * The repo init acts on. Normally the enclosing Git repository. `--path .`
+ * means the current directory, though, and a directory can be its own
+ * sidecar before it is a repository at all — a state directory another
+ * program writes, a fresh dotfiles folder — so when the current directory is
+ * not a repository's toplevel and a remote was named, init makes it one here
+ * rather than adopting whatever repository happens to enclose it.
+ */
+function initRoot(remote: string | undefined, parsed: ParsedOptions): string {
+  const cwd = process.cwd();
+  const toplevel = gitToplevelOptional(cwd);
+  const here = parsed.values.has("--path") && pathIsRepoRoot(cwd, getValue(parsed, "--path", DEFAULT_PATH));
+  if (!here || (toplevel && pathIsRepoRoot(cwd, toplevel))) return gitToplevel(cwd);
+  if (!remote) {
+    throw new SidecarError(
+      `${cwd} is not a Git repository; to make it its own sidecar, name the remote it should sync to: sidecar init <remote> --path .`,
+    );
+  }
+  gitRaw(["init", "-q", "-b", getValue(parsed, "--branch", DEFAULT_BRANCH), cwd]);
+  console.log(`initialized ${paint("repo", cwd)} as a Git repository`);
+  return cwd;
 }
 
 // Question order matters: the checkout path decides whether this is a

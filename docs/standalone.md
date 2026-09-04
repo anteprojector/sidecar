@@ -30,6 +30,12 @@ sidecar init --path .
 The remote is the repo's own `origin` — sidecar doesn't create or ask for a
 second repo. If the repo has no origin yet, `init` says so and stops.
 
+A directory that is not a repository yet can become its own sidecar in one
+step by naming the remote: `sidecar init <remote> --path .` initializes the
+repository, adds the origin, and syncs. That holds even when the directory
+sits inside another project's repository, ignored by it — `--path .` means
+the directory you are in, not the repository enclosing it.
+
 `init` finishes with a first sync: the committed `.sidecar` — and anything
 else uncommitted, per the snapshot rule below — lands on the remote
 immediately instead of waiting for the daemon's next pass.

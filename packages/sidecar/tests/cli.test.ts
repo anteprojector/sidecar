@@ -39,6 +39,7 @@ import {
   ignoreEntryForSidecarPath,
   removeIgnoreEntry,
   removeZedInclusion,
+  resolveLastWriterWins,
   lastLines,
   parseGitHubRemote,
   formatLocalTimestamp,
@@ -862,6 +863,43 @@ describe("conflict forking", () => {
     expect(JSON.stringify(manifest)).not.toContain("content_base64");
     expect(manifest.paths[0].versions[0]).toHaveProperty("sha256");
     expect(manifest.paths[0].versions[0]).toHaveProperty("path");
+  });
+});
+
+describe("last-writer-wins conflicts", () => {
+  test("checks out the winning Git entry without following symlinks and records the canonical branch", () => {
+    const repo = initRepo();
+    git(repo, ["branch", "-m", "trunk"]);
+    const outside = path.join(tempDir(), "outside.txt");
+    fs.writeFileSync(outside, "do not overwrite\n", "utf8");
+
+    fs.symlinkSync("base-target", path.join(repo, "item"));
+    git(repo, ["add", "item"]);
+    git(repo, ["commit", "-m", "base"]);
+    git(repo, ["branch", "sidecar-inbox/test/lww"]);
+    fs.unlinkSync(path.join(repo, "item"));
+    fs.symlinkSync(outside, path.join(repo, "item"));
+    git(repo, ["commit", "-am", "trunk"]);
+
+    git(repo, ["switch", "sidecar-inbox/test/lww"]);
+    fs.unlinkSync(path.join(repo, "item"));
+    fs.symlinkSync("inbox-target", path.join(repo, "item"));
+    git(repo, ["commit", "-am", "inbox"]);
+    git(repo, ["switch", "trunk"]);
+    git(repo, ["merge", "--no-ff", "sidecar-inbox/test/lww"], { check: false });
+
+    resolveLastWriterWins(repo, "trunk", "sidecar-inbox/test/lww");
+
+    expect(fs.lstatSync(path.join(repo, "item")).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(path.join(repo, "item"))).toBe("inbox-target");
+    expect(fs.readFileSync(outside, "utf8")).toBe("do not overwrite\n");
+    expect(git(repo, ["ls-files", "-s", "item"]).stdout).toMatch(/^120000 /);
+    const manifestDir = path.join(repo, ".sidecar-conflicts");
+    const manifest = JSON.parse(fs.readFileSync(path.join(manifestDir, fs.readdirSync(manifestDir)[0]), "utf8"));
+    expect(manifest.paths[0]).toMatchObject({
+      kept: "sidecar-inbox/test/lww",
+      dropped: "trunk",
+    });
   });
 });
 

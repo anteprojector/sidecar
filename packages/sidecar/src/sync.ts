@@ -465,7 +465,7 @@ function mergeInboxBranchesAt(
       }
 
       if (config.resolve === "lww") {
-        resolveLastWriterWins(sidecarPath, remoteBranch);
+        resolveLastWriterWins(sidecarPath, config.branch, remoteBranch);
         git(sidecarPath, ["commit", "-m", `Merge ${remoteBranch}, last writer wins`]);
         merged.push(remoteBranch);
         continue;
@@ -1201,7 +1201,7 @@ type ConflictManifest = {
  * carried it). A tie goes to the incoming branch — the merge was asked to
  * bring it in. A side that deleted the path wins by deleting it.
  */
-export function resolveLastWriterWins(repo: string, remoteBranch: string): void {
+export function resolveLastWriterWins(repo: string, canonicalBranch: string, remoteBranch: string): void {
   const conflicts = unmergedPaths(repo);
   if (!Object.keys(conflicts).length) {
     throw new SidecarError("merge reported conflicts, but no unmerged paths were found");
@@ -1216,22 +1216,22 @@ export function resolveLastWriterWins(repo: string, remoteBranch: string): void 
     const theirs = lastWriteAt(repo, remoteBranch, conflictPath);
     const winner = theirs >= ours ? 3 : 2;
     const loser = winner === 3 ? 2 : 3;
-    const blob = showStage(repo, winner, conflictPath);
-    const full = path.join(repo, conflictPath);
-    if (blob) {
-      fs.mkdirSync(path.dirname(full), { recursive: true });
-      fs.writeFileSync(full, blob);
+    if (stages[winner]) {
+      // Let Git materialize the selected index entry. Writing the blob through
+      // the filesystem loses its mode and, when the conflicted working-tree
+      // path is a symlink, follows that link and overwrites its target.
+      git(repo, ["checkout-index", "--force", `--stage=${winner}`, "--", conflictPath]);
       git(repo, ["add", "--", conflictPath]);
     } else {
       git(repo, ["rm", "-f", "--ignore-unmatch", "--", conflictPath], { check: false });
-      if (fs.existsSync(full) && fs.statSync(full).isFile()) fs.unlinkSync(full);
     }
     manifest.paths.push({
       path: conflictPath,
-      kept: winner === 3 ? branch : "main",
+      kept: winner === 3 ? branch : canonicalBranch,
       kept_at: winner === 3 ? theirs : ours,
-      dropped: winner === 3 ? "main" : branch,
-      dropped_oid: stages[loser] ?? "",
+      dropped: winner === 3 ? canonicalBranch : branch,
+      // Null when the dropped side had deleted the path: there is no blob to find.
+      dropped_oid: stages[loser] ?? null,
     });
   }
 
@@ -1249,7 +1249,7 @@ type LastWriterManifest = {
   timestamp: string;
   resolved_by: "lww";
   source_branch: string;
-  paths: Array<{ path: string; kept: string; kept_at: number; dropped: string; dropped_oid: string }>;
+  paths: Array<{ path: string; kept: string; kept_at: number; dropped: string; dropped_oid: string | null }>;
 };
 
 /** Unix time of the last commit on `ref` that touched the path; 0 when none did (the path was never committed there). */

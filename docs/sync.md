@@ -64,7 +64,7 @@ merge does with a file both machines edited:
 | mode | effect |
 |---|---|
 | `fork` | the default: every version is kept as a separate file beside the original's path, `notes/plan.conflict.main.abc1234.md` and `notes/plan.conflict.sidecar-inbox-zack-79ff.def5678.md`, with a manifest under `.sidecar-conflicts/` naming them. Nothing is lost; someone folds the forks back by hand. |
-| `lww` | last writer wins, per path: the side whose most recent commit touching the path is newer keeps the file, and a manifest under `.sidecar-conflicts/` names the dropped version's oid (still reachable in the inbox branch that carried it). A side that deleted the path wins by deleting it; a tie goes to the incoming branch. |
+| `lww` | last writer wins, per path: the side whose most recent commit touching the path is newer keeps the file, and a manifest under `.sidecar-conflicts/` names the dropped version's oid when it had one (still reachable in the branch that carried it). A dropped deletion records `null`. A side that deleted the path wins by deleting it; a tie goes to the incoming branch. |
 
 `lww` is for a tree that has one writer at a time — a machine-setup repo you
 edit from one laptop and then another, a directory a single daemon writes —

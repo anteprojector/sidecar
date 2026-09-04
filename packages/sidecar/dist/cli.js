@@ -2599,7 +2599,7 @@ function mergeInboxBranchesAt(sidecarPath, config, options) {
         throw new SidecarError(result.stderr.trim() || `merge failed for ${remoteBranch}`);
       }
       if (config.resolve === "lww") {
-        resolveLastWriterWins(sidecarPath, remoteBranch);
+        resolveLastWriterWins(sidecarPath, config.branch, remoteBranch);
         git(sidecarPath, ["commit", "-m", `Merge ${remoteBranch}, last writer wins`]);
         merged.push(remoteBranch);
         continue;
@@ -3148,7 +3148,7 @@ function forkConflicts(repo, remoteBranch) {
     throw new SidecarError("fork-files did not clear all unmerged paths");
   }
 }
-function resolveLastWriterWins(repo, remoteBranch) {
+function resolveLastWriterWins(repo, canonicalBranch, remoteBranch) {
   const conflicts = unmergedPaths(repo);
   if (!Object.keys(conflicts).length) {
     throw new SidecarError("merge reported conflicts, but no unmerged paths were found");
@@ -3161,23 +3161,18 @@ function resolveLastWriterWins(repo, remoteBranch) {
     const theirs = lastWriteAt(repo, remoteBranch, conflictPath);
     const winner = theirs >= ours ? 3 : 2;
     const loser = winner === 3 ? 2 : 3;
-    const blob = showStage(repo, winner, conflictPath);
-    const full = path7.join(repo, conflictPath);
-    if (blob) {
-      fs7.mkdirSync(path7.dirname(full), { recursive: true });
-      fs7.writeFileSync(full, blob);
+    if (stages[winner]) {
+      git(repo, ["checkout-index", "--force", `--stage=${winner}`, "--", conflictPath]);
       git(repo, ["add", "--", conflictPath]);
     } else {
       git(repo, ["rm", "-f", "--ignore-unmatch", "--", conflictPath], { check: false });
-      if (fs7.existsSync(full) && fs7.statSync(full).isFile())
-        fs7.unlinkSync(full);
     }
     manifest.paths.push({
       path: conflictPath,
-      kept: winner === 3 ? branch : "main",
+      kept: winner === 3 ? branch : canonicalBranch,
       kept_at: winner === 3 ? theirs : ours,
-      dropped: winner === 3 ? "main" : branch,
-      dropped_oid: stages[loser] ?? ""
+      dropped: winner === 3 ? canonicalBranch : branch,
+      dropped_oid: stages[loser] ?? null
     });
   }
   const manifestDir = path7.join(repo, ".sidecar-conflicts");
@@ -3417,11 +3412,11 @@ function cmdInit(args) {
   }
   const remote = parsed.positional[0];
   let existingRoot = remote ? undefined : findConfigRootOptional(process.cwd());
-  const root = existingRoot ?? gitToplevel(process.cwd());
+  const root = existingRoot ?? initRoot(remote, parsed);
   const configPath = path8.join(root, ".sidecar");
   if (remote && fs9.existsSync(configPath)) {
     const existing = readConfig(configPath);
-    const unchanged = existing.remote === remote && existing.path === getValue(parsed, "--path", existing.path) && existing.branch === getValue(parsed, "--branch", existing.branch) && existing.inbox === getValue(parsed, "--inbox", existing.inbox) && existing.redaction === getValue(parsed, "--redaction", existing.redaction) && existing.resolve === getValue(parsed, "--resolve", existing.resolve) && existing.debounce === durationConfigValue(parsed.values.get("--debounce"), "--debounce") && existing.interval === durationConfigValue(parsed.values.get("--interval"), "--interval");
+    const unchanged = existing.remote === remote && existing.path === getValue(parsed, "--path", existing.path) && existing.branch === getValue(parsed, "--branch", existing.branch) && existing.inbox === getValue(parsed, "--inbox", existing.inbox) && existing.redaction === getValue(parsed, "--redaction", existing.redaction) && existing.resolve === getValue(parsed, "--resolve", existing.resolve) && existing.debounce === durationConfigValue(parsed.values.get("--debounce") ?? existing.debounce, "--debounce") && existing.interval === durationConfigValue(parsed.values.get("--interval") ?? existing.interval, "--interval");
     if (unchanged || !promptOverwriteConfig(configPath, existing.remote, remote)) {
       existingRoot = root;
     }
@@ -3457,6 +3452,19 @@ function cmdInit(args) {
       registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
   }
   return 0;
+}
+function initRoot(remote, parsed) {
+  const cwd = process.cwd();
+  const toplevel = gitToplevelOptional(cwd);
+  const here = parsed.values.has("--path") && pathIsRepoRoot(cwd, getValue(parsed, "--path", DEFAULT_PATH));
+  if (!here || toplevel && pathIsRepoRoot(cwd, toplevel))
+    return gitToplevel(cwd);
+  if (!remote) {
+    throw new SidecarError(`${cwd} is not a Git repository; to make it its own sidecar, name the remote it should sync to: sidecar init <remote> --path .`);
+  }
+  gitRaw(["init", "-q", "-b", getValue(parsed, "--branch", DEFAULT_BRANCH), cwd]);
+  console.log(`initialized ${paint("repo", cwd)} as a Git repository`);
+  return cwd;
 }
 function buildInitConfig(root, remote, parsed) {
   const rawPath = parsed.values.has("--path") ? getValue(parsed, "--path", DEFAULT_PATH) : promptSidecarPath(root);
