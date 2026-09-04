@@ -2357,7 +2357,7 @@ describe("sidecar peers", () => {
     expect(fs.existsSync(path.join(main, "notes", ".git"))).toBe(true);
   });
 
-  test("init --ignored keeps a peer and its checkout out of the tree, and deinit takes both back out", () => {
+  test("init --ignored keeps a peer and its checkout out of the tree, and deinit leaves the shared exclude lines", () => {
     const { main } = initSidecarProject();
     const privateRemote = initBareRemote();
 
@@ -2377,7 +2377,10 @@ describe("sidecar peers", () => {
 
     expect(fs.existsSync(path.join(main, ".sidecar.private"))).toBe(false);
     expect(fs.existsSync(path.join(main, "private"))).toBe(false);
-    expect(fs.readFileSync(excludePath, "utf8")).not.toMatch(/private/);
+    // The exclude file is shared by every working copy of the repo, and another
+    // may still declare the peer, so its lines are left where they are.
+    expect(fs.readFileSync(excludePath, "utf8")).toContain("/.sidecar.private\n");
+    expect(fs.readFileSync(excludePath, "utf8")).toContain("/private/\n");
     expect(fs.existsSync(path.join(main, ".sidecar"))).toBe(true);
   });
 
@@ -2423,6 +2426,9 @@ describe("sidecar peers", () => {
 
     expect(attempt(["init", other, "--peer", "other", "--path", "sidecar"])).toContain("both use the checkout");
     expect(fs.existsSync(path.join(main, ".sidecar.other"))).toBe(false);
+    const remote = readConfig(path.join(main, ".sidecar")).remote;
+    expect(attempt(["init", remote, "--peer", "twin"])).toContain("both sync to");
+    expect(fs.existsSync(path.join(main, ".sidecar.twin"))).toBe(false);
     expect(attempt(["init", other, "--peer", "bak"])).toContain("reserved");
     expect(attempt(["init", other, "--peer", "Notes"])).toContain("invalid peer name");
     expect(attempt(["init", other, "--peer", "notes", "--path", "."])).toContain("cannot be standalone");

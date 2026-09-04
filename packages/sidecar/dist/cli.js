@@ -1682,15 +1682,25 @@ function loadPeers(selection) {
   return peers;
 }
 function ensureDistinctCheckouts(peers) {
-  const owners = new Map;
+  const checkoutOwners = new Map;
+  const remoteOwners = new Map;
   for (const peer of peers) {
     const checkout = realpathOr(resolveSidecarPath(peer.root, peer.config));
-    const owner = owners.get(checkout);
-    if (owner !== undefined) {
-      throw new SidecarError(`peers ${owner} and ${peer.name} both use the checkout ${checkout}; give each its own --path`);
+    const checkoutOwner = checkoutOwners.get(checkout);
+    if (checkoutOwner !== undefined) {
+      throw new SidecarError(`peers ${checkoutOwner} and ${peer.name} both use the checkout ${checkout}; give each its own --path`);
     }
-    owners.set(checkout, peer.name);
+    checkoutOwners.set(checkout, peer.name);
+    const remote = sameRemoteKey(peer.config.remote);
+    const remoteOwner = remoteOwners.get(remote);
+    if (remoteOwner !== undefined) {
+      throw new SidecarError(`peers ${remoteOwner} and ${peer.name} both sync to ${peer.config.remote}; give each its own remote`);
+    }
+    remoteOwners.set(remote, peer.name);
   }
+}
+function sameRemoteKey(remote) {
+  return remote.trim().replace(/\/+$/, "").replace(/\.git$/, "");
 }
 function findConfigRoot(start) {
   const root = findConfigRootOptional(start);
@@ -3408,14 +3418,10 @@ function cmdDeinit(args) {
     }
     const ignoreEntry = ignoreEntryForSidecarPath(root, config.path);
     if (ignoreEntry) {
-      for (const ignoreFile of ignoreFiles(root))
-        removeIgnoreEntry(ignoreFile, ignoreEntry);
+      removeIgnoreEntry(path8.join(root, ".gitignore"), ignoreEntry);
       removeZedInclusion(root, ignoreEntry);
     }
   }
-  const exclude = gitExcludePath(root);
-  if (exclude)
-    removeIgnoreLine(exclude, `/${configFile}`);
   unregisterInstance(configPath);
   console.log(`removed sidecar from ${paint("repo", root)}${name === DEFAULT_PEER ? "" : ` (peer ${paint("brand", name)})`}`);
   if (leftovers.length) {
@@ -3885,10 +3891,6 @@ function promptOverwriteConfig(configPath, existingRemote, newRemote) {
   console.log(`${configPath} already exists (remote ${existingRemote})`);
   const answer = promptLine(`overwrite it with the new settings? ${paint("quiet", "[y/N]")} `).toLowerCase();
   return answer === "y" || answer === "yes";
-}
-function ignoreFiles(root) {
-  const exclude = gitExcludePath(root);
-  return exclude ? [path8.join(root, ".gitignore"), exclude] : [path8.join(root, ".gitignore")];
 }
 function ensureIgnoreEntry(ignorePath, sidecarPath) {
   ensureIgnoreLine(ignorePath, `/${sidecarPath.replace(/^\/+|\/+$/g, "")}/`);

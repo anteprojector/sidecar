@@ -120,22 +120,39 @@ export function loadPeers(selection: string | undefined): Peer[] {
   return peers;
 }
 
-// Two peers on one checkout would each snapshot the other's inbox branch, so
-// the collision is refused before anything runs rather than found in history.
-// Compared as real paths: a symlink is the same directory under another name,
-// and the locks that keep peers apart are per peer, not per directory.
+// Two peers on one checkout would each snapshot the other's inbox branch, and
+// two on one remote would merge each other's inboxes and share one fleet of
+// health branches — so both collisions are refused before anything runs
+// rather than found in history. Checkouts are compared as real paths: a
+// symlink is the same directory under another name, and the locks that keep
+// peers apart are per peer, not per directory.
 export function ensureDistinctCheckouts(peers: Peer[]): void {
-  const owners = new Map<string, string>();
+  const checkoutOwners = new Map<string, string>();
+  const remoteOwners = new Map<string, string>();
   for (const peer of peers) {
     const checkout = realpathOr(resolveSidecarPath(peer.root, peer.config));
-    const owner = owners.get(checkout);
-    if (owner !== undefined) {
+    const checkoutOwner = checkoutOwners.get(checkout);
+    if (checkoutOwner !== undefined) {
       throw new SidecarError(
-        `peers ${owner} and ${peer.name} both use the checkout ${checkout}; give each its own --path`,
+        `peers ${checkoutOwner} and ${peer.name} both use the checkout ${checkout}; give each its own --path`,
       );
     }
-    owners.set(checkout, peer.name);
+    checkoutOwners.set(checkout, peer.name);
+
+    const remote = sameRemoteKey(peer.config.remote);
+    const remoteOwner = remoteOwners.get(remote);
+    if (remoteOwner !== undefined) {
+      throw new SidecarError(
+        `peers ${remoteOwner} and ${peer.name} both sync to ${peer.config.remote}; give each its own remote`,
+      );
+    }
+    remoteOwners.set(remote, peer.name);
   }
+}
+
+/** One spelling for the ways a remote URL can differ without naming a different repository. */
+function sameRemoteKey(remote: string): string {
+  return remote.trim().replace(/\/+$/, "").replace(/\.git$/, "");
 }
 
 /**

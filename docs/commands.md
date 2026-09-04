@@ -74,8 +74,10 @@ optional prompt defaults to no.
 ### `sidecar deinit [--peer <name>]`
 
 Removes Sidecar from the current Git repository: the `.sidecar` config, the
-configured checkout, Sidecar-owned `.gitignore`, Git exclude, Zed search, and
-daemon registry entries. It preserves unrelated settings and does not touch
+configured checkout, Sidecar-owned `.gitignore`, Zed search, and daemon
+registry entries. Lines in `.git/info/exclude` are left in place: that file
+is shared by every working copy of the repo, and another may still declare
+the ignored peer. It preserves unrelated settings and does not touch
 `package.json` or installed dependencies. Outside a Git repository it warns,
 does nothing, and exits successfully. One peer at a time: a repo with several
 removes nothing until `--peer` names one.

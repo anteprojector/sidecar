@@ -282,21 +282,27 @@ describe("peers", () => {
     expect(readConfig(path.join(root, ".sidecar.alpha")).peer).toBe("alpha");
   });
 
-  test("two peers on one checkout are refused even through a symlink", () => {
+  test("two peers on one checkout or one remote are refused, even through a symlink or a spelling", () => {
     const root = tempDir();
     fs.mkdirSync(path.join(root, "sidecar"));
     fs.symlinkSync("sidecar", path.join(root, "notes"));
-    const peerAt = (name: string, checkout: string) => ({
+    const peerAt = (name: string, checkout: string, remote = `git@github.com:org/${name}.git`) => ({
       root,
       name,
       configPath: peerConfigPath(root, name),
-      config: { peer: name, remote: "x", version: 1, path: checkout, branch: "main", inbox: DEFAULT_INBOX } as SidecarConfig,
+      config: { peer: name, remote, version: 1, path: checkout, branch: "main", inbox: DEFAULT_INBOX } as SidecarConfig,
     });
 
     expect(() => ensureDistinctCheckouts([peerAt("default", "sidecar"), peerAt("other", "other")])).not.toThrow();
     expect(() => ensureDistinctCheckouts([peerAt("default", "sidecar"), peerAt("notes", "notes")])).toThrow(
       /peers default and notes both use the checkout/,
     );
+    expect(() =>
+      ensureDistinctCheckouts([
+        peerAt("default", "sidecar", "git@github.com:org/repo.git"),
+        peerAt("twin", "twin", "git@github.com:org/repo/"),
+      ]),
+    ).toThrow(/peers default and twin both sync to git@github.com:org\/repo\/; give each its own remote/);
   });
 
   test("a named peer cannot be standalone", () => {

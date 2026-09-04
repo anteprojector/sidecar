@@ -174,11 +174,16 @@ declares, which is what a clone needs; a remote or a `--peer` names one.
 go in `.git/info/exclude`, git's ignore file that never leaves the machine,
 rather than the committed `.gitignore`. Every clone that wants the peer runs
 the same init, since nothing in the repo records it. That also means an
-ignored peer is per working copy: a git worktree or jj workspace of the
-repo does not contain the untracked config, so the peer does not exist
-there until it is declared there too. Peers the repo commits link across
-working copies like any sidecar — each peer to the matching peer's clone at
-the primary.
+ignored peer is declared per working copy: a git worktree or jj workspace of
+the repo does not contain the untracked config, so the peer does not exist
+there until it is declared there too. The exclude file itself is shared by
+every working copy of the repo, so `deinit` leaves its lines in place — a
+stale line for a file that is gone costs nothing, and removing it would
+expose the peer in a working copy that still declares it. Peers the repo
+commits link across working copies like any sidecar — each peer to the
+matching peer's clone at the primary.
 
-Only `.sidecar` can be [standalone](standalone.md): the repo can be one
-thing, and a peer pointed at `.` is refused.
+Each peer needs its own remote and its own checkout; two peers pointed at one
+remote would merge each other's inboxes, so init refuses the second. Only
+`.sidecar` can be [standalone](standalone.md): the repo can be one thing, and
+a peer pointed at `.` is refused.

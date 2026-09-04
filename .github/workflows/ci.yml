@@ -38,6 +38,10 @@ jobs:
         run: bun run test
 
       # The published dist is committed; a source change without a matching
-      # rebuild ships stale code, so the build the tests just ran must match.
+      # rebuild ships stale code. The fast suite does not build, so rebuild
+      # here and require the result to match what was committed.
+      - name: Build
+        run: bun run build
+
       - name: Check committed dist is current
         run: git diff --exit-code packages/sidecar/dist

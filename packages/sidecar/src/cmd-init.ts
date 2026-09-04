@@ -125,14 +125,15 @@ export function cmdDeinit(args: string[]): number {
     }
     const ignoreEntry = ignoreEntryForSidecarPath(root, config.path);
     if (ignoreEntry) {
-      // Wherever init put it: the committed .gitignore, or the repo's private
-      // exclude file for a peer that was itself ignored.
-      for (const ignoreFile of ignoreFiles(root)) removeIgnoreEntry(ignoreFile, ignoreEntry);
+      // Only the committed .gitignore. An ignored peer's entries live in
+      // .git/info/exclude, which every working copy of the repo shares: a
+      // worktree that still declares the peer would have its private config
+      // and checkout exposed the moment this one took the lines out. A stale
+      // line for a file that is gone costs nothing, so they stay.
+      removeIgnoreEntry(path.join(root, ".gitignore"), ignoreEntry);
       removeZedInclusion(root, ignoreEntry);
     }
   }
-  const exclude = gitExcludePath(root);
-  if (exclude) removeIgnoreLine(exclude, `/${configFile}`);
   unregisterInstance(configPath);
 
   console.log(`removed sidecar from ${paint("repo", root)}${name === DEFAULT_PEER ? "" : ` (peer ${paint("brand", name)})`}`);
@@ -770,12 +771,6 @@ function promptOverwriteConfig(configPath: string, existingRemote: string, newRe
   console.log(`${configPath} already exists (remote ${existingRemote})`);
   const answer = promptLine(`overwrite it with the new settings? ${paint("quiet", "[y/N]")} `).toLowerCase();
   return answer === "y" || answer === "yes";
-}
-
-/** The ignore files init may have written a checkout into: .gitignore, and the private exclude where there is one. */
-function ignoreFiles(root: string): string[] {
-  const exclude = gitExcludePath(root);
-  return exclude ? [path.join(root, ".gitignore"), exclude] : [path.join(root, ".gitignore")];
 }
 
 /** A checkout's ignore entry: root-anchored, directory-only. */
