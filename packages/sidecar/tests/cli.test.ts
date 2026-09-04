@@ -966,16 +966,19 @@ describe.skipIf(process.env.SIDECAR_INTEGRATION !== "1")("last-writer-wins confl
 
     fs.symlinkSync("base-target", path.join(repo, "item"));
     git(repo, ["add", "item"]);
-    git(repo, ["commit", "-m", "base"]);
+    // Explicit clocks keep this test about the newer entry, not same-second
+    // deterministic OID ties (the outside target includes a random temp path).
+    const baseTime = 1_700_000_000;
+    withCommitTime(baseTime, () => git(repo, ["commit", "-m", "base"]));
     git(repo, ["branch", "sidecar-inbox/test/lww"]);
     fs.unlinkSync(path.join(repo, "item"));
     fs.symlinkSync(outside, path.join(repo, "item"));
-    git(repo, ["commit", "-am", "trunk"]);
+    withCommitTime(baseTime + 10, () => git(repo, ["commit", "-am", "trunk"]));
 
     git(repo, ["switch", "sidecar-inbox/test/lww"]);
     fs.unlinkSync(path.join(repo, "item"));
     fs.symlinkSync("inbox-target", path.join(repo, "item"));
-    git(repo, ["commit", "-am", "inbox"]);
+    withCommitTime(baseTime + 20, () => git(repo, ["commit", "-am", "inbox"]));
     git(repo, ["switch", "trunk"]);
     git(repo, ["merge", "--no-ff", "sidecar-inbox/test/lww"], { check: false });
 
