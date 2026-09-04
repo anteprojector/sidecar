@@ -10,6 +10,7 @@ import { type ParsedOptions, SidecarError, currentHost, currentUser, parseDurati
 import { gitDir, gitRaw, hasGitMetadata } from "./git.js";
 import { HEALTH_BRANCH_PREFIX, inboxPrefixCollidesWithHealth } from "./health.js";
 import { DEFAULT_REDACTION_MODE, REDACTION_MODES, type RedactionMode } from "./redaction.js";
+import { peerRulesPath, readRules, type SidecarRules } from "./rules.js";
 
 export const DEFAULT_PATH = "sidecar";
 export const DEFAULT_BRANCH = "main";
@@ -26,8 +27,8 @@ const branchValidity = new Map<string, boolean>();
 // way a single file could not express: one committed for the whole team, one
 // gitignored for this machine alone.
 //
-// A dot after `sidecar` names a peer; a hyphen (`.sidecar-conflicts/`) names
-// something sidecar itself writes. The two never collide.
+// A dot after `sidecar` names a peer; a hyphen names supporting files such
+// as `.sidecar-rules` and `.sidecar-conflicts/`. The two never collide.
 // ---------------------------------------------------------------------------
 
 /** The peer `.sidecar` itself is; `--peer default` selects it. */
@@ -90,9 +91,9 @@ export function listPeerNames(root: string): string[] {
     .sort((left, right) => (left === DEFAULT_PEER ? -1 : right === DEFAULT_PEER ? 1 : left.localeCompare(right)));
 }
 
-export function loadPeer(root: string, name: string): Peer {
+export function loadPeer(root: string, name: string, options: { loadRules?: boolean } = {}): Peer {
   const configPath = peerConfigPath(root, name);
-  return { root, name, configPath, config: readConfig(configPath) };
+  return { root, name, configPath, config: readConfig(configPath, options) };
 }
 
 /** The peer a command was pointed at: `--peer` first, the daemon's env var behind it. */
@@ -105,7 +106,7 @@ export function selectedPeer(parsed: ParsedOptions): string | undefined {
  * directory declaring any. Named, exactly that one; unnamed, all of them —
  * a command with no peer in mind means every sidecar this repo has.
  */
-export function loadPeers(selection: string | undefined): Peer[] {
+export function loadPeers(selection: string | undefined, options: { loadRules?: boolean } = {}): Peer[] {
   const root = findConfigRoot(process.cwd());
   const names = listPeerNames(root);
   if (selection) {
@@ -113,9 +114,9 @@ export function loadPeers(selection: string | undefined): Peer[] {
     if (!names.includes(selection)) {
       throw new SidecarError(`no ${peerFileName(selection)} in ${root}; peers here: ${names.join(", ")}`);
     }
-    return [loadPeer(root, selection)];
+    return [loadPeer(root, selection, options)];
   }
-  const peers = names.map((name) => loadPeer(root, name));
+  const peers = names.map((name) => loadPeer(root, name, options));
   ensureDistinctCheckouts(peers);
   return peers;
 }
@@ -156,13 +157,10 @@ function sameRemoteKey(remote: string): string {
 }
 
 /**
- * What a merge does when two machines edited the same file. `fork` keeps
- * every version as separate files beside a manifest (the default: nothing is
- * ever lost, at the cost of a fork the user must fold back). `lww` keeps the
- * side whose last commit to that path is newer and records the dropped
- * version's oid in the manifest — right for a tree with one writer at a time,
- * where a conflict means two machines briefly overlapped and the newer state
- * is the one that matters.
+ * `fork` uses Git's content merge and preserves conflicting versions as
+ * separate files beside a manifest. `lww` always selects one complete parent
+ * version using its original write time, even when Git could merge the edits
+ * cleanly; it never combines file contents from different writers.
  */
 export const RESOLVE_MODES = ["fork", "lww"] as const;
 export type ResolveMode = (typeof RESOLVE_MODES)[number];
@@ -178,6 +176,9 @@ export type SidecarConfig = {
   inbox: string;
   redaction: RedactionMode;
   resolve: ResolveMode;
+  /** Loaded from the adjacent peer rules file; never serialized into .sidecar. */
+  rules?: SidecarRules;
+  rulesPath?: string;
   /**
    * This repo's sync cadence, in seconds, overriding the daemon's defaults:
    * `debounce` is the least time between remote round trips once edits land,
@@ -221,7 +222,7 @@ export function writeConfig(configPath: string, config: SidecarConfig): void {
   fs.writeFileSync(configPath, text, "utf8");
 }
 
-export function readConfig(configPath: string): SidecarConfig {
+export function readConfig(configPath: string, options: { loadRules?: boolean } = {}): SidecarConfig {
   let values: Record<string, unknown>;
   try {
     const parsed = parseToml(fs.readFileSync(configPath, "utf8"));
@@ -238,6 +239,7 @@ export function readConfig(configPath: string): SidecarConfig {
   if (!remote) throw new SidecarError(`${configPath} is missing remote`);
 
   const peer = peerNameOf(path.basename(configPath)) ?? DEFAULT_PEER;
+  const rulesPath = peerRulesPath(path.dirname(configPath), peer);
   const config = {
     peer,
     remote,
@@ -252,6 +254,8 @@ export function readConfig(configPath: string): SidecarConfig {
     resolve: resolveModeConfigValue(stringConfigValue(configPath, values, "resolve", DEFAULT_RESOLVE), configPath),
     debounce: durationConfigValue(values.debounce, `${configPath} debounce`),
     interval: durationConfigValue(values.interval, `${configPath} interval`),
+    rules: options.loadRules === false ? undefined : readRules(rulesPath),
+    rulesPath,
   };
   validateRemote(config.remote);
   validateBranch(config.branch);

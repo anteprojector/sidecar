@@ -22,6 +22,7 @@ import {
   LOCAL_SYNC_ENV,
   SOFT_SYNC_ENV,
   checkoutIsUnlinkedFromFamily,
+  checkoutRedactionPolicy,
   ensureInboxBranch,
   ensureRedactionFilter,
   fileRedactionDelta,
@@ -33,7 +34,8 @@ import {
   syncBranchBeforePush,
   syncProject,
 } from "./sync.js";
-import { DEFAULT_REDACTION_MODE, NO_REDACT_PRAGMA } from "./redaction.js";
+import { DEFAULT_REDACTION_MODE } from "./redaction.js";
+import { readRules, resolveFileRules } from "./rules.js";
 import { announcePeer } from "./ui.js";
 
 export function cmdSnapshot(args: string[]): number {
@@ -53,6 +55,7 @@ export function cmdSnapshot(args: string[]): number {
     withSyncLock(root, peer.name, "throw", () => {
       const inbox = expandInbox(config, sidecarPath);
       ensureCommitIdentity(sidecarPath);
+      ensureRedactionFilter(sidecarPath, config.redaction, config);
       ensureInboxBranch(sidecarPath, config, inbox);
       const committed = snapshot(
         sidecarPath,
@@ -60,9 +63,10 @@ export function cmdSnapshot(args: string[]): number {
         inbox,
         getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined,
         config.redaction,
+        config,
       );
       if (committed && parsed.flags.has("--push")) {
-        syncBranchBeforePush(sidecarPath, inbox);
+        syncBranchBeforePush(sidecarPath, inbox, config);
         pushBranch(sidecarPath, inbox);
       }
     });
@@ -81,11 +85,12 @@ export function cmdSync(args: string[]): number {
 
   // Peers never interact, so one failing must not stop the rest: every peer
   // gets its turn, and the failures are reported together at the end.
-  const peers = loadPeers(selectedPeer(parsed));
+  const peers = loadPeers(selectedPeer(parsed), { loadRules: false });
   const failed: string[] = [];
   for (const peer of peers) {
     announcePeer(peer, peers);
     try {
+      if (peer.config.rulesPath) peer.config.rules = readRules(peer.config.rulesPath);
       syncPeer(peer, parsed);
     } catch (error) {
       if (peers.length === 1) throw error;
@@ -105,6 +110,7 @@ function syncPeer(peer: Peer, parsed: ReturnType<typeof parseOptions>): void {
   // that loses the lock to a running sync can no-op because the interval or
   // watcher will simply request again. A manual sync must never pretend.
   const soft = parsed.flags.has("--soft") || process.env[SOFT_SYNC_ENV] === "1";
+  const remote = !parsed.flags.has("--local") && process.env[LOCAL_SYNC_ENV] !== "1";
   // Which step was in flight when a sync threw, so the heartbeat can say
   // "failed at snapshot" rather than only "failed".
   let stage = "start";
@@ -115,15 +121,20 @@ function syncPeer(peer: Peer, parsed: ReturnType<typeof parseOptions>): void {
         snapshot: !parsed.flags.has("--no-snapshot"),
         // --local settles this machine and stops there: no fetch, no push, and
         // nothing that can fail because a remote is unreachable.
-        remote: !parsed.flags.has("--local") && process.env[LOCAL_SYNC_ENV] !== "1",
+        remote,
         message: getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined,
         onStage: (name) => {
           stage = name;
         },
       });
+      // Local settling is useful activity, but only a completed remote phase
+      // establishes when this checkout last synchronized with other machines.
+      registerCurrentInstance(root, config, remote
+        ? { event: "sync", lastSyncAt: nowIso() }
+        : { event: "sync-local" });
     });
   } catch (error) {
-    reportSyncHealth(root, config, {
+    if (remote) reportSyncHealth(root, config, {
       status: "failed",
       stage,
       message: error instanceof Error ? error.message : String(error),
@@ -133,8 +144,7 @@ function syncPeer(peer: Peer, parsed: ReturnType<typeof parseOptions>): void {
   // A soft sync that lost the lock never attempted anything, so it has nothing
   // to report; the sync holding the lock will report for this checkout.
   if (synced) {
-    registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
-    reportSyncHealth(root, config, { status: "ok" });
+    if (remote) reportSyncHealth(root, config, { status: "ok" });
     // Only on a sync someone asked for. The daemon runs the same command on its
     // interval, where a standing note about a working checkout is log noise.
     if (!soft) {
@@ -161,18 +171,16 @@ export function cmdMerge(args: string[]): number {
   for (const peer of peers) {
     announcePeer(peer, peers);
     const { root, config } = peer;
-    if (config.resolve === "fork" && !parsed.flags.has("--fork-files")) {
-      console.log("sidecar: conflicts will stop the merge; pass --fork-files to preserve all versions");
-    }
-
     const sidecarPath = requireSidecarCheckout(root, config);
-    // Merging runs git status against the checkout; repair a stale filter
-    // command first so required=true doesn't wedge it.
-    ensureRedactionFilter(sidecarPath, config.redaction);
-    mergeInboxBranches(sidecarPath, config, {
-      forkFiles: parsed.flags.has("--fork-files"),
-      push: !parsed.flags.has("--no-push"),
-      remote: true,
+    withSyncLock(root, peer.name, "throw", () => {
+      // Filter wiring mutates the shared Git config too, so keep it under
+      // the same lock as the merge and its temporary worktree cleanup.
+      ensureRedactionFilter(sidecarPath, config.redaction, config);
+      mergeInboxBranches(sidecarPath, config, {
+        forkFiles: parsed.flags.has("--fork-files"),
+        push: !parsed.flags.has("--no-push"),
+        remote: true,
+      });
     });
   }
   return 0;
@@ -194,24 +202,19 @@ export function cmdRedactions(args: string[]): number {
 
 function printPeerRedactions({ root, config }: Peer): void {
   const sidecarPath = requireSidecarCheckout(root, config);
-  if (config.redaction === "none") {
-    console.log('redaction is disabled (redaction = "none" in .sidecar)');
-    return;
-  }
-
-  // quotePath off so non-ASCII names come back verbatim; unmerged entries
-  // repeat per stage, hence the Set.
+  // NUL-delimited names preserve Unicode and embedded newlines; unmerged
+  // entries repeat per stage, hence the Set.
   const files = [
     ...new Set(
-      git(sidecarPath, ["-c", "core.quotePath=false", "ls-files", "--cached", "--others", "--exclude-standard"])
-        .stdout.split("\n")
+      git(sidecarPath, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        .stdout.split("\0")
         .filter(Boolean),
     ),
   ];
   let shown = 0;
   let items = 0;
   for (const relPath of files) {
-    const delta = fileRedactionDelta(path.join(sidecarPath, relPath), config.redaction);
+    const delta = fileRedactionDelta(path.join(sidecarPath, relPath), config.redaction, { rules: config.rules, relativePath: relPath });
     if (!delta) continue;
     if (shown) console.log("");
     console.log(`${relPath}:`);
@@ -221,15 +224,13 @@ function printPeerRedactions({ root, config }: Peer): void {
   }
 
   if (!shown) {
-    console.log(`no redactions pending (mode: ${config.redaction})`);
+    console.log(`no redactions pending (default: ${config.redaction}; path rules applied)`);
     return;
   }
   console.log(
-    `\n${items} redaction(s) in ${shown} file(s) will be pushed this way (mode: ${config.redaction}).`,
+    `\n${items} redaction(s) in ${shown} file(s) will be pushed this way (default: ${config.redaction}; path rules applied).`,
   );
-  console.log(
-    `local files are untouched; add "${NO_REDACT_PRAGMA}" to a file's first lines to push it verbatim`,
-  );
+  console.log("local files are untouched; redaction is controlled by the peer's configuration and rules");
 }
 function printRedactionDiff(original: string, redacted: string): void {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-redactions-"));
@@ -254,12 +255,29 @@ function printRedactionDiff(original: string, redacted: string): void {
 }
 
 // Invoked by git as the sidecar checkout's clean filter: one file's content
-// on stdin, redacted content on stdout. Binary and non-UTF-8 input, and files
-// carrying the no-redact pragma, pass through untouched.
+// on stdin, redacted content on stdout. Binary and non-UTF-8 input pass
+// through untouched.
 export function cmdRedact(args: string[]): number {
-  const parsed = parseOptions(args, { boolean: new Set(), value: new Set(["--mode"]) });
+  const parsed = parseOptions(args, {
+    boolean: new Set(["--checkout-policy"]),
+    value: new Set(["--mode", "--rules", "--path"]),
+  });
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar redact [--mode mode] [--rules file --path path]");
+  const checkoutPolicy = parsed.flags.has("--checkout-policy");
+  if (checkoutPolicy && (parsed.values.has("--mode") || parsed.values.has("--rules"))) {
+    throw new SidecarError("--checkout-policy cannot be combined with --mode or --rules");
+  }
   const mode = redactionModeConfigValue(getValue(parsed, "--mode", DEFAULT_REDACTION_MODE), "--mode");
-  const output = redactBuffer(fs.readFileSync(0), mode);
+  const rulesPath = parsed.values.get("--rules");
+  const effective = checkoutPolicy
+    ? checkoutRedactionPolicy(process.cwd())
+    : { mode, rules: rulesPath ? readRules(path.resolve(rulesPath)) : [] };
+  const relativePath = parsed.values.get("--path");
+  if ((checkoutPolicy || rulesPath) && !relativePath) throw new SidecarError("redaction rules require --path");
+  const effectiveMode = relativePath
+    ? resolveFileRules(effective.rules, relativePath, { resolve: "fork", redaction: effective.mode }).redaction
+    : effective.mode;
+  const output = redactBuffer(fs.readFileSync(0), effectiveMode);
   // stdout is a pipe to git, and pipe writes are async on macOS — a buffered
   // process.stdout.write can be truncated by process.exit, committing a
   // corrupted blob. Write synchronously.

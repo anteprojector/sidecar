@@ -13,6 +13,7 @@ export * from "./util.js";
 export * from "./git.js";
 export * from "./install.js";
 export * from "./config.js";
+export * from "./rules.js";
 export * from "./state.js";
 export * from "./service.js";
 export * from "./ui.js";

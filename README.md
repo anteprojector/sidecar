@@ -96,10 +96,12 @@ Every command acts on all peers unless `--peer` names one —
 
 ## Learn more
 
+- [Agent guide and Sidecar skill](docs/agents.md) — peer selection, handoffs, sync, and environment variables
 - [How syncing works](docs/sync.md) — the daemon, inbox branches, conflict-free merging
 - [Standalone repos](docs/standalone.md) — a repo that is its own sidecar
 - [Peers](docs/sync.md#peers-several-sidecars-in-one-repo) — several sidecars in one repo, one committed and one ignored
-- [Redaction](docs/redaction.md) — what's stripped from pushes, reviewing it, opting out
+- [Per-file rules](docs/rules.md) — glob-based merge and redaction policy for each peer
+- [Redaction](docs/redaction.md) — what's stripped from pushes and how to review it
 - [Editor search visibility](docs/editors.md) — making gitignored files searchable
 - [Global vs local installs](docs/install.md) — the newest install wins
 - [All commands](docs/commands.md)

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import ignore from "ignore";
 
 import {
   DEFAULT_PEER,
@@ -28,7 +29,7 @@ import {
   readSettings,
   sidecarStateDir,
   startDetachedDaemon,
-  writeInstances,
+  unregisterInstance,
   writeSettings,
 } from "./cli.js";
 import type { SidecarInstance } from "./cli.js";
@@ -118,6 +119,7 @@ type DaemonState = {
   cycleCount: number;
   lastWatchCount: number;
   refreshing: boolean;
+  refreshPending: boolean;
   registryTimer?: NodeJS.Timeout;
   staleNotified: boolean;
 };
@@ -138,6 +140,7 @@ export async function runDaemonLoop(options: DaemonOptions): Promise<number> {
     cycleCount: 0,
     lastWatchCount: -1,
     refreshing: false,
+    refreshPending: false,
     staleNotified: false,
   };
 
@@ -266,7 +269,7 @@ async function runCycle(state: DaemonState): Promise<void> {
 }
 
 function pruneInstance(key: PeerKey): void {
-  writeInstances(readInstances().filter((instance) => instance.configPath !== key));
+  unregisterInstance(key);
   logSidecarEvent("daemon-prune", { ...peerFields(key), reason: "config-missing" });
 }
 
@@ -422,9 +425,13 @@ async function loadChokidar(): Promise<ChokidarModule | null> {
   return chokidarModule;
 }
 
-async function refreshWatchers(state: DaemonState): Promise<void> {
-  if (state.refreshing) return;
+export async function refreshWatchers(state: DaemonState): Promise<void> {
+  if (state.refreshing) {
+    state.refreshPending = true;
+    return;
+  }
   state.refreshing = true;
+  state.refreshPending = false;
   try {
     const chokidar = await loadChokidar();
     if (!chokidar) return;
@@ -445,7 +452,16 @@ async function refreshWatchers(state: DaemonState): Promise<void> {
           ignoreInitial: true,
           persistent: true,
         }) as unknown as Watcher;
-        watcher.on("all", () => scheduleWatchSync(state, key));
+        watcher.on("all", (...args) => {
+          scheduleWatchSync(state, key);
+          const changedPath = typeof args[1] === "string" ? path.resolve(args[1]) : "";
+          if (changedPath !== path.join(path.resolve(sidecarPath), ".gitignore")) return;
+          if (state.watchers.get(key) !== watcher) return;
+          // Recreate the watcher so newly included directories are traversed,
+          // including ones that the previous rules pruned entirely.
+          state.watchers.delete(key);
+          void watcher.close().catch(() => undefined).then(() => refreshWatchers(state));
+        });
         watcher.on("error", (error) => {
           logSidecarEvent("failure", {
             command: "daemon",
@@ -468,6 +484,7 @@ async function refreshWatchers(state: DaemonState): Promise<void> {
     }
   } finally {
     state.refreshing = false;
+    if (state.refreshPending) await refreshWatchers(state);
   }
 }
 
@@ -602,41 +619,17 @@ async function watchRegistry(state: DaemonState): Promise<void> {
 }
 
 export function compileGitignoreMatcher(lines: string[]): (relativePath: string) => boolean {
-  const rules: RegExp[] = [];
-  for (const rawLine of lines) {
-    const line = rawLine.replace(/\r$/, "").trim();
-    // Negations are rare in sidecar checkouts; skipping them only means we
-    // watch a little more than strictly necessary.
-    if (!line || line.startsWith("#") || line.startsWith("!")) continue;
-    let pattern = line.replace(/\/+$/, "");
-    const anchored = pattern.startsWith("/") || pattern.includes("/");
-    pattern = pattern.replace(/^\/+/, "");
-    // "**" path segments match zero or more directories; other wildcards
-    // never cross a slash, mirroring gitignore semantics.
-    const body = pattern
-      .split("/")
-      .map((segment) =>
-        segment === "**"
-          ? "\u0000"
-          : segment
-              .split("*")
-              .map((piece) => piece.split("?").map(escapeRegex).join("[^/]"))
-              .join("[^/]*"),
-      )
-      .join("/")
-      .replaceAll("\u0000/", "(?:.*/)?")
-      .replaceAll("/\u0000", "(?:/.*)?")
-      .replaceAll("\u0000", ".*");
-    rules.push(new RegExp(`${anchored ? "^" : "(^|.*/)"}${body}(/.*)?$`));
-  }
+  const rules = ignore({ ignorecase: false }).add(lines);
   return (relativePath: string) => {
-    const normalized = relativePath.replace(/\\/g, "/").replace(/\/+$/, "");
-    if (!normalized) return false;
-    return rules.some((rule) => rule.test(normalized));
+    const normalized = relativePath.split(path.sep).join("/");
+    if (!ignore.isPathValid(normalized)) return false;
+    // A trailing slash identifies a directory; preserving it is essential for
+    // directory-only rules and for negations that reopen a directory.
+    return rules.ignores(normalized);
   };
 }
 
-function watchIgnoreMatcher(sidecarPath: string): (candidate: string) => boolean {
+export function watchIgnoreMatcher(sidecarPath: string): (candidate: string, stats?: fs.Stats) => boolean {
   let gitignore: ((relativePath: string) => boolean) | undefined;
   try {
     const ignoreFile = path.join(sidecarPath, ".gitignore");
@@ -647,13 +640,18 @@ function watchIgnoreMatcher(sidecarPath: string): (candidate: string) => boolean
     // An unreadable .gitignore just means we watch everything.
   }
   const root = path.resolve(sidecarPath);
-  return (candidate: string) => {
+  return (candidate: string, stats?: fs.Stats) => {
     const relative = path.relative(root, candidate);
     if (!relative) return false;
     const normalized = relative.split(path.sep).join("/");
-    if (normalized.startsWith("..")) return true;
+    if (normalized === ".." || normalized.startsWith("../") || path.isAbsolute(relative)) return true;
     if (normalized === ".git" || normalized.startsWith(".git/")) return true;
-    return gitignore ? gitignore(normalized) : false;
+    // Rule changes must still be seen when the rules ignore .gitignore itself.
+    if (normalized === ".gitignore") return false;
+    // Chokidar first asks without stats and then again after statting a path.
+    // Do not prune a directory before its directory negations can be applied.
+    if (!stats) return false;
+    return gitignore ? gitignore(normalized + (stats.isDirectory() ? "/" : "")) : false;
   };
 }
 
@@ -852,10 +850,6 @@ function realpathOr(filePath: string): string {
 function isInsidePath(child: string, parent: string): boolean {
   const relative = path.relative(parent, child);
   return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function delay(ms: number): Promise<void> {

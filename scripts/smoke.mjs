@@ -61,7 +61,11 @@ try {
   const files = git(tmp, ['--git-dir', remote, 'ls-tree', '-r', '--name-only', 'main'])
   if (!files.includes('note.md')) die('synced file missing from the remote main branch')
 
-  const status = JSON.parse(sidecar(repo, ['status', '--json']))
+  const statuses = JSON.parse(sidecar(repo, ['status', '--json']))
+  if (!Array.isArray(statuses) || statuses.length !== 1 || statuses[0]?.peer !== 'default') {
+    die('status must report exactly the default peer')
+  }
+  const [status] = statuses
   if (status.remote !== remote) die(`status reports remote ${status.remote}; expected ${remote}`)
 
   const version = sidecar(repo, ['version']).trim()

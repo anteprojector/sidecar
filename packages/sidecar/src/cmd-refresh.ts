@@ -38,6 +38,7 @@ import {
   familySidecarCheckout,
 } from "./sync.js";
 import { announcePeer, promptYesNoDefaultNo } from "./ui.js";
+import { rulesMayRedact } from "./rules.js";
 
 /**
  * Which of a repo's worktrees holds a branch, if any.
@@ -212,7 +213,7 @@ export function refreshStandaloneCheckout(
   resetInbox: boolean,
 ): string | undefined {
   ensureCommitIdentity(root);
-  ensureRedactionFilter(root, config.redaction);
+  ensureRedactionFilter(root, config.redaction, config);
   fetch(root, true, false);
 
   // Switching materializes committed blobs, and under redaction those are the
@@ -222,7 +223,7 @@ export function refreshStandaloneCheckout(
   // the rewire above is the whole of a standalone refresh. Git happens to refuse
   // the second switch itself, which is not a guarantee worth leaning on and leaves
   // the repo parked off its inbox branch when it does.
-  if (config.redaction !== "none") {
+  if (rulesMayRedact(config.rules, config.redaction)) {
     logSidecarEvent("checkout-refresh", { root, standalone: true, settled: false });
     return `left ${config.branch} and the inbox branch untouched: settling them means switching branches, which under redaction would replace local files with their redacted pushed contents`;
   }
@@ -326,7 +327,7 @@ function refreshPeer({ root, config, name }: Peer, parsed: ParsedOptions): void 
   if (standalone) {
     console.log(`${paint("repo", root)} is its own sidecar, so refresh does not rebuild it.`);
     console.log(
-      config.redaction === "none"
+      !rulesMayRedact(config.rules, config.redaction)
         ? `it rewires the redaction filter and settles ${config.branch} onto ${paint("brand", `origin/${config.branch}`)}${
             force ? `, then resets the inbox branch to ${config.branch}` : ""
           }.`
@@ -383,4 +384,3 @@ function refreshPeer({ root, config, name }: Peer, parsed: ParsedOptions): void 
   // would not take: the refresh did everything it was willing to do.
   if (declined) console.error(`sidecar: ${declined}`);
 }
-

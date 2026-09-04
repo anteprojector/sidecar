@@ -14,6 +14,7 @@ import {
   getValue,
   nowIso,
   parseOptions,
+  realpathOr,
 } from "./util.js";
 import { git, gitExcludePath, gitRaw, gitToplevel, gitToplevelOptional, hasGitMetadata, isGitIgnored, isGitTracked } from "./git.js";
 import {
@@ -62,10 +63,11 @@ import { SKIP_SERVICE_ENV, daemonServiceStatus } from "./service.js";
 import { cloneOrUpdate, removeRedactionFilter, syncProject } from "./sync.js";
 import { announcePeer, promptLine, promptYesNo, promptYesNoDefaultNo } from "./ui.js";
 import { DEFAULT_REDACTION_MODE, REDACTION_MODES, type RedactionMode } from "./redaction.js";
+import { peerRulesFileName, peerRulesPath, readRules, rulesMayRedact } from "./rules.js";
 
 export function cmdDeinit(args: string[]): number {
-  const parsed = parseOptions(args, { boolean: new Set(), value: new Set(["--peer"]) });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar deinit [--peer name]");
+  const parsed = parseOptions(args, { boolean: new Set(["--yes", "-y"]), value: new Set(["--peer"]) });
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar deinit [--yes] [--peer name]");
 
   // The config is what deinit removes, so it locates the repo the way every
   // other command does — by walking up for .sidecar. Falling back to git covers
@@ -103,38 +105,51 @@ export function cmdDeinit(args: string[]): number {
     leftovers.push(`no ${configFile} config found; a leftover checkout or ignore entries may remain`);
   }
 
-  // Standalone has no checkout to delete, so the git-level wiring that a
-  // recursive remove would have taken with it has to come out by hand.
-  if (config && isStandalone(config)) {
-    const leftover = releaseStandaloneCheckout(root, config);
-    if (leftover) leftovers.push(leftover);
-  } else if (!config && name === DEFAULT_PEER) {
-    // Without a config, nested and standalone are indistinguishable — and in
-    // standalone the redaction filter is wired into this repo with
-    // required=true, where leaving it to go stale fails every future
-    // `git add`. Removing it is a no-op in a repo that never had it. Only
-    // `.sidecar` can be standalone, so only its removal has to ask.
-    removeRedactionFilter(root);
+  const checkoutPath = config && !isStandalone(config) ? resolveSidecarPath(root, config) : undefined;
+  if (checkoutPath) {
+    assertDeinitTarget(root, checkoutPath);
+    console.log(`deinit deletes ${paint("brand", checkoutPath)}, including all unpushed changes.`);
+  } else {
+    console.log(`deinit removes Sidecar configuration from ${paint("repo", root)}; the repo is kept.`);
+  }
+  if (!parsed.flags.has("--yes") && !parsed.flags.has("-y") && !promptYesNoDefaultNo("continue?")) {
+    console.log("nothing changed; use --yes to confirm without a terminal");
+    return 0;
   }
 
-  fs.rmSync(configPath, { force: true });
-  if (config && !isStandalone(config)) {
-    const checkoutPath = path.resolve(root, config.path);
-    if (checkoutPath !== path.resolve(root) && checkoutPath !== path.parse(checkoutPath).root) {
+  withSyncLock(root, name, "throw", () => {
+    // Standalone has no checkout to delete, so the git-level wiring that a
+    // recursive remove would have taken with it has to come out by hand.
+    if (config && isStandalone(config)) {
+      const leftover = releaseStandaloneCheckout(root, config);
+      if (leftover) leftovers.push(leftover);
+    } else if (!config && name === DEFAULT_PEER) {
+      // Without a config, nested and standalone are indistinguishable — and in
+      // standalone the redaction filter is wired into this repo with
+      // required=true, where leaving it to go stale fails every future
+      // `git add`. Removing it is a no-op in a repo that never had it. Only
+      // `.sidecar` can be standalone, so only its removal has to ask.
+      removeRedactionFilter(root);
+    }
+
+    if (config && checkoutPath) {
+      assertDeinitTarget(root, checkoutPath);
       removeCheckout(checkoutPath);
+      const ignoreEntry = ignoreEntryForSidecarPath(root, config.path);
+      if (ignoreEntry) {
+        // Only the committed .gitignore. An ignored peer's entries live in
+        // .git/info/exclude, which every working copy of the repo shares: a
+        // worktree that still declares the peer would have its private config
+        // and checkout exposed the moment this one took the lines out. A stale
+        // line for a file that is gone costs nothing, so they stay.
+        removeIgnoreEntry(path.join(root, ".gitignore"), ignoreEntry);
+        removeZedInclusion(root, ignoreEntry);
+      }
     }
-    const ignoreEntry = ignoreEntryForSidecarPath(root, config.path);
-    if (ignoreEntry) {
-      // Only the committed .gitignore. An ignored peer's entries live in
-      // .git/info/exclude, which every working copy of the repo shares: a
-      // worktree that still declares the peer would have its private config
-      // and checkout exposed the moment this one took the lines out. A stale
-      // line for a file that is gone costs nothing, so they stay.
-      removeIgnoreEntry(path.join(root, ".gitignore"), ignoreEntry);
-      removeZedInclusion(root, ignoreEntry);
-    }
-  }
-  unregisterInstance(configPath);
+    fs.rmSync(configPath, { force: true });
+    fs.rmSync(peerRulesPath(root, name), { force: true });
+    unregisterInstance(configPath);
+  });
 
   console.log(`removed sidecar from ${paint("repo", root)}${name === DEFAULT_PEER ? "" : ` (peer ${paint("brand", name)})`}`);
   if (leftovers.length) {
@@ -146,6 +161,19 @@ export function cmdDeinit(args: string[]): number {
     );
   }
   return 0;
+}
+
+// Confirmation permits deleting an external checkout too, but a malformed
+// config must never turn deinit into deletion of the host repo or its metadata.
+function assertDeinitTarget(root: string, checkoutPath: string): void {
+  const target = realpathOr(checkoutPath);
+  const host = realpathOr(root);
+  const hostFromTarget = path.relative(target, host);
+  const parts = path.relative(host, target).split(path.sep);
+  const containsHost = !path.isAbsolute(hostFromTarget) && hostFromTarget.split(path.sep)[0] !== "..";
+  if (containsHost || parts.includes(".git") || parts.includes(".jj")) {
+    throw new SidecarError(`refusing to delete ${checkoutPath}, which contains the host repo or its VCS metadata`);
+  }
 }
 
 /**
@@ -163,7 +191,7 @@ function releaseStandaloneCheckout(root: string, config: SidecarConfig): string 
   // Switching materializes committed blobs. Under redaction those are the
   // redacted versions, and the working tree is still holding the originals —
   // so that switch destroys local content. Leave the call to the user.
-  if (config.redaction !== "none") {
+  if (rulesMayRedact(config.rules, config.redaction)) {
     return `the repo is still on ${current || "a detached HEAD"}: switching to ${config.branch} would replace local files with their redacted pushed contents`;
   }
   if (git(root, ["switch", config.branch], { check: false }).status === 0) {
@@ -273,6 +301,10 @@ function configurePeer(root: string, name: string, remote: string | undefined, p
     reuse = unchanged || !promptOverwriteConfig(configPath, existing.remote, remote);
   }
   const config = reuse ? readConfig(configPath) : buildInitConfig(root, name, remote, parsed);
+  if (!reuse) {
+    config.rulesPath = peerRulesPath(root, name);
+    config.rules = readRules(config.rulesPath);
+  }
   // Both refusals come before the file is written: a standalone .sidecar is
   // part of the tree it syncs, and a tracked one overwritten and then left
   // tracked would be worse than untouched.
@@ -280,8 +312,10 @@ function configurePeer(root: string, name: string, remote: string | undefined, p
     if (isStandalone(config)) {
       throw new SidecarError("--ignored cannot apply to a standalone sidecar: its .sidecar is part of the tree it syncs");
     }
-    if (isGitTracked(root, peerFileName(name))) {
-      throw new SidecarError(`${peerFileName(name)} is tracked by git; \`git rm --cached ${peerFileName(name)}\` before ignoring it`);
+    for (const file of [peerFileName(name), peerRulesFileName(name)]) {
+      if (isGitTracked(root, file)) {
+        throw new SidecarError(`${file} is tracked by git; \`git rm --cached ${file}\` before ignoring it`);
+      }
     }
   }
   if (!reuse) {
@@ -320,8 +354,10 @@ function excludePeerFile(root: string, name: string): void {
   if (!exclude) {
     throw new SidecarError(`--ignored needs a git exclude file, and ${root} has none; ignore ${configFile} in your own VCS config`);
   }
+  const rulesFile = peerRulesFileName(name);
   ensureIgnoreLine(exclude, `/${configFile}`);
-  console.log(`ignored ${configFile} via .git/info/exclude`);
+  ensureIgnoreLine(exclude, `/${rulesFile}`);
+  console.log(`ignored ${configFile} and ${rulesFile} via .git/info/exclude`);
 }
 
 /**
@@ -394,12 +430,19 @@ function buildInitConfig(root: string, name: string, remote: string | undefined,
  * leave no trace in the tree, so its checkout goes in the private exclude file.
  */
 function printCheckoutVisibility(root: string, config: SidecarConfig): void {
+  const exclude = isGitIgnored(root, peerFileName(config.peer)) ? gitExcludePath(root) : undefined;
+  if (exclude) {
+    const rulesFile = peerRulesFileName(config.peer);
+    if (isGitTracked(root, rulesFile)) {
+      throw new SidecarError(`${rulesFile} is tracked by git; remove it from the index before using an ignored peer`);
+    }
+    ensureIgnoreLine(exclude, `/${rulesFile}`);
+  }
   const ignoreEntry = ignoreEntryForSidecarPath(root, config.path);
   if (!ignoreEntry) {
     console.log(`sidecar path outside repo; not updating .gitignore`);
     return;
   }
-  const exclude = isGitIgnored(root, peerFileName(config.peer)) ? gitExcludePath(root) : undefined;
   ensureIgnoreEntry(exclude ?? path.join(root, ".gitignore"), ignoreEntry);
   const name = ignoreEntry.replace(/\/+$/, "");
   console.log(`ignored ${name}/ via ${exclude ? ".git/info/exclude" : ".gitignore"}`);
