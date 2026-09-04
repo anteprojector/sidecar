@@ -121,6 +121,19 @@ describe("sidecar CLI integration", () => {
     expect(output).toContain(`using ${path.join(fs.realpathSync(main), ".sidecar")}`);
   });
 
+  test("re-init preserves configured cadence when its flags are omitted", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    runSidecar(["init", remote, "--no-clone", "--debounce", "10m", "--interval", "1h"], main);
+    const configPath = path.join(main, ".sidecar");
+    const configBefore = fs.readFileSync(configPath, "utf8");
+
+    const output = runSidecar(["init", remote, "--no-clone"], main);
+
+    expect(output).toContain(`using ${path.join(fs.realpathSync(main), ".sidecar")}`);
+    expect(fs.readFileSync(configPath, "utf8")).toBe(configBefore);
+  });
+
   test("init with a different remote refuses to overwrite the config non-interactively", () => {
     const main = initMainRepo();
     const remote = initBareRemote();
@@ -600,7 +613,7 @@ describe("sidecar CLI integration", () => {
     const listed = git(path.join(main, "sidecar"), ["worktree", "list", "--porcelain"]).stdout;
     expect(listed).toContain(fs.realpathSync(path.join(worktree, "sidecar")));
     const inboxOf = (cwd: string): string =>
-      JSON.parse(runSidecar(["status", "--json"], cwd, { SIDECAR_STATE_DIR: state })).inbox;
+      JSON.parse(runSidecar(["status", "--json"], cwd, { SIDECAR_STATE_DIR: state }))[0].inbox;
     expect(inboxOf(worktree)).not.toBe(inboxOf(main));
   });
 
@@ -1549,6 +1562,65 @@ describe("sidecar CLI integration", () => {
     expect(secondMerge).toContain("no inbox branches to merge");
   });
 
+  test("merge keeps the last writer per path when resolve is lww", () => {
+    const { main, remote, sidecar } = initSidecarProject(["--resolve", "lww"]);
+    const base = 1_700_000_000;
+    const write = (name: string, text: string | null) => {
+      const file = path.join(sidecar, "notes", name);
+      if (text === null) fs.rmSync(file);
+      else fs.writeFileSync(file, text, "utf8");
+    };
+    git(sidecar, ["switch", "main"]);
+    fs.mkdirSync(path.join(sidecar, "notes"), { recursive: true });
+    for (const name of ["plan.md", "other.md", "gone.md", "late.md"]) write(name, "base\n");
+    commitAt(sidecar, "Base notes", base);
+    git(sidecar, ["push", "origin", "HEAD:refs/heads/main"]);
+
+    // The inbox touched other.md early and plan.md, late.md (plus a deletion) late; main touched all four in between, deleting late.md.
+    git(sidecar, ["switch", "-c", "sidecar-inbox/test/lww", "main"]);
+    write("other.md", "inbox\n");
+    commitAt(sidecar, "Inbox early", base + 10);
+    write("plan.md", "inbox\n");
+    write("late.md", "inbox\n");
+    write("gone.md", null);
+    commitAt(sidecar, "Inbox late", base + 100);
+    git(sidecar, ["push", "origin", "HEAD:refs/heads/sidecar-inbox/test/lww"]);
+
+    git(sidecar, ["switch", "main"]);
+    for (const name of ["plan.md", "other.md", "gone.md"]) write(name, "main\n");
+    write("late.md", null);
+    commitAt(sidecar, "Main in between", base + 50);
+    git(sidecar, ["push", "origin", "HEAD:refs/heads/main"]);
+
+    const output = runSidecar(["merge"], main);
+
+    expect(output).toContain("resolved 4 conflict(s) by last writer");
+    expect(output).toContain("merged 1 inbox branch(es)");
+    const show = (file: string) => gitRaw(["--git-dir", remote, "show", `main:${file}`], { check: false });
+    expect(show("notes/plan.md").stdout).toBe("inbox\n");
+    expect(show("notes/other.md").stdout).toBe("main\n");
+    expect(show("notes/gone.md").status).not.toBe(0);
+    expect(show("notes/late.md").stdout).toBe("inbox\n");
+    const files = gitRaw(["--git-dir", remote, "ls-tree", "-r", "--name-only", "main"]).stdout.split("\n");
+    expect(files.filter((name) => name.includes(".conflict."))).toEqual([]);
+    const manifestPath = files.find((name) => name.startsWith(".sidecar-conflicts/"));
+    const manifest = JSON.parse(gitRaw(["--git-dir", remote, "show", `main:${manifestPath}`]).stdout);
+    expect(manifest.resolved_by).toBe("lww");
+    expect(manifest.paths.map((entry: { path: string; kept: string }) => [entry.path, entry.kept])).toEqual([
+      ["notes/gone.md", "sidecar-inbox/test/lww"],
+      ["notes/late.md", "sidecar-inbox/test/lww"],
+      ["notes/other.md", "main"],
+      ["notes/plan.md", "sidecar-inbox/test/lww"],
+    ]);
+    // The dropped side's blob, or null when that side had deleted the path.
+    expect(manifest.paths.map((entry: { dropped_oid: string | null }) => entry.dropped_oid)).toEqual([
+      expect.stringMatching(/^[0-9a-f]{40}$/),
+      null,
+      expect.stringMatching(/^[0-9a-f]{40}$/),
+      expect.stringMatching(/^[0-9a-f]{40}$/),
+    ]);
+  }, 30000);
+
   test("status reports checkout, daemon, sync, and pending inbox state", () => {
     const { main, remote, sidecar } = initSidecarProject();
 
@@ -1601,7 +1673,7 @@ describe("sidecar CLI integration", () => {
     expect(output).toMatch(/daemon:\s+no global install — nothing syncs/);
     expect(output).toContain("npm install -g sidecarsync");
     expect(output).toMatch(/checkout:\s+missing — run `sidecar init`/);
-    const payload = JSON.parse(runSidecar(["status", "--json"], main, { PATH: pathWithoutSidecar }));
+    const [payload] = JSON.parse(runSidecar(["status", "--json"], main, { PATH: pathWithoutSidecar }));
     expect(payload.globalInstall).toBe(false);
   });
 
@@ -1911,6 +1983,41 @@ describe("sidecar CLI integration", () => {
     expect(pushed).toContain("echo wip");
   });
 
+  test("init <remote> --path . makes a directory that is not a repository its own sidecar", () => {
+    const remote = initBareRemote();
+    // The shape of a state directory: files, no repository, inside some other
+    // project's repository that ignores it.
+    const parent = initMainRepo();
+    fs.writeFileSync(path.join(parent, ".gitignore"), "state/\n", "utf8");
+    const dir = path.join(parent, "state");
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, "notes.md"), "kept\n", "utf8");
+    const state = tempDir();
+
+    const output = runSidecar(["init", remote, "--path", "."], dir, { SIDECAR_STATE_DIR: state });
+
+    expect(output).toContain("as a Git repository");
+    expect(git(dir, ["rev-parse", "--show-toplevel"]).stdout.trim()).toBe(fs.realpathSync(dir));
+    expect(git(dir, ["branch", "--show-current"]).stdout.trim()).toMatch(/^sidecar-inbox\//);
+    expect(fs.existsSync(path.join(dir, ".sidecar"))).toBe(true);
+    expect(fs.existsSync(path.join(parent, ".sidecar"))).toBe(false);
+    // init's ending sync carried the directory home.
+    expect(gitRaw(["--git-dir", remote, "show", "main:notes.md"]).stdout).toBe("kept\n");
+    expect(gitRaw(["--git-dir", remote, "show", "main:.sidecar"]).stdout).toContain('path = "."');
+  }, 30000);
+
+  test("init --path . outside a repository without a remote says what to run", () => {
+    const dir = tempDir();
+    const result = spawnSync(process.execPath, [cliPath, "init", "--path", "."], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, SIDECAR_STATE_DIR: tempDir() },
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("sidecar init <remote> --path .");
+    expect(fs.existsSync(path.join(dir, ".git"))).toBe(false);
+  });
+
   test("a standalone clone reached over a different origin URL still inits", () => {
     const { repo, remote, state } = initStandaloneRepo();
     runSidecar(["init", "--path", "."], repo, { SIDECAR_STATE_DIR: state });
@@ -2010,7 +2117,7 @@ describe("sidecar CLI integration", () => {
     expect(output).not.toContain("main repo:");
     expect(output).not.toContain("sidecar path:");
 
-    const payload = JSON.parse(runSidecar(["status", "--json"], repo, { SIDECAR_STATE_DIR: state }));
+    const [payload] = JSON.parse(runSidecar(["status", "--json"], repo, { SIDECAR_STATE_DIR: state }));
     expect(payload.standalone).toBe(true);
     expect(payload.root).toBe(payload.sidecarPath);
   });
@@ -2164,6 +2271,190 @@ describe("sidecar CLI integration", () => {
   });
 });
 
+describe("sidecar peers", () => {
+  test("init --peer adds a second sidecar beside the first, each with its own checkout, ignore entry, and registration", () => {
+    const { main } = initSidecarProject();
+    const notesRemote = initBareRemote();
+
+    const output = runSidecar(["init", notesRemote, "--peer", "notes"], main);
+
+    expect(output).toContain(`wrote ${path.join(fs.realpathSync(main), ".sidecar.notes")}`);
+    // A named peer's checkout is named after it, beside the default peer's.
+    expect(fs.readFileSync(path.join(main, ".sidecar.notes"), "utf8")).toContain('path = "notes"');
+    expect(fs.existsSync(path.join(main, "notes", ".git"))).toBe(true);
+    expect(fs.existsSync(path.join(main, "sidecar", ".git"))).toBe(true);
+    expect(fs.readFileSync(path.join(main, ".gitignore"), "utf8")).toBe("/sidecar/\n/notes/\n");
+    const instances = JSON.parse(fs.readFileSync(path.join(main, ".sidecar-test-state", "instances.json"), "utf8"));
+    expect(instances.map((instance: { configPath: string }) => path.basename(instance.configPath))).toEqual([
+      ".sidecar",
+      ".sidecar.notes",
+    ]);
+
+    const status = runSidecar(["status"], main);
+    expect(status).toMatch(/peer:\s+default/);
+    expect(status).toMatch(/peer:\s+notes/);
+    const payload = JSON.parse(runSidecar(["status", "--json"], main));
+    expect(payload.map((entry: { peer: string }) => entry.peer)).toEqual(["default", "notes"]);
+    // Always an array, even for one peer: readers never have to branch on shape.
+    const [one, ...rest] = JSON.parse(runSidecar(["status", "--json", "--peer", "notes"], main));
+    expect(rest).toEqual([]);
+    expect(one.peer).toBe("notes");
+    expect(fs.realpathSync(one.sidecarPath)).toBe(fs.realpathSync(path.join(main, "notes")));
+  });
+
+  test("sync acts on every peer, and --peer on just one", () => {
+    const { main, remote, sidecar } = initSidecarProject();
+    const notesRemote = initBareRemote();
+    runSidecar(["init", notesRemote, "--peer", "notes"], main);
+    fs.writeFileSync(path.join(sidecar, "a.md"), "a\n", "utf8");
+    fs.writeFileSync(path.join(main, "notes", "b.md"), "b\n", "utf8");
+
+    const output = runSidecar(["sync"], main);
+
+    expect(output).toMatch(/peer:\s+default/);
+    expect(output).toMatch(/peer:\s+notes/);
+    expect(gitRaw(["--git-dir", remote, "show", "main:a.md"]).stdout).toBe("a\n");
+    expect(gitRaw(["--git-dir", notesRemote, "show", "main:b.md"]).stdout).toBe("b\n");
+
+    fs.writeFileSync(path.join(sidecar, "a2.md"), "a2\n", "utf8");
+    fs.writeFileSync(path.join(main, "notes", "b2.md"), "b2\n", "utf8");
+    runSidecar(["sync", "--peer", "notes"], main);
+
+    expect(gitRaw(["--git-dir", notesRemote, "show", "main:b2.md"]).stdout).toBe("b2\n");
+    expect(gitRaw(["--git-dir", remote, "show", "main:a2.md"], { check: false }).status).not.toBe(0);
+    expect(git(sidecar, ["status", "--porcelain"]).stdout.trim()).not.toBe("");
+  });
+
+  test("the daemon syncs each peer on its own", () => {
+    const { main, remote, sidecar } = initSidecarProject();
+    const notesRemote = initBareRemote();
+    runSidecar(["init", notesRemote, "--peer", "notes"], main);
+    fs.writeFileSync(path.join(sidecar, "a.md"), "a\n", "utf8");
+    fs.writeFileSync(path.join(main, "notes", "b.md"), "b\n", "utf8");
+
+    runSidecar(["daemon", "run", "--once"], main);
+
+    expect(gitRaw(["--git-dir", remote, "show", "main:a.md"]).stdout).toBe("a\n");
+    expect(gitRaw(["--git-dir", notesRemote, "show", "main:b.md"]).stdout).toBe("b\n");
+    expect(git(sidecar, ["status", "--porcelain"]).stdout.trim()).toBe("");
+    expect(git(path.join(main, "notes"), ["status", "--porcelain"]).stdout.trim()).toBe("");
+    const log = fs.readFileSync(path.join(main, ".sidecar-test-state", "sidecar.log"), "utf8");
+    expect(log).toMatch(/"event":"daemon-sync","root":"[^"]+","peer":"notes"/);
+  });
+
+  test("a bare init joins every peer the repo declares", () => {
+    const main = initMainRepo();
+    const remote = initBareRemote();
+    const notesRemote = initBareRemote();
+    runSidecar(["init", remote, "--no-clone"], main);
+    runSidecar(["init", notesRemote, "--peer", "notes", "--no-clone"], main);
+
+    const output = runSidecar(["init"], main);
+
+    expect(output).toContain(`using ${path.join(fs.realpathSync(main), ".sidecar")}`);
+    expect(output).toContain(`using ${path.join(fs.realpathSync(main), ".sidecar.notes")}`);
+    expect(fs.existsSync(path.join(main, "sidecar", ".git"))).toBe(true);
+    expect(fs.existsSync(path.join(main, "notes", ".git"))).toBe(true);
+  });
+
+  test("init --ignored keeps a peer and its checkout out of the tree, and deinit leaves the shared exclude lines", () => {
+    const { main } = initSidecarProject();
+    const privateRemote = initBareRemote();
+
+    const output = runSidecar(["init", privateRemote, "--peer", "private", "--ignored"], main);
+
+    expect(output).toContain("ignored .sidecar.private via .git/info/exclude");
+    expect(output).toContain("ignored private/ via .git/info/exclude");
+    const excludePath = path.join(main, ".git", "info", "exclude");
+    expect(fs.readFileSync(excludePath, "utf8")).toContain("/.sidecar.private\n");
+    expect(fs.readFileSync(excludePath, "utf8")).toContain("/private/\n");
+    // The committed ignore file and the tree carry no trace of the peer.
+    expect(fs.readFileSync(path.join(main, ".gitignore"), "utf8")).toBe("/sidecar/\n");
+    expect(git(main, ["status", "--porcelain"]).stdout).not.toMatch(/private/);
+    expect(fs.existsSync(path.join(main, "private", ".git"))).toBe(true);
+
+    runSidecar(["deinit", "--peer", "private"], main);
+
+    expect(fs.existsSync(path.join(main, ".sidecar.private"))).toBe(false);
+    expect(fs.existsSync(path.join(main, "private"))).toBe(false);
+    // The exclude file is shared by every working copy of the repo, and another
+    // may still declare the peer, so its lines are left where they are.
+    expect(fs.readFileSync(excludePath, "utf8")).toContain("/.sidecar.private\n");
+    expect(fs.readFileSync(excludePath, "utf8")).toContain("/private/\n");
+    expect(fs.existsSync(path.join(main, ".sidecar"))).toBe(true);
+  });
+
+  test("deinit refuses to guess between peers and removes only the named one", () => {
+    const { main } = initSidecarProject();
+    const notesRemote = initBareRemote();
+    runSidecar(["init", notesRemote, "--peer", "notes"], main);
+
+    const result = spawnSync(process.execPath, [cliPath, "deinit"], {
+      cwd: main,
+      encoding: "utf8",
+      env: { ...process.env, SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state") },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("several sidecar peers (default, notes)");
+    expect(fs.existsSync(path.join(main, ".sidecar.notes"))).toBe(true);
+
+    const output = runSidecar(["deinit", "--peer", "notes"], main);
+
+    expect(output).toContain("(peer notes)");
+    expect(fs.existsSync(path.join(main, ".sidecar.notes"))).toBe(false);
+    expect(fs.existsSync(path.join(main, "notes"))).toBe(false);
+    expect(fs.readFileSync(path.join(main, ".gitignore"), "utf8")).toBe("/sidecar/\n");
+    expect(fs.existsSync(path.join(main, ".sidecar"))).toBe(true);
+    expect(fs.existsSync(path.join(main, "sidecar", ".git"))).toBe(true);
+    const instances = JSON.parse(fs.readFileSync(path.join(main, ".sidecar-test-state", "instances.json"), "utf8"));
+    expect(instances.map((instance: { configPath: string }) => path.basename(instance.configPath))).toEqual([".sidecar"]);
+  });
+
+  test("peers refuse a shared checkout, reserved names, and standalone", () => {
+    const { main } = initSidecarProject();
+    const other = initBareRemote();
+    const attempt = (args: string[]): string => {
+      const result = spawnSync(process.execPath, [cliPath, ...args], {
+        cwd: main,
+        encoding: "utf8",
+        env: { ...process.env, SIDECAR_STATE_DIR: path.join(main, ".sidecar-test-state") },
+      });
+      expect(result.status).toBe(1);
+      return result.stderr;
+    };
+
+    expect(attempt(["init", other, "--peer", "other", "--path", "sidecar"])).toContain("both use the checkout");
+    expect(fs.existsSync(path.join(main, ".sidecar.other"))).toBe(false);
+    const remote = readConfig(path.join(main, ".sidecar")).remote;
+    expect(attempt(["init", remote, "--peer", "twin"])).toContain("both sync to");
+    expect(fs.existsSync(path.join(main, ".sidecar.twin"))).toBe(false);
+    expect(attempt(["init", other, "--peer", "bak"])).toContain("reserved");
+    expect(attempt(["init", other, "--peer", "Notes"])).toContain("invalid peer name");
+    expect(attempt(["init", other, "--peer", "notes", "--path", "."])).toContain("cannot be standalone");
+    expect(attempt(["status", "--peer", "notes"])).toContain("no .sidecar.notes in");
+  });
+
+  test("a second working copy links each peer to the primary's matching checkout", () => {
+    const { main } = initSidecarProject();
+    const notesRemote = initBareRemote();
+    runSidecar(["init", notesRemote, "--peer", "notes"], main);
+    git(main, ["add", ".sidecar", ".sidecar.notes", ".gitignore"]);
+    git(main, ["commit", "-m", "Add sidecar peers"]);
+    const worktree = path.join(tempDir(), "worktree");
+    git(main, ["worktree", "add", worktree, "-b", "feature"]);
+    const state = path.join(main, ".sidecar-test-state");
+
+    runSidecar(["clone", "--if-missing"], worktree, { SIDECAR_STATE_DIR: state });
+
+    expect(fs.statSync(path.join(worktree, "sidecar", ".git")).isFile()).toBe(true);
+    expect(fs.statSync(path.join(worktree, "notes", ".git")).isFile()).toBe(true);
+    const notesWorktrees = git(path.join(main, "notes"), ["worktree", "list", "--porcelain"]).stdout;
+    expect(notesWorktrees).toContain(fs.realpathSync(path.join(worktree, "notes")));
+    expect(notesWorktrees).not.toContain(fs.realpathSync(path.join(worktree, "sidecar")));
+  });
+});
+
 function remoteBranches(remote: string): string[] {
   return gitRaw(["--git-dir", remote, "branch", "--format=%(refname:short)"])
     .stdout.split("\n")
@@ -2200,8 +2491,7 @@ function initSidecarProject(initArgs: string[] = []): { main: string; remote: st
 function cloneRemoteMain(remote: string): string {
   const repo = tempDir();
   gitRaw(["clone", "--branch", "main", remote, repo]);
-  git(repo, ["config", "user.name", "Test User"]);
-  git(repo, ["config", "user.email", "test@example.com"]);
+  configureTestIdentity(repo);
   return repo;
 }
 
@@ -2227,8 +2517,7 @@ function seedRemoteConflict(sidecar: string): void {
 function initMainRepo(): string {
   const repo = tempDir();
   gitRaw(["init", "-b", "main", repo]);
-  git(repo, ["config", "user.name", "Test User"]);
-  git(repo, ["config", "user.email", "test@example.com"]);
+  configureTestIdentity(repo);
   fs.writeFileSync(path.join(repo, "README.md"), "# Main\n", "utf8");
   git(repo, ["add", "README.md"]);
   git(repo, ["commit", "-m", "Initial main"]);
@@ -2274,12 +2563,36 @@ function initWorktreeFamily(initArgs: string[] = []): {
 function seedIndependentSidecar(worktree: string, remote: string): string {
   const checkout = path.join(worktree, "sidecar");
   gitRaw(["clone", "--branch", "main", remote, checkout]);
-  git(checkout, ["config", "user.name", "Test User"]);
-  git(checkout, ["config", "user.email", "test@example.com"]);
+  configureTestIdentity(checkout);
   checkoutRandom(checkout);
   const config = readConfig(path.join(worktree, ".sidecar"));
   git(checkout, ["switch", "-c", expandInbox(config, checkout)]);
   return checkout;
+}
+
+function configureTestIdentity(repo: string): void {
+  fs.appendFileSync(
+    path.join(repo, ".git", "config"),
+    "\n[user]\n\tname = Test User\n\temail = test@example.com\n",
+    "utf8",
+  );
+}
+
+/** Commit everything with a fixed commit time, so last-writer-wins has an order to read. */
+function commitAt(repo: string, message: string, unixSeconds: number): void {
+  const date = `@${unixSeconds} +0000`;
+  const saved = { author: process.env.GIT_AUTHOR_DATE, committer: process.env.GIT_COMMITTER_DATE };
+  process.env.GIT_AUTHOR_DATE = date;
+  process.env.GIT_COMMITTER_DATE = date;
+  try {
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-m", message]);
+  } finally {
+    if (saved.author === undefined) delete process.env.GIT_AUTHOR_DATE;
+    else process.env.GIT_AUTHOR_DATE = saved.author;
+    if (saved.committer === undefined) delete process.env.GIT_COMMITTER_DATE;
+    else process.env.GIT_COMMITTER_DATE = saved.committer;
+  }
 }
 
 function initBareRemote(): string {
@@ -2374,7 +2687,7 @@ function testSyncLockDir(main: string): string {
   const previous = process.env.SIDECAR_STATE_DIR;
   process.env.SIDECAR_STATE_DIR = path.join(main, ".sidecar-test-state");
   try {
-    return syncLockDir(main);
+    return syncLockDir(main, "default");
   } finally {
     if (previous === undefined) delete process.env.SIDECAR_STATE_DIR;
     else process.env.SIDECAR_STATE_DIR = previous;

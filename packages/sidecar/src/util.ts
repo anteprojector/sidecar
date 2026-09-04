@@ -118,6 +118,19 @@ export function currentHost(): string {
   return os.hostname().split(".", 1)[0] || "unknown";
 }
 
+/**
+ * A duration as seconds: a bare number is seconds, a string takes an
+ * `s`, `m`, or `h` suffix ("90s", "10m", "1h"). Undefined when unparseable.
+ */
+export function parseDuration(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const match = /^\s*(\d+(?:\.\d+)?)\s*(s|m|h)?\s*$/i.exec(value);
+  if (!match) return undefined;
+  const scale = { s: 1, m: 60, h: 3600 }[(match[2] ?? "s").toLowerCase() as "s" | "m" | "h"];
+  return Number(match[1]) * scale;
+}
+
 export function utcTimestamp(): string {
   return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 }

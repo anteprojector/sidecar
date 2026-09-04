@@ -4,8 +4,10 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import {
+  DEFAULT_PEER,
   PACKAGE_NAME,
   LOCAL_SYNC_ENV,
+  PEER_ENV,
   familyPrimaryRoot,
   SOFT_SYNC_ENV,
   bunGlobalRoot,
@@ -18,8 +20,10 @@ import {
   globalSidecarVersion,
   logSidecarEvent,
   packageVersion,
+  peerNameOf,
   pidIsSidecarDaemon,
   projectDependsOnSidecar,
+  readConfig,
   readInstances,
   readSettings,
   sidecarStateDir,
@@ -50,6 +54,47 @@ export type DaemonOptions = {
   intervalSeconds: number;
   debounceSeconds: number;
 };
+
+/**
+ * Everything the daemon tracks is keyed by the peer's config path, not the
+ * repo root: a repo with several peers is several sidecars, each with its own
+ * checkout, cadence, watcher, and sync, and nothing one does concerns another.
+ */
+type PeerKey = string;
+
+function peerRoot(key: PeerKey): string {
+  return path.dirname(key);
+}
+
+function peerName(key: PeerKey): string {
+  return peerNameOf(path.basename(key)) ?? DEFAULT_PEER;
+}
+
+/** How a log line names a peer: by root, plus the peer when it is not `.sidecar`. */
+function peerFields(key: PeerKey): { root: string; peer?: string } {
+  const peer = peerName(key);
+  return peer === DEFAULT_PEER ? { root: peerRoot(key) } : { root: peerRoot(key), peer };
+}
+
+/**
+ * A peer's cadence: its own `debounce` and `interval` where set, the
+ * daemon's defaults otherwise. Read on every use rather than cached, so an
+ * edit to the committed config takes effect at the next trigger — the same
+ * moment a synced-in edit from another machine would. An unreadable config
+ * means the defaults; the sync itself will report what is wrong.
+ */
+export function scheduleFor(configPath: PeerKey, defaults: DaemonOptions): { debounceSeconds: number; intervalSeconds: number } {
+  try {
+    const config = readConfig(configPath);
+    return {
+      debounceSeconds: config.debounce ?? defaults.debounceSeconds,
+      // The daemon polls at its own interval; a repo cannot ask to be seen more often than that.
+      intervalSeconds: Math.max(config.interval ?? defaults.intervalSeconds, defaults.intervalSeconds),
+    };
+  } catch {
+    return { debounceSeconds: defaults.debounceSeconds, intervalSeconds: defaults.intervalSeconds };
+  }
+}
 
 type ChokidarModule = typeof import("chokidar");
 
@@ -181,24 +226,37 @@ async function runCycle(state: DaemonState): Promise<void> {
   let failed = 0;
   let skipped = 0;
   for (const instance of readInstances()) {
+    const key: PeerKey = instance.configPath;
     if (!fs.existsSync(instance.configPath)) {
-      const misses = (state.misses.get(instance.root) ?? 0) + 1;
-      state.misses.set(instance.root, misses);
+      const misses = (state.misses.get(key) ?? 0) + 1;
+      state.misses.set(key, misses);
       if (misses >= PRUNE_AFTER_MISSES) {
-        pruneInstance(instance.root);
-        state.misses.delete(instance.root);
+        pruneInstance(key);
+        state.misses.delete(key);
       } else {
-        logSidecarEvent("daemon-skip", { root: instance.root, reason: "config-missing", misses });
+        logSidecarEvent("daemon-skip", { ...peerFields(key), reason: "config-missing", misses });
       }
       skipped += 1;
       continue;
     }
-    state.misses.delete(instance.root);
-    if (state.cycleCount < (state.skipUntilCycle.get(instance.root) ?? 0)) {
+    state.misses.delete(key);
+    if (state.cycleCount < (state.skipUntilCycle.get(key) ?? 0)) {
       skipped += 1;
       continue;
     }
-    if (await syncInstance(state, instance.root, "cycle")) {
+    // A peer asking for a longer interval than the daemon's is left alone
+    // until the next poll would be late for it: the wait is the peer's
+    // interval less the daemon's own cycle, so the round trip lands at the
+    // first poll inside the last cycle of that interval, never after it. A
+    // peer on the daemon's cadence has no slack and syncs every cycle, as it
+    // always did.
+    const last = state.lastRemoteSyncAt.get(key);
+    const slackMs = (scheduleFor(key, state.options).intervalSeconds - state.options.intervalSeconds) * 1000;
+    if (last !== undefined && slackMs > 0 && Date.now() - last < slackMs) {
+      skipped += 1;
+      continue;
+    }
+    if (await syncInstance(state, key, "cycle")) {
       synced += 1;
     } else {
       failed += 1;
@@ -207,9 +265,9 @@ async function runCycle(state: DaemonState): Promise<void> {
   logSidecarEvent("daemon-cycle", { synced, failed, skipped });
 }
 
-function pruneInstance(root: string): void {
-  writeInstances(readInstances().filter((instance) => instance.root !== root));
-  logSidecarEvent("daemon-prune", { root, reason: "config-missing" });
+function pruneInstance(key: PeerKey): void {
+  writeInstances(readInstances().filter((instance) => instance.configPath !== key));
+  logSidecarEvent("daemon-prune", { ...peerFields(key), reason: "config-missing" });
 }
 
 // The newest install wins: a repo whose project-local sidecar is ahead of the
@@ -217,77 +275,84 @@ function pruneInstance(root: string): void {
 // daemon only schedules the work either way.
 async function syncInstance(
   state: DaemonState,
-  root: string,
+  key: PeerKey,
   trigger: string,
   options: { localOnly?: boolean } = {},
 ): Promise<boolean> {
-  if (state.syncing.has(root)) return false;
+  if (state.syncing.has(key)) return false;
+  const root = peerRoot(key);
+  const peer = peerName(key);
   // Working copies of one repo share a sidecar clone and therefore one sync
   // lock. Two syncing at once means the loser — soft, because the daemon issued
   // it — quietly does nothing and reports success, stranding whatever it was
   // about to capture until the next poll. Serialize the family here instead,
-  // where the work can simply be asked for again.
-  const family = realpathOr(familyPrimaryRoot(root) ?? root);
+  // where the work can simply be asked for again. Per peer: peers of one
+  // family have separate clones and separate locks, so they need not wait.
+  const family = `${realpathOr(familyPrimaryRoot(root) ?? root)}\0${peer}`;
   if (state.syncingFamilies.has(family)) {
-    logSidecarEvent("daemon-defer", { root, trigger, reason: "family-busy" });
-    state.trailingPending.add(root);
-    if (!state.pendingTimers.has(root)) openTrailingWindow(state, root, SETTLE_WINDOW_MS);
+    logSidecarEvent("daemon-defer", { ...peerFields(key), trigger, reason: "family-busy" });
+    state.trailingPending.add(key);
+    if (!state.pendingTimers.has(key)) openTrailingWindow(state, key, SETTLE_WINDOW_MS);
     // A deferred remote sync has to be rebooked here: the trailing window only
     // re-syncs a dirty checkout, and a clean one can still owe the remote a
     // push — which would otherwise wait for the interval poll.
-    if (!options.localOnly) armRemoteSync(state, root);
+    if (!options.localOnly) armRemoteSync(state, key);
     return false;
   }
-  state.syncing.add(root);
+  state.syncing.add(key);
   state.syncingFamilies.add(family);
   // Stamped on the attempt, not the outcome: a remote that is failing must not
   // be retried at the settle cadence.
   if (!options.localOnly) {
-    state.lastRemoteSyncAt.set(root, Date.now());
-    clearTimeout(state.remoteTimers.get(root));
-    state.remoteTimers.delete(root);
+    state.lastRemoteSyncAt.set(key, Date.now());
+    clearTimeout(state.remoteTimers.get(key));
+    state.remoteTimers.delete(key);
   }
   let succeeded = false;
   try {
     const localCli = localSidecarCliPath(root);
     const cli = localCli ?? currentCliPath();
-    logSidecarEvent("daemon-sync-start", { root, trigger, local: Boolean(localCli), localOnly: Boolean(options.localOnly) });
+    logSidecarEvent("daemon-sync-start", { ...peerFields(key), trigger, local: Boolean(localCli), localOnly: Boolean(options.localOnly) });
     const result = await runChild(process.execPath, [cli, "sync"], {
       cwd: root,
       // Daemon syncs are soft: one that finds a manual sync mid-flight can
       // no-op without it counting as a failure — the next trigger retries.
+      // The peer travels as an env var, like every other request the daemon
+      // makes of a CLI, so a CLI that predates peers ignores it rather than
+      // rejecting an unknown flag.
       env: {
         ...process.env,
         [SKIP_LOCAL_EXEC_ENV]: "1",
         [GLOBAL_EXEC_ENV]: "1",
         [SOFT_SYNC_ENV]: "1",
+        [PEER_ENV]: peer,
         ...(options.localOnly ? { [LOCAL_SYNC_ENV]: "1" } : {}),
       },
       timeoutMs: SYNC_TIMEOUT_MS,
     });
     if (result.status === 0) {
-      state.failures.delete(root);
-      state.skipUntilCycle.delete(root);
-      logSidecarEvent("daemon-sync", { root, trigger, local: Boolean(localCli) });
+      state.failures.delete(key);
+      state.skipUntilCycle.delete(key);
+      logSidecarEvent("daemon-sync", { ...peerFields(key), trigger, local: Boolean(localCli) });
       succeeded = true;
     } else {
-      const failures = (state.failures.get(root) ?? 0) + 1;
-      state.failures.set(root, failures);
-      state.skipUntilCycle.set(root, state.cycleCount + Math.min(2 ** (failures - 1), MAX_BACKOFF_CYCLES));
+      const failures = (state.failures.get(key) ?? 0) + 1;
+      state.failures.set(key, failures);
+      state.skipUntilCycle.set(key, state.cycleCount + Math.min(2 ** (failures - 1), MAX_BACKOFF_CYCLES));
       logSidecarEvent("failure", {
         command: "daemon",
-        root,
+        ...peerFields(key),
         trigger,
         message: result.timedOut ? "sync timed out" : result.output.trim().slice(-500) || `sync exited ${result.status}`,
       });
     }
   } finally {
-    state.syncing.delete(root);
+    state.syncing.delete(key);
     state.syncingFamilies.delete(family);
-    if (options.localOnly) armRemoteSync(state, root);
+    if (options.localOnly) armRemoteSync(state, key);
   }
-  if (succeeded) await followUpTrailingSync(state, root);
-  else state.trailingPending.delete(root);
+  if (succeeded) await followUpTrailingSync(state, key);
+  else state.trailingPending.delete(key);
   return succeeded;
 }
 
@@ -297,20 +362,20 @@ async function syncInstance(
 // every watch sync from scheduling another one forever — and, now that a sync
 // fast-forwards its sibling worktrees, what stops one checkout's settle from
 // waking every other checkout on the machine.
-async function followUpTrailingSync(state: DaemonState, root: string): Promise<void> {
-  if (!state.trailingPending.delete(root)) return;
-  await syncIfDirty(state, root, "watch-followup");
+async function followUpTrailingSync(state: DaemonState, key: PeerKey): Promise<void> {
+  if (!state.trailingPending.delete(key)) return;
+  await syncIfDirty(state, key, "watch-followup");
 }
 
 // Local unless the remote is due, like every other watch-driven sync: an edit
 // arriving mid-sync is no more urgent for the remote than one arriving after.
-async function syncIfDirty(state: DaemonState, root: string, trigger: string): Promise<void> {
-  if (!(await checkoutIsDirty(root))) return;
-  void syncInstance(state, root, trigger, { localOnly: !remoteIsDue(state, root) });
+async function syncIfDirty(state: DaemonState, key: PeerKey, trigger: string): Promise<void> {
+  if (!(await checkoutIsDirty(key))) return;
+  void syncInstance(state, key, trigger, { localOnly: !remoteIsDue(state, key) });
 }
 
-async function checkoutIsDirty(root: string): Promise<boolean> {
-  const sidecarPath = readInstances().find((instance) => instance.root === root)?.sidecarPath;
+async function checkoutIsDirty(key: PeerKey): Promise<boolean> {
+  const sidecarPath = readInstances().find((instance) => instance.configPath === key)?.sidecarPath;
   if (!sidecarPath || !fs.existsSync(sidecarPath)) return false;
   const result = await runChild("git", ["-C", sidecarPath, "status", "--porcelain"], { timeoutMs: 30_000 });
   return result.status === 0 && Boolean(result.stdout.trim());
@@ -364,33 +429,35 @@ async function refreshWatchers(state: DaemonState): Promise<void> {
     const chokidar = await loadChokidar();
     if (!chokidar) return;
 
-    const targets = new Map(selectWatchTargets(readInstances()).map((instance) => [instance.root, instance.sidecarPath]));
-    for (const [root, watcher] of [...state.watchers]) {
-      if (targets.has(root)) continue;
-      state.watchers.delete(root);
+    const targets = new Map(
+      selectWatchTargets(readInstances()).map((instance) => [instance.configPath as PeerKey, instance.sidecarPath]),
+    );
+    for (const [key, watcher] of [...state.watchers]) {
+      if (targets.has(key)) continue;
+      state.watchers.delete(key);
       await watcher.close().catch(() => undefined);
     }
-    for (const [root, sidecarPath] of targets) {
-      if (state.watchers.has(root)) continue;
+    for (const [key, sidecarPath] of targets) {
+      if (state.watchers.has(key)) continue;
       try {
         const watcher = chokidar.watch(sidecarPath, {
           ignored: watchIgnoreMatcher(sidecarPath),
           ignoreInitial: true,
           persistent: true,
         }) as unknown as Watcher;
-        watcher.on("all", () => scheduleWatchSync(state, root));
+        watcher.on("all", () => scheduleWatchSync(state, key));
         watcher.on("error", (error) => {
           logSidecarEvent("failure", {
             command: "daemon",
-            root,
+            ...peerFields(key),
             message: `watcher error: ${error instanceof Error ? error.message : String(error)}`,
           });
         });
-        state.watchers.set(root, watcher);
+        state.watchers.set(key, watcher);
       } catch (error) {
         logSidecarEvent("failure", {
           command: "daemon",
-          root,
+          ...peerFields(key),
           message: `could not watch ${sidecarPath}: ${error instanceof Error ? error.message : String(error)}`,
         });
       }
@@ -407,19 +474,19 @@ async function refreshWatchers(state: DaemonState): Promise<void> {
 // Leading + trailing debounce: the first change syncs immediately and opens a
 // quiet window; changes during the window collapse into one trailing sync at
 // its close, after which the next change leads again.
-function scheduleWatchSync(state: DaemonState, root: string): void {
-  if (state.syncing.has(root)) {
+function scheduleWatchSync(state: DaemonState, key: PeerKey): void {
+  if (state.syncing.has(key)) {
     // A save landing mid-sync must not wait for the next interval; mark it
     // pending and let the sync's completion decide whether it was real work
     // or just our own write echo.
-    state.trailingPending.add(root);
+    state.trailingPending.add(key);
     return;
   }
-  if (state.pendingTimers.has(root)) {
-    state.trailingPending.add(root);
+  if (state.pendingTimers.has(key)) {
+    state.trailingPending.add(key);
     return;
   }
-  void beginWatchSync(state, root);
+  void beginWatchSync(state, key);
 }
 
 /**
@@ -443,15 +510,15 @@ function scheduleWatchSync(state: DaemonState, root: string): void {
  * debounce because its job is to ask again, not to wait out a burst: borrowing
  * the 60s debounce here would strand an edit made moments after a settle.
  */
-async function beginWatchSync(state: DaemonState, root: string): Promise<void> {
-  if (state.syncing.has(root) || state.pendingTimers.has(root)) return;
-  const dirty = await checkoutIsDirty(root);
+async function beginWatchSync(state: DaemonState, key: PeerKey): Promise<void> {
+  if (state.syncing.has(key) || state.pendingTimers.has(key)) return;
+  const dirty = await checkoutIsDirty(key);
   // The await is a scheduling gap; another event may have led in the meantime.
-  if (state.syncing.has(root) || state.pendingTimers.has(root)) return;
+  if (state.syncing.has(key) || state.pendingTimers.has(key)) return;
 
-  openTrailingWindow(state, root, SETTLE_WINDOW_MS);
-  if (dirty) void syncInstance(state, root, "watch", { localOnly: !remoteIsDue(state, root) });
-  else state.trailingPending.add(root);
+  openTrailingWindow(state, key, SETTLE_WINDOW_MS);
+  if (dirty) void syncInstance(state, key, "watch", { localOnly: !remoteIsDue(state, key) });
+  else state.trailingPending.add(key);
 }
 
 /**
@@ -463,19 +530,19 @@ async function beginWatchSync(state: DaemonState, root: string): Promise<void> {
  * debounce. The delay is the remainder of that debounce, so the cadence is the
  * one `--debounce` asked for however the syncs were triggered.
  */
-function armRemoteSync(state: DaemonState, root: string): void {
-  if (state.remoteTimers.has(root)) return;
-  const elapsed = Date.now() - (state.lastRemoteSyncAt.get(root) ?? 0);
+function armRemoteSync(state: DaemonState, key: PeerKey): void {
+  if (state.remoteTimers.has(key)) return;
+  const elapsed = Date.now() - (state.lastRemoteSyncAt.get(key) ?? 0);
   const timer = setTimeout(
     () => {
-      state.remoteTimers.delete(root);
-      void syncInstance(state, root, "remote-due");
+      state.remoteTimers.delete(key);
+      void syncInstance(state, key, "remote-due");
     },
     // The floor keeps an overdue sync rebooked against a busy family from
     // retrying in a hot loop instead of at the settle cadence.
-    Math.max(SETTLE_WINDOW_MS, state.options.debounceSeconds * 1000 - elapsed),
+    Math.max(SETTLE_WINDOW_MS, scheduleFor(key, state.options).debounceSeconds * 1000 - elapsed),
   );
-  state.remoteTimers.set(root, timer);
+  state.remoteTimers.set(key, timer);
 }
 
 /**
@@ -490,24 +557,24 @@ function armRemoteSync(state: DaemonState, root: string): void {
  * before any sibling saw it — a minute, by default, to move a file between two
  * directories on the same disk.
  */
-function remoteIsDue(state: DaemonState, root: string): boolean {
-  const last = state.lastRemoteSyncAt.get(root) ?? 0;
-  return Date.now() - last >= state.options.debounceSeconds * 1000;
+function remoteIsDue(state: DaemonState, key: PeerKey): boolean {
+  const last = state.lastRemoteSyncAt.get(key) ?? 0;
+  return Date.now() - last >= scheduleFor(key, state.options).debounceSeconds * 1000;
 }
 
-function openTrailingWindow(state: DaemonState, root: string, delayMs: number): void {
-  logSidecarEvent("daemon-watch-debounce", { root, windowSeconds: Math.round(delayMs / 1000) });
+function openTrailingWindow(state: DaemonState, key: PeerKey, delayMs: number): void {
+  logSidecarEvent("daemon-watch-debounce", { ...peerFields(key), windowSeconds: Math.round(delayMs / 1000) });
   const timer = setTimeout(() => {
-    state.pendingTimers.delete(root);
-    if (!state.trailingPending.delete(root)) return;
-    if (state.syncing.has(root)) {
+    state.pendingTimers.delete(key);
+    if (!state.trailingPending.delete(key)) return;
+    if (state.syncing.has(key)) {
       // The running sync's completion handler owns the follow-up.
-      state.trailingPending.add(root);
+      state.trailingPending.add(key);
       return;
     }
-    void syncIfDirty(state, root, "watch-trailing");
+    void syncIfDirty(state, key, "watch-trailing");
   }, delayMs);
-  state.pendingTimers.set(root, timer);
+  state.pendingTimers.set(key, timer);
 }
 
 // Local installs register repos while the daemon is running; pick those up

@@ -28,7 +28,8 @@
     "postinstall": "node scripts/postinstall.js",
     "prepack": "cp ../../README.md README.md && cp ../../LICENSE LICENSE && bun run build",
     "prepublishOnly": "bun run check",
-    "test": "bun run build && vitest run"
+    "test": "vitest run",
+    "test:integration": "bun run build && SIDECAR_INTEGRATION=1 vitest run"
   },
   "engines": {
     "node": ">=20"

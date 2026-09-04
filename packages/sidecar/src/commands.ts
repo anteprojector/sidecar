@@ -31,33 +31,37 @@ const COMMANDS: Command[] = [
     run: cmdInit,
     section: "common",
     usage:
-      "init [remote] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii] [--local-install]",
+      "init [remote] [--peer name] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii] [--resolve fork|lww] [--debounce 10m] [--interval 1h] [--ignored] [--local-install]",
     notes: [
       "--path . makes this repo itself the sidecar (standalone)",
+      "--peer name adds a second sidecar as .sidecar.name; --ignored keeps it out of the tree",
       "--local-install adds the devDependency so fresh clones self-register",
     ],
   },
-  { name: "status", run: cmdStatus, section: "common", usage: "status [--json]" },
+  { name: "status", run: cmdStatus, section: "common", usage: "status [--json] [--peer name]" },
   {
     name: "health",
     run: cmdHealth,
     section: "common",
-    usage: "health [--json] [--no-fetch]",
+    usage: "health [--json] [--no-fetch] [--peer name]",
     notes: ["how every machine sharing this sidecar is syncing"],
   },
   {
     name: "redactions",
     run: cmdRedactions,
     section: "common",
-    usage: "redactions",
+    usage: "redactions [--peer name]",
     summary: "preview what redaction rewrites before content is pushed",
   },
   {
     name: "sync",
     run: cmdSync,
     section: "sync",
-    usage: "sync [--local] [--no-snapshot] [--soft] [-m message]",
-    notes: ["--local settles this machine's checkouts without touching the remote"],
+    usage: "sync [--local] [--no-snapshot] [--soft] [-m message] [--peer name]",
+    notes: [
+      "--local settles this machine's checkouts without touching the remote",
+      "every command acts on all of a repo's peers unless --peer names one",
+    ],
   },
   {
     name: "daemon",
@@ -68,12 +72,12 @@ const COMMANDS: Command[] = [
   { name: "instances", run: cmdInstances, section: "sync", usage: "instances [--json]" },
   { name: "tail", run: cmdTail, section: "sync", usage: "tail [-f|--follow] [-n|--lines count]" },
   { name: "update", run: cmdUpdate, section: "sync", usage: "update" },
-  { name: "clone", run: cmdClone, section: "advanced", usage: "clone [--if-missing]" },
+  { name: "clone", run: cmdClone, section: "advanced", usage: "clone [--if-missing] [--peer name]" },
   {
     name: "refresh",
     run: cmdRefresh,
     section: "advanced",
-    usage: "refresh [--force] [--yes]",
+    usage: "refresh [--force] [--yes] [--peer name]",
     // No summary: this usage string is exactly as wide as the notes column, so a
     // summary would run straight into it with no gap.
     notes: [
@@ -81,9 +85,9 @@ const COMMANDS: Command[] = [
       "discards anything unpushed; refuses until `sidecar sync` has run",
     ],
   },
-  { name: "deinit", run: cmdDeinit, section: "advanced", usage: "deinit" },
-  { name: "snapshot", run: cmdSnapshot, section: "advanced", usage: "snapshot [--push] [-m message]" },
-  { name: "merge", run: cmdMerge, section: "advanced", usage: "merge [--fork-files] [--no-push]" },
+  { name: "deinit", run: cmdDeinit, section: "advanced", usage: "deinit [--peer name]" },
+  { name: "snapshot", run: cmdSnapshot, section: "advanced", usage: "snapshot [--push] [-m message] [--peer name]" },
+  { name: "merge", run: cmdMerge, section: "advanced", usage: "merge [--fork-files] [--no-push] [--peer name]" },
   {
     name: "redact",
     run: cmdRedact,

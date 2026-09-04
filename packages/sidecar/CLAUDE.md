@@ -39,14 +39,24 @@ automatically by `export *`.
 - **Standalone vs nested.** `path = "."` means the user's repo IS the sidecar.
   Standalone changes nearly every code path: no gitignore wiring, origin is the
   remote, and sidecar must never rewrite the user's working tree.
-- **Sync lock.** Per repo family, in the state dir. `withSyncLock(root,
-  "throw", ...)` for user-demanded commands, `"skip"` for daemon soft requests
-  that will fire again anyway. Never stamp lastSyncAt without holding it.
+- **Sync lock.** Per repo family and peer, in the state dir.
+  `withSyncLock(root, peer, "throw", ...)` for user-demanded commands,
+  `"skip"` for daemon soft requests that will fire again anyway. Never stamp
+  lastSyncAt without holding it.
+- **Peers never interact.** `.sidecar` and each `.sidecar.<name>` are
+  separate sidecars: the registry, the lock, the daemon's bookkeeping, and
+  family linking are all keyed by config path (`instance.configPath`), never
+  by root alone. `config.peer` is derived from the file name in `readConfig`
+  and is how a `(root, config)` pair knows which file it came from. A command
+  fans out over `loadPeers(selectedPeer(parsed))`; the daemon names the peer
+  through `SIDECAR_PEER`, an env var like every other request it makes.
 
 ## Build & test
 
 - `bun run build` bundles `src/bin.ts` into the single committed `dist/cli.js`;
   `import.meta.url` tricks (`redactCliPath`, `packageVersion`) resolve against
   that bundle at runtime, so keep the one-file output.
-- `bun run check` typechecks; `bun run test` rebuilds dist then runs vitest —
-  integration tests spawn the real `dist/cli.js`, so a stale build fails them.
+- `bun run check` typechecks. `bun run test` is the fast suite and does not
+  build or spawn the real CLI. `bun run test:integration` rebuilds `dist` and
+  runs the full suite, including real Git repositories, CLI processes, and
+  daemon behavior.

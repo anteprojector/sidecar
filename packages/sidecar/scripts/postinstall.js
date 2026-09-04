@@ -7,6 +7,12 @@ import { fileURLToPath } from "node:url";
 
 const LABEL = "com.anteprojector.sidecar";
 const BIN_NAME = process.platform === "win32" ? "sidecar.cmd" : "sidecar";
+// A repo declares its sidecars as `.sidecar` and any `.sidecar.<peer>` beside
+// it. Mirrors `peerNameOf` in the CLI: a name is lowercase letters, digits,
+// and hyphens, and the suffixes an editor or a backup would leave are not
+// peers. Only presence matters here — the CLI does the reading.
+const PEER_FILE = /^\.sidecar(?:\.([a-z0-9][a-z0-9-]*))?$/;
+const NOT_PEERS = new Set(["default", "swp", "swo", "swx", "bak", "orig", "rej", "tmp", "old", "example", "sample", "lock"]);
 
 try {
   const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -65,7 +71,7 @@ function recordInstallSource(packageRoot) {
 // directory that silently never updates — worse than no checkout at all.
 function setUpLocalInstall(packageRoot) {
   const projectRoot = findInstallProjectRoot();
-  if (!projectRoot || !fs.existsSync(path.join(projectRoot, ".sidecar"))) return;
+  if (!projectRoot) return;
 
   const globalSidecar = findGlobalSidecar(packageRoot);
   if (!globalSidecar) {
@@ -134,10 +140,21 @@ function findInstallProjectRoot() {
   return undefined;
 }
 
+function declaresPeers(dir) {
+  try {
+    return fs.readdirSync(dir).some((entry) => {
+      const match = PEER_FILE.exec(entry);
+      return Boolean(match) && !NOT_PEERS.has(match[1]);
+    });
+  } catch {
+    return false;
+  }
+}
+
 function findConfigRoot(start) {
   let current = path.resolve(start);
   while (true) {
-    if (fs.existsSync(path.join(current, ".sidecar"))) return current;
+    if (declaresPeers(current)) return current;
     const parent = path.dirname(current);
     if (parent === current) return undefined;
     current = parent;
