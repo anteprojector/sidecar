@@ -10,10 +10,8 @@
  * registry therefore always has a tag behind it, which is the invariant that
  * hand-editing package.json kept breaking.
  *
- * `npm version` would normally do the bump, commit, and tag in one step, but it
- * drives git directly: in this colocated repo jj owns the index and HEAD, and a
- * stray `git commit` desyncs them. So the bump is written by hand and the commit
- * goes through jj.
+ * Bump every workspace manifest together, then use Git to commit and tag the
+ * verified result on main.
  *
  * Verification is a smoke test (scripts/smoke.mjs), not the full suite: the
  * suite is timing-flaky, and an npm OTP passed via --otp expires in ~30
@@ -122,18 +120,17 @@ step('Preflight')
 
 // A release commit should contain the bump and nothing else, so the working
 // copy has to be empty before we start writing to it.
-if (run('jj', ['log', '-r', '@', '--no-graph', '-T', 'empty']) !== 'true') {
+if (run('git', ['status', '--porcelain'])) {
   die('working copy has uncommitted changes — commit or squash them first')
 }
 
 // Release from the tip of what is already published, never from a side branch.
-const head = run('jj', ['log', '-r', '@-', '--no-graph', '-T', 'commit_id'])
-const mainAt = run('jj', ['log', '-r', 'main', '--no-graph', '-T', 'commit_id'])
-if (head !== mainAt) die('parent commit is not main — rebase onto main first')
+if (run('git', ['branch', '--show-current']) !== 'main') die('check out main before releasing')
+const mainAt = run('git', ['rev-parse', 'HEAD'])
 
-run('jj', ['git', 'fetch'])
-const remoteAt = run('jj', ['log', '-r', 'main@origin', '--no-graph', '-T', 'commit_id'])
-if (remoteAt !== mainAt) die('main and main@origin have diverged — push or pull first')
+run('git', ['fetch', 'origin'])
+const remoteAt = run('git', ['rev-parse', 'origin/main'])
+if (remoteAt !== mainAt) die('main and origin/main differ — push or pull first')
 
 const existingTag = run('git', ['tag', '-l', tag])
 if (existingTag) die(`tag ${tag} already exists`)
@@ -178,7 +175,10 @@ mutate(`write ${version} across ${manifests.length} manifests`, () => {
 // ---------------------------------------------------------------- verify
 step('Verify')
 runLoud('bun', ['run', 'check'])
-if (SKIP_TESTS) console.log('  smoke test skipped (--skip-tests)')
+if (SKIP_TESTS) {
+  console.log('  smoke test skipped (--skip-tests)')
+  runLoud('bun', ['run', 'build'])
+}
 else runLoud('node', [join(ROOT, 'scripts/smoke.mjs')])
 
 // ---------------------------------------------------------------- publish
@@ -186,16 +186,14 @@ else runLoud('node', [join(ROOT, 'scripts/smoke.mjs')])
 // that leaves the least mess if one of them fails.
 step('Commit and push')
 mutate(`commit and push ${tag}`, () => {
-  runLoud('jj', ['describe', '-m', `chore(sidecar): release ${tag}`])
-  runLoud('jj', ['bookmark', 'set', 'main', '-r', '@', '--allow-backwards'])
-  runLoud('jj', ['git', 'push', '--bookmark', 'main'])
+  runLoud('git', ['add', '--', ...manifests, join(ROOT, 'bun.lock'), join(PKG_DIR, 'dist')])
+  runLoud('git', ['commit', '-m', `chore(sidecar): release ${tag}`])
+  runLoud('git', ['push', 'origin', 'main'])
 })
 
 step(`Tag ${tag}`)
 mutate(`tag and push ${tag}`, () => {
-  // Resolve after the push: jj rewrites the working copy into an immutable
-  // commit as it goes, so the id from before the push is already stale.
-  const released = run('jj', ['log', '-r', 'main', '--no-graph', '-T', 'commit_id'])
+  const released = run('git', ['rev-parse', 'HEAD'])
   runLoud('git', ['tag', '-a', tag, '-m', `${published.name} ${version}`, released])
   runLoud('git', ['push', 'origin', tag])
 })
