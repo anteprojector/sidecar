@@ -15,7 +15,7 @@ import {
   nowIso,
   parseOptions,
 } from "./util.js";
-import { git, gitExcludePath, gitRaw, gitToplevel, gitToplevelOptional, isGitIgnored, isGitTracked } from "./git.js";
+import { git, gitExcludePath, gitRaw, gitToplevel, gitToplevelOptional, hasGitMetadata, isGitIgnored, isGitTracked } from "./git.js";
 import {
   GLOBAL_EXEC_ENV,
   PACKAGE_NAME,
@@ -46,6 +46,7 @@ import {
   peerConfigPath,
   peerFileName,
   readConfig,
+  resolveSidecarPath,
   durationConfigValue,
   redactionModeConfigValue,
   resolveModeConfigValue,
@@ -58,7 +59,7 @@ import {
 } from "./config.js";
 import { readSettings, registerCurrentInstance, unregisterInstance, withSyncLock, writeSettings } from "./state.js";
 import { SKIP_SERVICE_ENV, daemonServiceStatus } from "./service.js";
-import { cloneIfMissing, cloneOrUpdate, removeRedactionFilter, syncProject } from "./sync.js";
+import { cloneOrUpdate, removeRedactionFilter, syncProject } from "./sync.js";
 import { announcePeer, promptLine, promptYesNo, promptYesNoDefaultNo } from "./ui.js";
 import { DEFAULT_REDACTION_MODE, REDACTION_MODES, type RedactionMode } from "./redaction.js";
 
@@ -612,11 +613,14 @@ export function cmdClone(args: string[]): number {
   for (const peer of peers) {
     announcePeer(peer, peers);
     const { root, config } = peer;
+    // An existing checkout is left exactly as it is, whatever shape it is in:
+    // an install hook must never rebuild a directory holding the user's notes.
+    // `sidecar refresh` is the command that does, when asked.
     if (parsed.flags.has("--if-missing")) {
-      if (!cloneIfMissing(root, config, !parsed.flags.has("--no-bootstrap-main"))) continue;
-    } else {
-      cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
+      const sidecarPath = resolveSidecarPath(root, config);
+      if (fs.existsSync(sidecarPath) && hasGitMetadata(sidecarPath)) continue;
     }
+    cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
     registerCurrentInstance(root, config, { event: "clone" });
   }
   return 0;

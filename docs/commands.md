@@ -13,6 +13,7 @@ sidecar health             # show how every machine sharing this sidecar is sync
 sidecar sync               # snapshot, push, merge, and push canonical state
 sidecar snapshot           # commit local changes to the inbox branch, nothing else
 sidecar clone              # clone or update the configured sidecar repo
+sidecar refresh            # delete the sidecar checkout and clone it again
 sidecar merge --fork-files # merge inbox branches and preserve conflicts
 sidecar redactions         # preview what redaction changes on the next push
 sidecar instances          # list known local sidecar checkouts
@@ -141,7 +142,79 @@ against what is pushed, recomputed on demand from the working tree. See
 Clone the configured sidecar repo (or update an existing checkout). In a repo
 with several working copies — git worktrees, jj workspaces — the checkout is
 created as a linked worktree of the primary working copy's clone instead of a
-second clone. `--if-missing` is a no-op when the checkout already exists.
+second clone. `--if-missing` is a no-op when the checkout already exists — it
+never converts or replaces one.
+
+### `sidecar refresh [--force] [--yes] [--peer <name>]`
+
+Deletes the sidecar checkout and clones it again. The blunt repair: a checkout can
+be wrong in more ways than sidecar has fixes for — an independent clone that
+should be a linked worktree, a wedged merge, a corrupt object store, a wrong
+origin, a branch tangle — and rebuilding fixes all of them without having to name
+any of them. In a repo with several working copies the rebuilt checkout is a
+linked worktree again, exactly as `sidecar clone` would have made it.
+
+Destructive on purpose, and nothing runs it for you. Everything that has reached
+the remote comes back — the rebuilt checkout keeps the same checkout id, so it
+claims the same inbox branch and the same identity in `sidecar health` — and
+everything that has not is gone. Rather than try to rescue the difference,
+`refresh` refuses while there is one:
+
+```
+sidecar: this checkout still holds 2 commit(s) the remote has not seen and 1
+uncommitted file(s); run `sidecar sync` to push them, then refresh — or
+`sidecar refresh --force` to discard them
+```
+
+| flag | effect |
+|---|---|
+| `--force` | refresh anyway, discarding unpushed commits and uncommitted files |
+| `--peer <name>` | which sidecar to rebuild; required when the repo declares more than one |
+| `--yes`, `-y` | skip the confirmation prompt |
+
+Without a terminal and without `--yes`, `refresh` reports that nothing changed and
+exits successfully.
+
+Two more things it refuses before touching anything, both because it cannot finish
+cleanly rather than because it would rather not:
+
+- **Other checkouts share this one's Git store.** Deleting the checkout that owns
+  the store strands every linked worktree of it. Refresh those working copies
+  instead; `--force` replaces this one anyway and leaves them to be refreshed too.
+- **The inbox branch is checked out somewhere else.** Git allows one worktree to
+  hold a branch, so the rebuilt checkout could not take its inbox back. This only
+  happens with an inbox template shared across working copies; putting `{random}`
+  back in the template fixes it.
+
+A checkout too broken for git to read is the one case that needs `--force` on its
+own: what it still holds cannot be weighed, so refresh will not assume the answer
+is "nothing".
+
+#### Standalone
+
+A [standalone](standalone.md) repo *is* the sidecar, source and all, so there is
+nothing to delete and `refresh` re-establishes instead of rebuilding: it rewires
+the redaction filter, settles the canonical branch onto `origin/<branch>`, and puts
+the repo back on its inbox branch. A diverged tip is parked under
+`refs/sidecar-discarded/` rather than dropped.
+
+`--force` additionally moves the inbox branch back to the canonical branch, which
+is the only thing that clears an inbox that has diverged; that tip is parked the
+same way. A standalone repo that git cannot read is never rebuilt — it is your
+repo, and sidecar says so instead of guessing.
+
+**Under redaction, a standalone refresh rewires the filter and stops there.**
+Settling needs two branch switches, and switching materializes the *committed*
+blob — which is the redacted one, while your working tree still holds the
+original. That is the same switch [`deinit`](#sidecar-deinit) refuses, for the
+same reason. Refresh reports what it left alone and exits successfully:
+
+```
+refreshed sidecar at /path/to/repo
+sidecar: left main and the inbox branch untouched: settling them means switching
+branches, which under redaction would replace local files with their redacted
+pushed contents
+```
 
 ### `sidecar instances [--json]`
 

@@ -111,6 +111,15 @@ its own next sync. When the family cannot be resolved at all — an unreadable
 primary, mismatched remotes — a checkout simply gets its own clone, which is
 what it would have had anyway.
 
+An independent clone is slower, not broken: it still syncs, it just trades with
+its siblings through the remote rather than the store they already share, so
+local settling needs the network. Checkouts made before family linking worked
+are in exactly that state, as are jj workspaces from before sidecar could
+resolve a relative `.jj/repo` pointer. `sidecar status` names them, and
+[`sidecar refresh`](commands.md#sidecar-refresh---force---yes---peer-name) rebuilds one as a
+linked worktree when you ask. Nothing converts a checkout on its own — rewriting
+a directory of your notes is not something an install hook should decide to do.
+
 A per-family lock (per-repo, when nothing shares the clone; per peer, since
 peers share nothing) serializes syncs, and the two kinds of sync react differently
 to finding it held. A manual `sidecar sync` (or `sidecar snapshot`) is a
@@ -156,9 +165,9 @@ like — are never read as peers.
 
 Every command acts on all of a repo's peers unless `--peer` names one;
 `sidecar status` prints a section per peer, `sidecar sync` syncs each in turn
-and reports every failure before exiting. `sidecar deinit` is the exception:
-with more than one peer declared it removes nothing until `--peer` says
-which. A bare `sidecar init` in a fresh clone joins every peer the repo
+and reports every failure before exiting. `sidecar deinit` and
+`sidecar refresh` are the exceptions: each deletes a checkout, so with more
+than one peer declared they do nothing until `--peer` says which. A bare `sidecar init` in a fresh clone joins every peer the repo
 declares, which is what a clone needs; a remote or a `--peer` names one.
 
 `--ignored` keeps a peer out of the tree: its config file and its checkout
