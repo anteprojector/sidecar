@@ -30,6 +30,7 @@ import {
   DEFAULT_BRANCH,
   DEFAULT_INBOX,
   DEFAULT_PATH,
+  DEFAULT_RESOLVE,
   type SidecarConfig,
   findConfigRootOptional,
   isStandalone,
@@ -38,6 +39,7 @@ import {
   pathIsRepoRoot,
   readConfig,
   redactionModeConfigValue,
+  resolveModeConfigValue,
   validateBranch,
   validateInboxTemplate,
   validateRemote,
@@ -162,11 +164,11 @@ function removeCheckout(checkoutPath: string): void {
 export function cmdInit(args: string[]): number {
   const parsed = parseOptions(args, {
     boolean: new Set(["--no-clone", "--no-bootstrap-main", "--local-install"]),
-    value: new Set(["--path", "--branch", "--inbox", "--redaction"]),
+    value: new Set(["--path", "--branch", "--inbox", "--redaction", "--resolve"]),
   });
   if (parsed.positional.length > 1) {
     throw new SidecarError(
-      "usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction mode]",
+      "usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction mode] [--resolve fork|lww]",
     );
   }
 
@@ -184,7 +186,8 @@ export function cmdInit(args: string[]): number {
       existing.path === getValue(parsed, "--path", existing.path) &&
       existing.branch === getValue(parsed, "--branch", existing.branch) &&
       existing.inbox === getValue(parsed, "--inbox", existing.inbox) &&
-      existing.redaction === getValue(parsed, "--redaction", existing.redaction);
+      existing.redaction === getValue(parsed, "--redaction", existing.redaction) &&
+      existing.resolve === getValue(parsed, "--resolve", existing.resolve);
     if (unchanged || !promptOverwriteConfig(configPath, existing.remote, remote)) {
       existingRoot = root;
     }
@@ -254,6 +257,9 @@ function buildInitConfig(root: string, remote: string | undefined, parsed: Parse
     redaction: parsed.values.has("--redaction")
       ? redactionModeConfigValue(getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE), "--redaction")
       : promptRedactionMode(),
+    resolve: parsed.values.has("--resolve")
+      ? resolveModeConfigValue(getValue(parsed, "--resolve", DEFAULT_RESOLVE), "--resolve")
+      : DEFAULT_RESOLVE,
   };
 }
 

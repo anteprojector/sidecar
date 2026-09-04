@@ -1632,6 +1632,7 @@ function writeConfig(configPath, config) {
     `branch = ${JSON.stringify(config.branch)}`,
     `inbox = ${JSON.stringify(config.inbox)}`,
     `redaction = ${JSON.stringify(config.redaction ?? DEFAULT_REDACTION_MODE)}`,
+    `resolve = ${JSON.stringify(config.resolve ?? DEFAULT_RESOLVE)}`,
     ""
   ].join(`
 `);
@@ -1659,7 +1660,8 @@ function readConfig(configPath) {
     path: stringConfigValue(configPath, values, "path", DEFAULT_PATH),
     branch: stringConfigValue(configPath, values, "branch", DEFAULT_BRANCH),
     inbox: stringConfigValue(configPath, values, "inbox", DEFAULT_INBOX),
-    redaction: redactionModeConfigValue(stringConfigValue(configPath, values, "redaction", DEFAULT_REDACTION_MODE), configPath)
+    redaction: redactionModeConfigValue(stringConfigValue(configPath, values, "redaction", DEFAULT_REDACTION_MODE), configPath),
+    resolve: resolveModeConfigValue(stringConfigValue(configPath, values, "resolve", DEFAULT_RESOLVE), configPath)
   };
   validateRemote(config.remote);
   validateBranch(config.branch);
@@ -1670,6 +1672,11 @@ function redactionModeConfigValue(value, source) {
   if (REDACTION_MODES.includes(value))
     return value;
   throw new SidecarError(`${source}: invalid redaction mode ${JSON.stringify(value)}; expected one of ${REDACTION_MODES.join(", ")}`);
+}
+function resolveModeConfigValue(value, source) {
+  if (RESOLVE_MODES.includes(value))
+    return value;
+  throw new SidecarError(`${source}: invalid resolve mode ${JSON.stringify(value)}; expected one of ${RESOLVE_MODES.join(", ")}`);
 }
 function stringConfigValue(configPath, values, key, fallback) {
   const value = values[key] ?? fallback;
@@ -1786,13 +1793,14 @@ function inboxBranchPrefix(template) {
   const slashIndex = staticPrefix.lastIndexOf("/");
   return slashIndex === -1 ? staticPrefix : staticPrefix.slice(0, slashIndex + 1);
 }
-var DEFAULT_PATH = "sidecar", DEFAULT_BRANCH = "main", DEFAULT_INBOX = "sidecar-inbox/{user}/{random}";
+var DEFAULT_PATH = "sidecar", DEFAULT_BRANCH = "main", DEFAULT_INBOX = "sidecar-inbox/{user}/{random}", RESOLVE_MODES, DEFAULT_RESOLVE = "fork";
 var init_config = __esm(() => {
   init_dist();
   init_util();
   init_git();
   init_health();
   init_redaction();
+  RESOLVE_MODES = ["fork", "lww"];
 });
 
 // src/state.ts
@@ -2566,6 +2574,12 @@ function mergeInboxBranchesAt(sidecarPath, config, options) {
       if (!hasUnmergedPaths(sidecarPath)) {
         throw new SidecarError(result.stderr.trim() || `merge failed for ${remoteBranch}`);
       }
+      if (config.resolve === "lww") {
+        resolveLastWriterWins(sidecarPath, remoteBranch);
+        git(sidecarPath, ["commit", "-m", `Merge ${remoteBranch}, last writer wins`]);
+        merged.push(remoteBranch);
+        continue;
+      }
       if (!options.forkFiles) {
         git(sidecarPath, ["merge", "--abort"], { check: false });
         throw new SidecarError(`merge conflict in ${remoteBranch}; rerun with --fork-files`);
@@ -3110,6 +3124,52 @@ function forkConflicts(repo, remoteBranch) {
     throw new SidecarError("fork-files did not clear all unmerged paths");
   }
 }
+function resolveLastWriterWins(repo, remoteBranch) {
+  const conflicts = unmergedPaths(repo);
+  if (!Object.keys(conflicts).length) {
+    throw new SidecarError("merge reported conflicts, but no unmerged paths were found");
+  }
+  const timestamp = utcTimestamp();
+  const branch = remoteBranchName(remoteBranch) || remoteBranch;
+  const manifest = { timestamp, resolved_by: "lww", source_branch: branch, paths: [] };
+  for (const [conflictPath, stages] of Object.entries(conflicts).sort(([left], [right]) => left.localeCompare(right))) {
+    const ours = lastWriteAt(repo, "HEAD", conflictPath);
+    const theirs = lastWriteAt(repo, remoteBranch, conflictPath);
+    const winner = theirs >= ours ? 3 : 2;
+    const loser = winner === 3 ? 2 : 3;
+    const blob = showStage(repo, winner, conflictPath);
+    const full = path7.join(repo, conflictPath);
+    if (blob) {
+      fs7.mkdirSync(path7.dirname(full), { recursive: true });
+      fs7.writeFileSync(full, blob);
+      git(repo, ["add", "--", conflictPath]);
+    } else {
+      git(repo, ["rm", "-f", "--ignore-unmatch", "--", conflictPath], { check: false });
+      if (fs7.existsSync(full) && fs7.statSync(full).isFile())
+        fs7.unlinkSync(full);
+    }
+    manifest.paths.push({
+      path: conflictPath,
+      kept: winner === 3 ? branch : "main",
+      kept_at: winner === 3 ? theirs : ours,
+      dropped: winner === 3 ? "main" : branch,
+      dropped_oid: stages[loser] ?? ""
+    });
+  }
+  const manifestDir = path7.join(repo, ".sidecar-conflicts");
+  fs7.mkdirSync(manifestDir, { recursive: true });
+  fs7.writeFileSync(path7.join(manifestDir, `${timestamp}-${fileLabel(branch)}.json`), `${JSON.stringify(manifest, null, 2)}
+`, "utf8");
+  git(repo, ["add", "-A"]);
+  if (hasUnmergedPaths(repo)) {
+    throw new SidecarError("last-writer-wins did not clear all unmerged paths");
+  }
+  console.log(`resolved ${manifest.paths.length} conflict(s) by last writer`);
+}
+function lastWriteAt(repo, ref, filePath) {
+  const result = git(repo, ["log", "-1", "--format=%ct", ref, "--", filePath], { check: false });
+  return Number(result.stdout.trim()) || 0;
+}
 function forkPath(conflictPath, label, oid) {
   const parsed = path7.parse(conflictPath);
   const shortOid = oid ? oid.slice(0, 7) : "missing";
@@ -3326,10 +3386,10 @@ function removeCheckout(checkoutPath) {
 function cmdInit(args) {
   const parsed = parseOptions(args, {
     boolean: new Set(["--no-clone", "--no-bootstrap-main", "--local-install"]),
-    value: new Set(["--path", "--branch", "--inbox", "--redaction"])
+    value: new Set(["--path", "--branch", "--inbox", "--redaction", "--resolve"])
   });
   if (parsed.positional.length > 1) {
-    throw new SidecarError("usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction mode]");
+    throw new SidecarError("usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction mode] [--resolve fork|lww]");
   }
   const remote = parsed.positional[0];
   let existingRoot = remote ? undefined : findConfigRootOptional(process.cwd());
@@ -3337,7 +3397,7 @@ function cmdInit(args) {
   const configPath = path8.join(root, ".sidecar");
   if (remote && fs9.existsSync(configPath)) {
     const existing = readConfig(configPath);
-    const unchanged = existing.remote === remote && existing.path === getValue(parsed, "--path", existing.path) && existing.branch === getValue(parsed, "--branch", existing.branch) && existing.inbox === getValue(parsed, "--inbox", existing.inbox) && existing.redaction === getValue(parsed, "--redaction", existing.redaction);
+    const unchanged = existing.remote === remote && existing.path === getValue(parsed, "--path", existing.path) && existing.branch === getValue(parsed, "--branch", existing.branch) && existing.inbox === getValue(parsed, "--inbox", existing.inbox) && existing.redaction === getValue(parsed, "--redaction", existing.redaction) && existing.resolve === getValue(parsed, "--resolve", existing.resolve);
     if (unchanged || !promptOverwriteConfig(configPath, existing.remote, remote)) {
       existingRoot = root;
     }
@@ -3384,7 +3444,8 @@ function buildInitConfig(root, remote, parsed) {
     path: sidecarPath,
     branch: getValue(parsed, "--branch", DEFAULT_BRANCH),
     inbox: getValue(parsed, "--inbox", DEFAULT_INBOX),
-    redaction: parsed.values.has("--redaction") ? redactionModeConfigValue(getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE), "--redaction") : promptRedactionMode()
+    redaction: parsed.values.has("--redaction") ? redactionModeConfigValue(getValue(parsed, "--redaction", DEFAULT_REDACTION_MODE), "--redaction") : promptRedactionMode(),
+    resolve: parsed.values.has("--resolve") ? resolveModeConfigValue(getValue(parsed, "--resolve", DEFAULT_RESOLVE), "--resolve") : DEFAULT_RESOLVE
   };
 }
 function printCheckoutVisibility(root, config) {
@@ -3826,6 +3887,7 @@ function cmdStatus(args) {
   statusLine("remote", config.remote, "brand");
   statusLine("main branch", config.branch);
   statusLine("inbox branch", inbox);
+  statusLine("conflicts", config.resolve === "lww" ? "last writer wins" : "fork files");
   if (!checkoutPresent) {
     statusLine("checkout", "missing — run `sidecar init`", "bad");
     printDaemonLine();
@@ -4943,10 +5005,10 @@ function cmdMerge(args) {
   if (parsed.flags.has("--llm")) {
     throw new SidecarError("--llm is reserved for a configured resolver; use --fork-files for now");
   }
-  if (!parsed.flags.has("--fork-files")) {
+  const [root, config] = loadProject();
+  if (config.resolve === "fork" && !parsed.flags.has("--fork-files")) {
     console.log("sidecar: conflicts will stop the merge; pass --fork-files to preserve all versions");
   }
-  const [root, config] = loadProject();
   const sidecarPath = requireSidecarCheckout(root, config);
   ensureRedactionFilter(sidecarPath, config.redaction);
   mergeInboxBranches(sidecarPath, config, {
@@ -5109,7 +5171,7 @@ var init_commands = __esm(() => {
       name: "init",
       run: cmdInit,
       section: "common",
-      usage: "init [remote] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii] [--local-install]",
+      usage: "init [remote] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii] [--resolve fork|lww] [--local-install]",
       notes: [
         "--path . makes this repo itself the sidecar (standalone)",
         "--local-install adds the devDependency so fresh clones self-register"

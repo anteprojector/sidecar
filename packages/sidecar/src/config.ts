@@ -15,6 +15,19 @@ export const DEFAULT_PATH = "sidecar";
 export const DEFAULT_BRANCH = "main";
 export const DEFAULT_INBOX = "sidecar-inbox/{user}/{random}";
 
+/**
+ * What a merge does when two machines edited the same file. `fork` keeps
+ * every version as separate files beside a manifest (the default: nothing is
+ * ever lost, at the cost of a fork the user must fold back). `lww` keeps the
+ * side whose last commit to that path is newer and records the dropped
+ * version's oid in the manifest — right for a tree with one writer at a time,
+ * where a conflict means two machines briefly overlapped and the newer state
+ * is the one that matters.
+ */
+export const RESOLVE_MODES = ["fork", "lww"] as const;
+export type ResolveMode = (typeof RESOLVE_MODES)[number];
+export const DEFAULT_RESOLVE: ResolveMode = "fork";
+
 export type SidecarConfig = {
   remote: string;
   version: number;
@@ -22,6 +35,7 @@ export type SidecarConfig = {
   branch: string;
   inbox: string;
   redaction: RedactionMode;
+  resolve: ResolveMode;
 };
 
 export function loadProject(): [string, SidecarConfig] {
@@ -53,6 +67,7 @@ export function writeConfig(configPath: string, config: SidecarConfig): void {
     `branch = ${JSON.stringify(config.branch)}`,
     `inbox = ${JSON.stringify(config.inbox)}`,
     `redaction = ${JSON.stringify(config.redaction ?? DEFAULT_REDACTION_MODE)}`,
+    `resolve = ${JSON.stringify(config.resolve ?? DEFAULT_RESOLVE)}`,
     "",
   ].join("\n");
   fs.writeFileSync(configPath, text, "utf8");
@@ -84,6 +99,7 @@ export function readConfig(configPath: string): SidecarConfig {
       stringConfigValue(configPath, values, "redaction", DEFAULT_REDACTION_MODE),
       configPath,
     ),
+    resolve: resolveModeConfigValue(stringConfigValue(configPath, values, "resolve", DEFAULT_RESOLVE), configPath),
   };
   validateRemote(config.remote);
   validateBranch(config.branch);
@@ -95,6 +111,13 @@ export function redactionModeConfigValue(value: string, source: string): Redacti
   if ((REDACTION_MODES as readonly string[]).includes(value)) return value as RedactionMode;
   throw new SidecarError(
     `${source}: invalid redaction mode ${JSON.stringify(value)}; expected one of ${REDACTION_MODES.join(", ")}`,
+  );
+}
+
+export function resolveModeConfigValue(value: string, source: string): ResolveMode {
+  if ((RESOLVE_MODES as readonly string[]).includes(value)) return value as ResolveMode;
+  throw new SidecarError(
+    `${source}: invalid resolve mode ${JSON.stringify(value)}; expected one of ${RESOLVE_MODES.join(", ")}`,
   );
 }
 

@@ -1296,6 +1296,55 @@ describe("sidecar CLI integration", () => {
     expect(secondMerge).toContain("no inbox branches to merge");
   });
 
+  test("merge keeps the last writer per path when resolve is lww", () => {
+    const { main, remote, sidecar } = initSidecarProject(["--resolve", "lww"]);
+    const base = 1_700_000_000;
+    const write = (name: string, text: string | null) => {
+      const file = path.join(sidecar, "notes", name);
+      if (text === null) fs.rmSync(file);
+      else fs.writeFileSync(file, text, "utf8");
+    };
+    git(sidecar, ["switch", "main"]);
+    fs.mkdirSync(path.join(sidecar, "notes"), { recursive: true });
+    for (const name of ["plan.md", "other.md", "gone.md"]) write(name, "base\n");
+    commitAt(sidecar, "Base notes", base);
+    git(sidecar, ["push", "origin", "HEAD:refs/heads/main"]);
+
+    // The inbox touched other.md early and plan.md (plus a deletion) late; main touched all three in between.
+    git(sidecar, ["switch", "-c", "sidecar-inbox/test/lww", "main"]);
+    write("other.md", "inbox\n");
+    commitAt(sidecar, "Inbox early", base + 10);
+    write("plan.md", "inbox\n");
+    write("gone.md", null);
+    commitAt(sidecar, "Inbox late", base + 100);
+    git(sidecar, ["push", "origin", "HEAD:refs/heads/sidecar-inbox/test/lww"]);
+
+    git(sidecar, ["switch", "main"]);
+    for (const name of ["plan.md", "other.md", "gone.md"]) write(name, "main\n");
+    commitAt(sidecar, "Main in between", base + 50);
+    git(sidecar, ["push", "origin", "HEAD:refs/heads/main"]);
+
+    const output = runSidecar(["merge"], main);
+
+    expect(output).toContain("resolved 3 conflict(s) by last writer");
+    expect(output).toContain("merged 1 inbox branch(es)");
+    const show = (file: string) => gitRaw(["--git-dir", remote, "show", `main:${file}`], { check: false });
+    expect(show("notes/plan.md").stdout).toBe("inbox\n");
+    expect(show("notes/other.md").stdout).toBe("main\n");
+    expect(show("notes/gone.md").status).not.toBe(0);
+    const files = gitRaw(["--git-dir", remote, "ls-tree", "-r", "--name-only", "main"]).stdout.split("\n");
+    expect(files.filter((name) => name.includes(".conflict."))).toEqual([]);
+    const manifestPath = files.find((name) => name.startsWith(".sidecar-conflicts/"));
+    const manifest = JSON.parse(gitRaw(["--git-dir", remote, "show", `main:${manifestPath}`]).stdout);
+    expect(manifest.resolved_by).toBe("lww");
+    expect(manifest.paths.map((entry: { path: string; kept: string }) => [entry.path, entry.kept])).toEqual([
+      ["notes/gone.md", "sidecar-inbox/test/lww"],
+      ["notes/other.md", "main"],
+      ["notes/plan.md", "sidecar-inbox/test/lww"],
+    ]);
+    expect(manifest.paths.every((entry: { dropped_oid: string }) => /^[0-9a-f]{40}$/.test(entry.dropped_oid))).toBe(true);
+  }, 30000);
+
   test("status reports checkout, daemon, sync, and pending inbox state", () => {
     const { main, remote, sidecar } = initSidecarProject();
 
@@ -2022,6 +2071,23 @@ function seedIndependentSidecar(worktree: string, remote: string): string {
   const config = readConfig(path.join(worktree, ".sidecar"));
   git(checkout, ["switch", "-c", expandInbox(config, checkout)]);
   return checkout;
+}
+
+/** Commit everything with a fixed commit time, so last-writer-wins has an order to read. */
+function commitAt(repo: string, message: string, unixSeconds: number): void {
+  const date = `@${unixSeconds} +0000`;
+  const saved = { author: process.env.GIT_AUTHOR_DATE, committer: process.env.GIT_COMMITTER_DATE };
+  process.env.GIT_AUTHOR_DATE = date;
+  process.env.GIT_COMMITTER_DATE = date;
+  try {
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-m", message]);
+  } finally {
+    if (saved.author === undefined) delete process.env.GIT_AUTHOR_DATE;
+    else process.env.GIT_AUTHOR_DATE = saved.author;
+    if (saved.committer === undefined) delete process.env.GIT_COMMITTER_DATE;
+    else process.env.GIT_COMMITTER_DATE = saved.committer;
+  }
 }
 
 function initBareRemote(): string {

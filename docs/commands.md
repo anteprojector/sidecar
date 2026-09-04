@@ -42,6 +42,7 @@ uncommitted files land on the remote immediately. See
 | `--branch <name>` | canonical branch in the sidecar repo (default `main`) |
 | `--inbox <template>` | inbox branch template (default `sidecar-inbox/{user}/{random}`) |
 | `--redaction <mode>` | what gets redacted on push: `secrets+pii`, `secrets`, or `none` — defaults to `secrets`; see [redaction.md](redaction.md) |
+| `--resolve <mode>` | what a merge does when two machines edited one file: `fork` (default) keeps every version as separate files; `lww` keeps the newer write per path and names the dropped one in the manifest — see [Conflicts](sync.md#conflicts) |
 | `--no-clone` | write config and registration only; skip cloning |
 | `--no-bootstrap-main` | don't create the canonical branch on an empty remote |
 | `--local-install` | add `sidecarsync` to `devDependencies` (plus the bun/pnpm trust entry) so fresh clones self-register on install |
@@ -107,9 +108,11 @@ Commit local sidecar changes to the inbox branch without merging anything.
 
 ### `sidecar merge [--fork-files] [--no-push]`
 
-Merge remote inbox branches into the canonical branch. A conflict stops the
-merge unless `--fork-files` is passed, which keeps every side as separate
-forked files. `--no-push` merges locally without pushing.
+Merge remote inbox branches into the canonical branch. With the default
+`resolve = "fork"`, a conflict stops the merge unless `--fork-files` is
+passed, which keeps every side as separate forked files. With
+`resolve = "lww"` the newer write per path wins and nothing stops. `--no-push`
+merges locally without pushing.
 
 ### `sidecar redactions`
 

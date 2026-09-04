@@ -95,6 +95,16 @@ describe("config", () => {
     expect(config.path).toBe("metadata");
     expect(config.branch).toBe("main");
     expect(config.inbox).toBe(DEFAULT_INBOX);
+    expect(config.resolve).toBe("fork");
+  });
+
+  test("reads the resolve mode and rejects unknown ones", () => {
+    const root = tempDir();
+    const configPath = path.join(root, ".sidecar");
+    fs.writeFileSync(configPath, 'remote = "git@github.com:org/repo.git"\nresolve = "lww"\n', "utf8");
+    expect(readConfig(configPath).resolve).toBe("lww");
+    fs.writeFileSync(configPath, 'remote = "git@github.com:org/repo.git"\nresolve = "newest"\n', "utf8");
+    expect(() => readConfig(configPath)).toThrow(/invalid resolve mode "newest"; expected one of fork, lww/);
   });
 
   test("parses TOML strings with comments and escapes", () => {

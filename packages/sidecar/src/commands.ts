@@ -30,7 +30,7 @@ const COMMANDS: Command[] = [
     run: cmdInit,
     section: "common",
     usage:
-      "init [remote] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii] [--local-install]",
+      "init [remote] [--path sidecar|.] [--branch main] [--inbox template] [--redaction none|secrets|secrets+pii] [--resolve fork|lww] [--local-install]",
     notes: [
       "--path . makes this repo itself the sidecar (standalone)",
       "--local-install adds the devDependency so fresh clones self-register",

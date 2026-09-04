@@ -122,7 +122,9 @@ You're left with a normal git repo holding a `.sidecar` deletion to commit.
 - The repo sits on a `sidecar-inbox/...` branch, so GitHub's default-branch
   view, `gh`, and editor branch indicators show something unfamiliar.
 - Conflicts fork into files like `install.conflict.main.abc1234.sh` alongside a
-  `.sidecar-conflicts/` manifest, in a repo you actually use.
+  `.sidecar-conflicts/` manifest, in a repo you actually use. A repo that has
+  one writer at a time can init with `--resolve lww` instead, so the newer
+  write wins and no fork files appear — see [Conflicts](sync.md#conflicts).
 - Sync pushes to `main` automatically. Don't point standalone at a repo with
   branch protection or a CI trigger you care about.
 - The daemon's watch filter reads only the top-level `.gitignore`, so a repo

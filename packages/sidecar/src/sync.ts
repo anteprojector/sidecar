@@ -464,6 +464,13 @@ function mergeInboxBranchesAt(
         throw new SidecarError(result.stderr.trim() || `merge failed for ${remoteBranch}`);
       }
 
+      if (config.resolve === "lww") {
+        resolveLastWriterWins(sidecarPath, remoteBranch);
+        git(sidecarPath, ["commit", "-m", `Merge ${remoteBranch}, last writer wins`]);
+        merged.push(remoteBranch);
+        continue;
+      }
+
       if (!options.forkFiles) {
         git(sidecarPath, ["merge", "--abort"], { check: false });
         throw new SidecarError(`merge conflict in ${remoteBranch}; rerun with --fork-files`);
@@ -1186,6 +1193,70 @@ type ConflictManifest = {
   source_branch: string;
   paths: Array<{ path: string; versions: ConflictVersion[] }>;
 };
+
+/**
+ * Last writer wins, per path: the side whose most recent commit touching the
+ * path is newer keeps the file, the other side's blob is dropped from the tree
+ * and named in the manifest (it stays reachable in the inbox branch that
+ * carried it). A tie goes to the incoming branch — the merge was asked to
+ * bring it in. A side that deleted the path wins by deleting it.
+ */
+export function resolveLastWriterWins(repo: string, remoteBranch: string): void {
+  const conflicts = unmergedPaths(repo);
+  if (!Object.keys(conflicts).length) {
+    throw new SidecarError("merge reported conflicts, but no unmerged paths were found");
+  }
+
+  const timestamp = utcTimestamp();
+  const branch = remoteBranchName(remoteBranch) || remoteBranch;
+  const manifest: LastWriterManifest = { timestamp, resolved_by: "lww", source_branch: branch, paths: [] };
+
+  for (const [conflictPath, stages] of Object.entries(conflicts).sort(([left], [right]) => left.localeCompare(right))) {
+    const ours = lastWriteAt(repo, "HEAD", conflictPath);
+    const theirs = lastWriteAt(repo, remoteBranch, conflictPath);
+    const winner = theirs >= ours ? 3 : 2;
+    const loser = winner === 3 ? 2 : 3;
+    const blob = showStage(repo, winner, conflictPath);
+    const full = path.join(repo, conflictPath);
+    if (blob) {
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, blob);
+      git(repo, ["add", "--", conflictPath]);
+    } else {
+      git(repo, ["rm", "-f", "--ignore-unmatch", "--", conflictPath], { check: false });
+      if (fs.existsSync(full) && fs.statSync(full).isFile()) fs.unlinkSync(full);
+    }
+    manifest.paths.push({
+      path: conflictPath,
+      kept: winner === 3 ? branch : "main",
+      kept_at: winner === 3 ? theirs : ours,
+      dropped: winner === 3 ? "main" : branch,
+      dropped_oid: stages[loser] ?? "",
+    });
+  }
+
+  const manifestDir = path.join(repo, ".sidecar-conflicts");
+  fs.mkdirSync(manifestDir, { recursive: true });
+  fs.writeFileSync(path.join(manifestDir, `${timestamp}-${fileLabel(branch)}.json`), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  git(repo, ["add", "-A"]);
+  if (hasUnmergedPaths(repo)) {
+    throw new SidecarError("last-writer-wins did not clear all unmerged paths");
+  }
+  console.log(`resolved ${manifest.paths.length} conflict(s) by last writer`);
+}
+
+type LastWriterManifest = {
+  timestamp: string;
+  resolved_by: "lww";
+  source_branch: string;
+  paths: Array<{ path: string; kept: string; kept_at: number; dropped: string; dropped_oid: string }>;
+};
+
+/** Unix time of the last commit on `ref` that touched the path; 0 when none did (the path was never committed there). */
+function lastWriteAt(repo: string, ref: string, filePath: string): number {
+  const result = git(repo, ["log", "-1", "--format=%ct", ref, "--", filePath], { check: false });
+  return Number(result.stdout.trim()) || 0;
+}
 
 type ConflictVersion = {
   stage: number;

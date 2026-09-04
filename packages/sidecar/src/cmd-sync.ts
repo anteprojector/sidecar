@@ -113,11 +113,11 @@ export function cmdMerge(args: string[]): number {
   if (parsed.flags.has("--llm")) {
     throw new SidecarError("--llm is reserved for a configured resolver; use --fork-files for now");
   }
-  if (!parsed.flags.has("--fork-files")) {
+  const [root, config] = loadProject();
+  if (config.resolve === "fork" && !parsed.flags.has("--fork-files")) {
     console.log("sidecar: conflicts will stop the merge; pass --fork-files to preserve all versions");
   }
 
-  const [root, config] = loadProject();
   const sidecarPath = requireSidecarCheckout(root, config);
   // Merging runs git status against the checkout; repair a stale filter
   // command first so required=true doesn't wedge it.

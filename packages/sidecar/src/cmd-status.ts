@@ -38,6 +38,7 @@ export function cmdStatus(args: string[]): number {
   statusLine("remote", config.remote, "brand");
   statusLine("main branch", config.branch);
   statusLine("inbox branch", inbox);
+  statusLine("conflicts", config.resolve === "lww" ? "last writer wins" : "fork files");
 
   if (!checkoutPresent) {
     // The state a fresh clone lands in when nothing cloned for it: say what to
