@@ -10,6 +10,6 @@ export default defineConfig({
     // seconds reports finished work as a timeout on a loaded machine.
     ...(integration ? { testTimeout: 60_000 } : {}),
     maxWorkers: 2,
-    setupFiles: ["tests/setup.ts"],
+    setupFiles: ["tests/setup.ts", ...(integration ? ["tests/integration-yield.ts"] : [])],
   },
 });

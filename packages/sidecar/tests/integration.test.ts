@@ -1957,8 +1957,7 @@ describe("sidecar CLI integration", () => {
     runSidecar(["sync"], repo, { SIDECAR_STATE_DIR: state });
 
     expect(fs.readFileSync(path.join(repo, "aliases.sh"), "utf8")).toBe("alias g=git\n");
-    // Two machines and six syncs; this one has always run close to the default.
-  }, 30000);
+  });
 
   test("standalone init forks the inbox from HEAD on a repo ahead of its origin", () => {
     const { repo, remote, state } = initStandaloneRepo();
@@ -2036,8 +2035,7 @@ describe("sidecar CLI integration", () => {
     runSidecar(["sync"], second, { SIDECAR_STATE_DIR: state });
     runSidecar(["sync"], repo, { SIDECAR_STATE_DIR: state });
     expect(fs.readFileSync(path.join(repo, "aliases.sh"), "utf8")).toBe("alias g=git\n");
-    // Two machines, two inits, and four syncs; runs close to the default.
-  }, 30000);
+  });
 
   test("deinit releases a standalone repo instead of deleting it", () => {
     const { repo, state } = initStandaloneRepo();
@@ -2363,11 +2361,13 @@ describe("sidecar peers", () => {
 
     const output = runSidecar(["init", privateRemote, "--peer", "private", "--ignored"], main);
 
-    expect(output).toContain("ignored .sidecar.private via .git/info/exclude");
+    expect(output).toContain("ignored .sidecar.private and .sidecar-rules.private via .git/info/exclude");
     expect(output).toContain("ignored private/ via .git/info/exclude");
     const excludePath = path.join(main, ".git", "info", "exclude");
     expect(fs.readFileSync(excludePath, "utf8")).toContain("/.sidecar.private\n");
+    expect(fs.readFileSync(excludePath, "utf8")).toContain("/.sidecar-rules.private\n");
     expect(fs.readFileSync(excludePath, "utf8")).toContain("/private/\n");
+    fs.writeFileSync(path.join(main, ".sidecar-rules.private"), '[[rules]]\nglob = "**"\nresolve = "fork"\n');
     // The committed ignore file and the tree carry no trace of the peer.
     expect(fs.readFileSync(path.join(main, ".gitignore"), "utf8")).toBe("/sidecar/\n");
     expect(git(main, ["status", "--porcelain"]).stdout).not.toMatch(/private/);
@@ -2376,10 +2376,12 @@ describe("sidecar peers", () => {
     runSidecar(["deinit", "--yes", "--peer", "private"], main);
 
     expect(fs.existsSync(path.join(main, ".sidecar.private"))).toBe(false);
+    expect(fs.existsSync(path.join(main, ".sidecar-rules.private"))).toBe(false);
     expect(fs.existsSync(path.join(main, "private"))).toBe(false);
     // The exclude file is shared by every working copy of the repo, and another
     // may still declare the peer, so its lines are left where they are.
     expect(fs.readFileSync(excludePath, "utf8")).toContain("/.sidecar.private\n");
+    expect(fs.readFileSync(excludePath, "utf8")).toContain("/.sidecar-rules.private\n");
     expect(fs.readFileSync(excludePath, "utf8")).toContain("/private/\n");
     expect(fs.existsSync(path.join(main, ".sidecar"))).toBe(true);
   });
