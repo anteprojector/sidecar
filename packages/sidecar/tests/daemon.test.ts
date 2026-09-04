@@ -107,16 +107,16 @@ describe("scheduleFor", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-schedule-"));
     tempRoots.push(root);
     fs.writeFileSync(path.join(root, ".sidecar"), 'remote = "git@github.com:org/repo.git"\ndebounce = "10m"\ninterval = "1h"\n', "utf8");
-    expect(scheduleFor(root, defaults)).toEqual({ debounceSeconds: 600, intervalSeconds: 3600 });
+    expect(scheduleFor(path.join(root, ".sidecar"), defaults)).toEqual({ debounceSeconds: 600, intervalSeconds: 3600 });
     fs.writeFileSync(path.join(root, ".sidecar"), 'remote = "git@github.com:org/repo.git"\ninterval = 30\n', "utf8");
-    expect(scheduleFor(root, defaults)).toEqual({ debounceSeconds: 60, intervalSeconds: 600 });
+    expect(scheduleFor(path.join(root, ".sidecar"), defaults)).toEqual({ debounceSeconds: 60, intervalSeconds: 600 });
   });
 
   test("falls back to the daemon defaults when the config is absent or unreadable", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-schedule-"));
     tempRoots.push(root);
-    expect(scheduleFor(root, defaults)).toEqual({ debounceSeconds: 60, intervalSeconds: 600 });
+    expect(scheduleFor(path.join(root, ".sidecar"), defaults)).toEqual({ debounceSeconds: 60, intervalSeconds: 600 });
     fs.writeFileSync(path.join(root, ".sidecar"), "remote = [\n", "utf8");
-    expect(scheduleFor(root, defaults)).toEqual({ debounceSeconds: 60, intervalSeconds: 600 });
+    expect(scheduleFor(path.join(root, ".sidecar"), defaults)).toEqual({ debounceSeconds: 60, intervalSeconds: 600 });
   });
 });

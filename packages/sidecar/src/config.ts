@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
 
-import { SidecarError, currentHost, currentUser, parseDuration, slug } from "./util.js";
+import { type ParsedOptions, SidecarError, currentHost, currentUser, parseDuration, realpathOr, slug } from "./util.js";
 import { gitDir, gitRaw, hasGitMetadata } from "./git.js";
 import { HEALTH_BRANCH_PREFIX, inboxPrefixCollidesWithHealth } from "./health.js";
 import { DEFAULT_REDACTION_MODE, REDACTION_MODES, type RedactionMode } from "./redaction.js";
@@ -14,6 +14,129 @@ import { DEFAULT_REDACTION_MODE, REDACTION_MODES, type RedactionMode } from "./r
 export const DEFAULT_PATH = "sidecar";
 export const DEFAULT_BRANCH = "main";
 export const DEFAULT_INBOX = "sidecar-inbox/{user}/{random}";
+const branchValidity = new Map<string, boolean>();
+
+// ---------------------------------------------------------------------------
+// Peers
+//
+// A repo can carry several sidecars at once: `.sidecar` is the default peer,
+// and every `.sidecar.<name>` beside it is another, with its own remote,
+// checkout, and settings. Peers never interact — each is registered, locked,
+// watched, and synced on its own — which is what lets them differ in the one
+// way a single file could not express: one committed for the whole team, one
+// gitignored for this machine alone.
+//
+// A dot after `sidecar` names a peer; a hyphen (`.sidecar-conflicts/`) names
+// something sidecar itself writes. The two never collide.
+// ---------------------------------------------------------------------------
+
+/** The peer `.sidecar` itself is; `--peer default` selects it. */
+export const DEFAULT_PEER = "default";
+/** How the daemon names the peer a spawned sync is for; commands read it as `--peer`. */
+export const PEER_ENV = "SIDECAR_PEER";
+const PEER_NAME = /^[a-z0-9][a-z0-9-]*$/;
+// Suffixes an editor or a cautious hand puts on a copy of `.sidecar`. A swap
+// file or a backup must never be read as a peer, so these names are refused at
+// init and passed over at discovery.
+const RESERVED_PEER_SUFFIXES = new Set(["swp", "swo", "swx", "bak", "orig", "rej", "tmp", "old", "example", "sample", "lock"]);
+
+export type Peer = {
+  root: string;
+  name: string;
+  configPath: string;
+  config: SidecarConfig;
+};
+
+export function validatePeerName(name: string): void {
+  if (name === DEFAULT_PEER) return;
+  if (!PEER_NAME.test(name)) {
+    throw new SidecarError(
+      `invalid peer name ${JSON.stringify(name)}; use lowercase letters, digits, and hyphens, starting with a letter or digit`,
+    );
+  }
+  if (RESERVED_PEER_SUFFIXES.has(name)) {
+    throw new SidecarError(`peer name ${JSON.stringify(name)} is reserved: .sidecar.${name} reads as a copy of .sidecar, not a peer`);
+  }
+}
+
+export function peerFileName(name: string): string {
+  return name === DEFAULT_PEER ? ".sidecar" : `.sidecar.${name}`;
+}
+
+export function peerConfigPath(root: string, name: string): string {
+  return path.join(root, peerFileName(name));
+}
+
+/** The peer a file name denotes, or undefined for anything that is not one. */
+export function peerNameOf(fileName: string): string | undefined {
+  if (fileName === ".sidecar") return DEFAULT_PEER;
+  if (!fileName.startsWith(".sidecar.")) return undefined;
+  const name = fileName.slice(".sidecar.".length);
+  if (name === DEFAULT_PEER || !PEER_NAME.test(name) || RESERVED_PEER_SUFFIXES.has(name)) return undefined;
+  return name;
+}
+
+/** The peers declared at `root`: the default first, the rest alphabetical. */
+export function listPeerNames(root: string): string[] {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(root);
+  } catch {
+    return [];
+  }
+  return entries
+    .map(peerNameOf)
+    .filter((name): name is string => name !== undefined)
+    .sort((left, right) => (left === DEFAULT_PEER ? -1 : right === DEFAULT_PEER ? 1 : left.localeCompare(right)));
+}
+
+export function loadPeer(root: string, name: string): Peer {
+  const configPath = peerConfigPath(root, name);
+  return { root, name, configPath, config: readConfig(configPath) };
+}
+
+/** The peer a command was pointed at: `--peer` first, the daemon's env var behind it. */
+export function selectedPeer(parsed: ParsedOptions): string | undefined {
+  return parsed.values.get("--peer") ?? process.env[PEER_ENV] ?? undefined;
+}
+
+/**
+ * The peers a command acts on, found by walking up from the cwd to the nearest
+ * directory declaring any. Named, exactly that one; unnamed, all of them —
+ * a command with no peer in mind means every sidecar this repo has.
+ */
+export function loadPeers(selection: string | undefined): Peer[] {
+  const root = findConfigRoot(process.cwd());
+  const names = listPeerNames(root);
+  if (selection) {
+    validatePeerName(selection);
+    if (!names.includes(selection)) {
+      throw new SidecarError(`no ${peerFileName(selection)} in ${root}; peers here: ${names.join(", ")}`);
+    }
+    return [loadPeer(root, selection)];
+  }
+  const peers = names.map((name) => loadPeer(root, name));
+  ensureDistinctCheckouts(peers);
+  return peers;
+}
+
+// Two peers on one checkout would each snapshot the other's inbox branch, so
+// the collision is refused before anything runs rather than found in history.
+// Compared as real paths: a symlink is the same directory under another name,
+// and the locks that keep peers apart are per peer, not per directory.
+export function ensureDistinctCheckouts(peers: Peer[]): void {
+  const owners = new Map<string, string>();
+  for (const peer of peers) {
+    const checkout = realpathOr(resolveSidecarPath(peer.root, peer.config));
+    const owner = owners.get(checkout);
+    if (owner !== undefined) {
+      throw new SidecarError(
+        `peers ${owner} and ${peer.name} both use the checkout ${checkout}; give each its own --path`,
+      );
+    }
+    owners.set(checkout, peer.name);
+  }
+}
 
 /**
  * What a merge does when two machines edited the same file. `fork` keeps
@@ -29,6 +152,8 @@ export type ResolveMode = (typeof RESOLVE_MODES)[number];
 export const DEFAULT_RESOLVE: ResolveMode = "fork";
 
 export type SidecarConfig = {
+  /** Which peer this is — derived from the file name, never written into it. */
+  peer: string;
   remote: string;
   version: number;
   path: string;
@@ -46,21 +171,17 @@ export type SidecarConfig = {
   interval?: number;
 };
 
-export function loadProject(): [string, SidecarConfig] {
-  const root = findConfigRoot(process.cwd());
-  return [root, readConfig(path.join(root, ".sidecar"))];
-}
-
 export function findConfigRoot(start: string): string {
   const root = findConfigRootOptional(start);
   if (root) return root;
   throw new SidecarError("could not find .sidecar");
 }
 
+/** The nearest directory at or above `start` declaring any peer. */
 export function findConfigRootOptional(start: string): string | undefined {
   let current = path.resolve(start);
   while (true) {
-    if (fs.existsSync(path.join(current, ".sidecar"))) return current;
+    if (listPeerNames(current).length) return current;
     const parent = path.dirname(current);
     if (parent === current) return undefined;
     current = parent;
@@ -99,7 +220,9 @@ export function readConfig(configPath: string): SidecarConfig {
   const remote = optionalStringConfigValue(configPath, values, "remote");
   if (!remote) throw new SidecarError(`${configPath} is missing remote`);
 
+  const peer = peerNameOf(path.basename(configPath)) ?? DEFAULT_PEER;
   const config = {
+    peer,
     remote,
     version: numberConfigValue(configPath, values, "version", 1),
     path: stringConfigValue(configPath, values, "path", DEFAULT_PATH),
@@ -116,6 +239,10 @@ export function readConfig(configPath: string): SidecarConfig {
   validateRemote(config.remote);
   validateBranch(config.branch);
   validateInboxTemplate(config.inbox);
+  // Standalone means the repo is the sidecar, and a repo can be only one thing.
+  if (peer !== DEFAULT_PEER && isStandalone(config)) {
+    throw new SidecarError(`${configPath}: a peer cannot be standalone (path = "."); only .sidecar can`);
+  }
   return config;
 }
 
@@ -178,8 +305,12 @@ function numberConfigValue(
 }
 
 export function validateBranch(branch: string): void {
-  const result = gitRaw(["check-ref-format", "--branch", branch], { check: false });
-  if (result.status !== 0) throw new SidecarError(`invalid branch name ${JSON.stringify(branch)}`);
+  let valid = branchValidity.get(branch);
+  if (valid === undefined) {
+    valid = gitRaw(["check-ref-format", "--branch", branch], { check: false }).status === 0;
+    branchValidity.set(branch, valid);
+  }
+  if (!valid) throw new SidecarError(`invalid branch name ${JSON.stringify(branch)}`);
 }
 
 // .sidecar is committed and shared, so a cloned repo's remote value reaches

@@ -66,6 +66,8 @@ export type HealthIdentity = {
    * it goes through the same redaction as everything else here.
    */
   root: string;
+  /** Which peer of that repo; absent for the default `.sidecar`. */
+  peer?: string;
   inbox: string;
   version: string;
 };
@@ -128,6 +130,7 @@ export function parseHealthRecord(text: string): HealthRecord | undefined {
     schema: typeof record.schema === "number" ? record.schema : 0,
     machine: typeof record.machine === "string" ? record.machine : "unknown",
     root: typeof record.root === "string" ? record.root : "",
+    peer: typeof record.peer === "string" && record.peer ? record.peer : undefined,
     inbox: typeof record.inbox === "string" ? record.inbox : "",
     version: typeof record.version === "string" ? record.version : "",
     status,

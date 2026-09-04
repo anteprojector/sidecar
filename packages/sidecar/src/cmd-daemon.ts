@@ -4,7 +4,7 @@
 import { type Role } from "./color.js";
 import { SidecarError, getValue, parseOptions } from "./util.js";
 import { INSTALL_SOURCES, type InstallSource, PACKAGE_NAME, currentExecutablePath, isProjectLocalPath, shouldUseGlobalRegistry } from "./install.js";
-import { loadProject } from "./config.js";
+import { loadPeers } from "./config.js";
 import { logSidecarEvent, readSettings, registerCurrentInstance, settingsPath, sidecarLogPath, writeSettings } from "./state.js";
 import { type DaemonServiceStatus, daemonServiceLabel, daemonServiceStatus, installDaemonService, stopDaemonService } from "./service.js";
 import { labelLine } from "./ui.js";
@@ -217,7 +217,10 @@ export function cmdRegisterInstall(args: string[]): number {
     throw new SidecarError("install registration requires a global sidecar executable");
   }
 
-  const [root, config] = loadProject();
-  registerCurrentInstance(root, config, { event: "install-register" });
+  // Every peer at this root: registration is idempotent, and the caller —
+  // init, or a package postinstall — is saying "this repo", not one peer of it.
+  for (const { root, config } of loadPeers(undefined)) {
+    registerCurrentInstance(root, config, { event: "install-register" });
+  }
   return 0;
 }

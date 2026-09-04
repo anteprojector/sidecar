@@ -80,10 +80,25 @@ sidecar init --path .
 Sidecar takes over branch management there —
 [how standalone works](docs/standalone.md).
 
+### Peers
+
+A repo can carry more than one sidecar. `.sidecar` is the default; every
+`.sidecar.<name>` beside it is another, with its own remote and checkout,
+and the two never interact — so one can be committed for the team while
+another is gitignored and yours alone:
+
+```sh
+sidecar init git@github.com:you/your-repo-private.git --peer private --ignored
+```
+
+Every command acts on all peers unless `--peer` names one —
+[how peers work](docs/sync.md#peers-several-sidecars-in-one-repo).
+
 ## Learn more
 
 - [How syncing works](docs/sync.md) — the daemon, inbox branches, conflict-free merging
 - [Standalone repos](docs/standalone.md) — a repo that is its own sidecar
+- [Peers](docs/sync.md#peers-several-sidecars-in-one-repo) — several sidecars in one repo, one committed and one ignored
 - [Redaction](docs/redaction.md) — what's stripped from pushes, reviewing it, opting out
 - [Editor search visibility](docs/editors.md) — making gitignored files searchable
 - [Global vs local installs](docs/install.md) — the newest install wins

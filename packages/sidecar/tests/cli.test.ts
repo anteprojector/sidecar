@@ -18,7 +18,13 @@ import {
   git,
   gitRaw,
   isStandalone,
+  listPeerNames,
   mergeInboxBranches,
+  ensureDistinctCheckouts,
+  peerConfigPath,
+  peerFileName,
+  peerNameOf,
+  validatePeerName,
   pidIsSidecarDaemon,
   readConfig,
   isAncestor,
@@ -39,6 +45,7 @@ import {
   ignoreEntryForSidecarPath,
   removeIgnoreEntry,
   removeZedInclusion,
+  lastWriteAt,
   resolveLastWriterWins,
   lastLines,
   parseGitHubRemote,
@@ -49,6 +56,7 @@ import { colorLevel, paint, stripColor } from "../src/color.js";
 import { hasNoRedactPragma, redactText } from "../src/redaction.js";
 
 const tempRoots: string[] = [];
+const integrationTest = process.env.SIDECAR_INTEGRATION === "1" ? test : test.skip;
 
 afterEach(() => {
   for (const root of tempRoots.splice(0)) {
@@ -153,6 +161,10 @@ describe("config", () => {
     ensureIgnoreEntry(excludePath, "sidecar");
 
     expect(fs.readFileSync(excludePath, "utf8")).toBe("/sidecar/\n");
+
+    // A second peer's entry lands on the next line, not after a blank one.
+    ensureIgnoreEntry(excludePath, "notes");
+    expect(fs.readFileSync(excludePath, "utf8")).toBe("/sidecar/\n/notes/\n");
   });
 
   test("removes migrated gitignore entries and deletes emptied files", () => {
@@ -230,20 +242,94 @@ describe("config", () => {
   });
 });
 
-describe("sync lock", () => {
+describe("peers", () => {
+  test("names peers from their config files and passes over what is not one", () => {
+    expect(peerNameOf(".sidecar")).toBe("default");
+    expect(peerNameOf(".sidecar.notes")).toBe("notes");
+    expect(peerNameOf(".sidecar.team-2")).toBe("team-2");
+    // Editor and backup copies of .sidecar are never peers.
+    expect(peerNameOf(".sidecar.swp")).toBeUndefined();
+    expect(peerNameOf(".sidecar.bak")).toBeUndefined();
+    // The default peer's name is spoken, never spelled as a file.
+    expect(peerNameOf(".sidecar.default")).toBeUndefined();
+    expect(peerNameOf(".sidecar.Notes")).toBeUndefined();
+    expect(peerNameOf(".sidecar.")).toBeUndefined();
+    // A hyphen means something sidecar writes, not a peer.
+    expect(peerNameOf(".sidecar-conflicts")).toBeUndefined();
+    expect(peerNameOf(".sidecar-test-state")).toBeUndefined();
+    expect(peerFileName("default")).toBe(".sidecar");
+    expect(peerFileName("notes")).toBe(".sidecar.notes");
+  });
+
+  test("validates the names init accepts", () => {
+    expect(() => validatePeerName("default")).not.toThrow();
+    expect(() => validatePeerName("notes")).not.toThrow();
+    expect(() => validatePeerName("Notes")).toThrow(/invalid peer name/);
+    expect(() => validatePeerName("-x")).toThrow(/invalid peer name/);
+    expect(() => validatePeerName("swp")).toThrow(/reserved/);
+  });
+
+  test("lists the default peer first and reads each peer off its file name", () => {
+    const root = tempDir();
+    const remote = 'remote = "git@github.com:org/repo.git"\n';
+    fs.writeFileSync(path.join(root, ".sidecar.zeta"), remote, "utf8");
+    fs.writeFileSync(path.join(root, ".sidecar"), remote, "utf8");
+    fs.writeFileSync(path.join(root, ".sidecar.alpha"), remote, "utf8");
+    fs.writeFileSync(path.join(root, ".sidecar.bak"), remote, "utf8");
+
+    expect(listPeerNames(root)).toEqual(["default", "alpha", "zeta"]);
+    expect(readConfig(path.join(root, ".sidecar")).peer).toBe("default");
+    expect(readConfig(path.join(root, ".sidecar.alpha")).peer).toBe("alpha");
+  });
+
+  test("two peers on one checkout are refused even through a symlink", () => {
+    const root = tempDir();
+    fs.mkdirSync(path.join(root, "sidecar"));
+    fs.symlinkSync("sidecar", path.join(root, "notes"));
+    const peerAt = (name: string, checkout: string) => ({
+      root,
+      name,
+      configPath: peerConfigPath(root, name),
+      config: { peer: name, remote: "x", version: 1, path: checkout, branch: "main", inbox: DEFAULT_INBOX } as SidecarConfig,
+    });
+
+    expect(() => ensureDistinctCheckouts([peerAt("default", "sidecar"), peerAt("other", "other")])).not.toThrow();
+    expect(() => ensureDistinctCheckouts([peerAt("default", "sidecar"), peerAt("notes", "notes")])).toThrow(
+      /peers default and notes both use the checkout/,
+    );
+  });
+
+  test("a named peer cannot be standalone", () => {
+    const root = tempDir();
+    fs.writeFileSync(path.join(root, ".sidecar.notes"), 'remote = "git@github.com:org/repo.git"\npath = "."\n', "utf8");
+
+    expect(() => readConfig(path.join(root, ".sidecar.notes"))).toThrow(/cannot be standalone/);
+  });
+
+  integrationTest("sync locks are per peer", () => {
+    const repo = initRepo();
+
+    expect(syncLockDir(repo, "notes")).not.toBe(syncLockDir(repo, "default"));
+    const release = acquireSyncLock(repo, "default");
+    expect(acquireSyncLock(repo, "notes")).toBeDefined();
+    release!();
+  });
+});
+
+describe.skipIf(process.env.SIDECAR_INTEGRATION !== "1")("sync lock", () => {
   test("is exclusive while held, released after, and stolen from dead holders", () => {
     const repo = initRepo();
 
-    const release = acquireSyncLock(repo);
+    const release = acquireSyncLock(repo, "default");
     expect(release).toBeDefined();
-    expect(acquireSyncLock(repo)).toBeUndefined();
+    expect(acquireSyncLock(repo, "default")).toBeUndefined();
     release!();
 
-    const second = acquireSyncLock(repo);
+    const second = acquireSyncLock(repo, "default");
     expect(second).toBeDefined();
     // Simulate a crashed holder: overwrite the pid with one that cannot be running.
-    fs.writeFileSync(path.join(syncLockDir(repo), "pid"), "999999999", "utf8");
-    const stolen = acquireSyncLock(repo);
+    fs.writeFileSync(path.join(syncLockDir(repo, "default"), "pid"), "999999999", "utf8");
+    const stolen = acquireSyncLock(repo, "default");
     expect(stolen).toBeDefined();
     stolen!();
   });
@@ -251,15 +337,15 @@ describe("sync lock", () => {
   test("throwing acquisition errors while held and succeeds once released", () => {
     const repo = initRepo();
 
-    const release = acquireSyncLock(repo);
+    const release = acquireSyncLock(repo, "default");
     expect(release).toBeDefined();
-    expect(() => acquireSyncLockOrThrow(repo)).toThrow(/already running/);
+    expect(() => acquireSyncLockOrThrow(repo, "default")).toThrow(/already running/);
     release!();
 
-    const acquired = acquireSyncLockOrThrow(repo);
-    expect(acquireSyncLock(repo)).toBeUndefined();
+    const acquired = acquireSyncLockOrThrow(repo, "default");
+    expect(acquireSyncLock(repo, "default")).toBeUndefined();
     acquired();
-    expect(acquireSyncLock(repo)).toBeDefined();
+    expect(acquireSyncLock(repo, "default")).toBeDefined();
   });
 });
 
@@ -298,7 +384,7 @@ describe("daemon service definition", () => {
   });
 });
 
-describe("inbox identity", () => {
+describe.skipIf(process.env.SIDECAR_INTEGRATION !== "1")("inbox identity", () => {
   test("uses a stable random checkout id", () => {
     const repo = initRepo();
     const config: SidecarConfig = {
@@ -546,7 +632,7 @@ describe("redaction", () => {
     expect(redacted).toContain("2FA_TOKEN=<TOKEN>");
   });
 
-  test("commits pragma files verbatim", () => {
+  integrationTest("commits pragma files verbatim", () => {
     const repo = initRepo();
     const content = "sidecar:no-redact\nGITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n";
     fs.writeFileSync(path.join(repo, "raw.md"), content, "utf8");
@@ -556,7 +642,7 @@ describe("redaction", () => {
     expect(git(repo, ["show", "HEAD:raw.md"]).stdout).toBe(content);
   });
 
-  test("mode 'none' configures a passthrough filter", () => {
+  integrationTest("mode 'none' configures a passthrough filter", () => {
     const repo = initRepo();
     ensureRedactionFilter(repo, "none");
     expect(git(repo, ["config", "filter.sidecar-redact.clean"]).stdout.trim()).toBe("cat");
@@ -567,7 +653,7 @@ describe("redaction", () => {
     expect(git(repo, ["show", "HEAD:notes.md"]).stdout).toContain("ghp_");
   });
 
-  test("commits redacted content while leaving the working tree untouched", () => {
+  integrationTest("commits redacted content while leaving the working tree untouched", () => {
     const repo = initRepo();
     const secret = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n";
     fs.writeFileSync(path.join(repo, "notes.md"), secret, "utf8");
@@ -579,7 +665,7 @@ describe("redaction", () => {
     expect(git(repo, ["status", "--porcelain"]).stdout.trim()).toBe("");
   });
 
-  test("clean filter passes binary files through untouched", () => {
+  integrationTest("clean filter passes binary files through untouched", () => {
     const repo = initRepo();
     const binary = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02]);
     fs.writeFileSync(path.join(repo, "image.png"), binary);
@@ -594,7 +680,7 @@ describe("redaction", () => {
     expect(git(repo, ["rev-parse", "HEAD:image.png"]).stdout.trim()).toBe(expectedBlob);
   });
 
-  test("configures the redaction filter idempotently", () => {
+  integrationTest("configures the redaction filter idempotently", () => {
     const repo = initRepo();
     expect(ensureRedactionFilter(repo)).toBe(true);
     expect(ensureRedactionFilter(repo)).toBe(false);
@@ -604,7 +690,7 @@ describe("redaction", () => {
     expect(git(repo, ["config", "filter.sidecar-redact.required"]).stdout.trim()).toBe("true");
   });
 
-  test("repairs a lost attributes file instead of early-exiting on config alone", () => {
+  integrationTest("repairs a lost attributes file instead of early-exiting on config alone", () => {
     const repo = initRepo();
     ensureRedactionFilter(repo);
     fs.rmSync(path.join(repo, ".git", "info", "attributes"));
@@ -614,7 +700,7 @@ describe("redaction", () => {
     expect(attributes).toContain("filter=sidecar-redact");
   });
 
-  test("a mode change renormalizes already-committed files", () => {
+  integrationTest("a mode change renormalizes already-committed files", () => {
     const repo = initRepo();
     const secret = "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n";
     fs.writeFileSync(path.join(repo, "notes.md"), secret, "utf8");
@@ -627,7 +713,7 @@ describe("redaction", () => {
     expect(fs.readFileSync(path.join(repo, "notes.md"), "utf8")).toBe(secret);
   });
 
-  test("a broken filter command fails the snapshot instead of committing raw content", () => {
+  integrationTest("a broken filter command fails the snapshot instead of committing raw content", () => {
     const repo = initRepo();
     ensureRedactionFilter(repo);
     fs.writeFileSync(path.join(repo, "notes.md"), "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz1234567890\n", "utf8");
@@ -638,7 +724,7 @@ describe("redaction", () => {
   });
 });
 
-describe("snapshot", () => {
+describe.skipIf(process.env.SIDECAR_INTEGRATION !== "1")("snapshot", () => {
   test("does not include the absolute main repo path in commit messages", () => {
     const main = initRepo();
     const sidecar = initRepo();
@@ -653,7 +739,7 @@ describe("snapshot", () => {
   });
 });
 
-describe("merge ancestry", () => {
+describe.skipIf(process.env.SIDECAR_INTEGRATION !== "1")("merge ancestry", () => {
   test("keeps inbox branches but skips tips already contained in main", () => {
     const repo = initRepo();
     fs.writeFileSync(path.join(repo, "notes.md"), "base\n", "utf8");
@@ -737,7 +823,7 @@ describe("isStandalone", () => {
   });
 });
 
-describe("main branch reconciliation", () => {
+describe.skipIf(process.env.SIDECAR_INTEGRATION !== "1")("main branch reconciliation", () => {
   const config: SidecarConfig = {
     remote: "x",
     version: 1,
@@ -808,8 +894,7 @@ describe("main branch reconciliation", () => {
 
     const loser = tempDir();
     gitRaw(["clone", remote, loser]);
-    git(loser, ["config", "user.name", "Test User"]);
-    git(loser, ["config", "user.email", "test@example.com"]);
+    configureTestIdentity(loser);
 
     fs.writeFileSync(path.join(winner, "notes.md"), "winner\n", "utf8");
     git(winner, ["commit", "-am", "winner"]);
@@ -840,7 +925,7 @@ describe("conflict forking", () => {
     expect(fileLabel("sidecar-inbox/zack/random")).toBe("sidecar-inbox-zack-random");
   });
 
-  test("manifest records metadata without duplicating file contents", () => {
+  integrationTest("manifest records metadata without duplicating file contents", () => {
     const repo = initRepo();
     fs.mkdirSync(path.join(repo, "notes"));
     fs.writeFileSync(path.join(repo, "notes", "plan.md"), "base\n", "utf8");
@@ -866,7 +951,7 @@ describe("conflict forking", () => {
   });
 });
 
-describe("last-writer-wins conflicts", () => {
+describe.skipIf(process.env.SIDECAR_INTEGRATION !== "1")("last-writer-wins conflicts", () => {
   test("checks out the winning Git entry without following symlinks and records the canonical branch", () => {
     const repo = initRepo();
     git(repo, ["branch", "-m", "trunk"]);
@@ -900,6 +985,40 @@ describe("last-writer-wins conflicts", () => {
       kept: "sidecar-inbox/test/lww",
       dropped: "trunk",
     });
+  });
+
+  test("reads the change time a snapshot recorded, and the commit time where none was", () => {
+    const repo = initRepo();
+    const base = 1_700_000_000;
+    fs.writeFileSync(path.join(repo, "notes.md"), "base\n", "utf8");
+    fs.writeFileSync(path.join(repo, "other.md"), "base\n", "utf8");
+    commitAt(repo, "base", base);
+    git(repo, ["switch", "-c", "sidecar-inbox/test/lww"]);
+
+    // Written early, snapshotted late: the debounce window between them must not count.
+    fs.writeFileSync(path.join(repo, "notes.md"), "inbox\n", "utf8");
+    fs.utimesSync(path.join(repo, "notes.md"), base + 10, base + 10);
+    fs.rmSync(path.join(repo, "other.md"));
+    withCommitTime(base + 100, () => snapshot(repo, repo, "sidecar-inbox/test/lww", "snapshot", "none"));
+
+    expect(lastWriteAt(repo, "HEAD", "notes.md")).toBe(base + 10);
+    // A deletion has no file to ask, so its commit stands in.
+    expect(lastWriteAt(repo, "HEAD", "other.md")).toBe(base + 100);
+    expect(lastWriteAt(repo, "HEAD", "never.md")).toBe(0);
+
+    // Main wrote the same file later than the inbox did, but committed earlier
+    // than the inbox's snapshot; the write decides, so main keeps it.
+    git(repo, ["switch", "main"]);
+    fs.writeFileSync(path.join(repo, "notes.md"), "main\n", "utf8");
+    commitAt(repo, "main", base + 50);
+    git(repo, ["merge", "--no-ff", "sidecar-inbox/test/lww"], { check: false });
+
+    resolveLastWriterWins(repo, "main", "sidecar-inbox/test/lww");
+
+    expect(fs.readFileSync(path.join(repo, "notes.md"), "utf8")).toBe("main\n");
+    const manifestDir = path.join(repo, ".sidecar-conflicts");
+    const manifest = JSON.parse(fs.readFileSync(path.join(manifestDir, fs.readdirSync(manifestDir)[0]), "utf8"));
+    expect(manifest.paths[0]).toMatchObject({ path: "notes.md", kept: "main", kept_at: base + 50 });
   });
 });
 
@@ -1053,10 +1172,41 @@ function tempDir(): string {
   return root;
 }
 
+/** Runs `fn` with git's commit clock pinned to `unixSeconds`. */
+function withCommitTime<T>(unixSeconds: number, fn: () => T): T {
+  const date = `@${unixSeconds} +0000`;
+  const saved = { author: process.env.GIT_AUTHOR_DATE, committer: process.env.GIT_COMMITTER_DATE };
+  process.env.GIT_AUTHOR_DATE = date;
+  process.env.GIT_COMMITTER_DATE = date;
+  try {
+    return fn();
+  } finally {
+    if (saved.author === undefined) delete process.env.GIT_AUTHOR_DATE;
+    else process.env.GIT_AUTHOR_DATE = saved.author;
+    if (saved.committer === undefined) delete process.env.GIT_COMMITTER_DATE;
+    else process.env.GIT_COMMITTER_DATE = saved.committer;
+  }
+}
+
+/** Commits everything with a fixed commit time, and no written trailers — the shape of a commit made by hand. */
+function commitAt(repo: string, message: string, unixSeconds: number): void {
+  withCommitTime(unixSeconds, () => {
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-m", message]);
+  });
+}
+
 function initRepo(): string {
   const repo = tempDir();
   gitRaw(["init", "-b", "main", repo]);
-  git(repo, ["config", "user.name", "Test User"]);
-  git(repo, ["config", "user.email", "test@example.com"]);
+  configureTestIdentity(repo);
   return repo;
+}
+
+function configureTestIdentity(repo: string): void {
+  fs.appendFileSync(
+    path.join(repo, ".git", "config"),
+    "\n[user]\n\tname = Test User\n\temail = test@example.com\n",
+    "utf8",
+  );
 }

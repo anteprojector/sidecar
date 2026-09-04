@@ -15,7 +15,7 @@ import {
   nowIso,
   parseOptions,
 } from "./util.js";
-import { git, gitRaw, gitToplevel, gitToplevelOptional } from "./git.js";
+import { git, gitExcludePath, gitRaw, gitToplevel, gitToplevelOptional, isGitIgnored, isGitTracked } from "./git.js";
 import {
   GLOBAL_EXEC_ENV,
   PACKAGE_NAME,
@@ -25,35 +25,46 @@ import {
   globalSidecarVersion,
   packageVersion,
   projectDependsOnSidecar,
+  shouldUseGlobalRegistry,
 } from "./install.js";
 import {
   DEFAULT_BRANCH,
   DEFAULT_INBOX,
   DEFAULT_PATH,
+  DEFAULT_PEER,
   DEFAULT_RESOLVE,
+  type Peer,
   type SidecarConfig,
+  ensureDistinctCheckouts,
   findConfigRootOptional,
   isStandalone,
   isStandalonePath,
-  loadProject,
+  listPeerNames,
+  loadPeer,
+  loadPeers,
   pathIsRepoRoot,
+  peerConfigPath,
+  peerFileName,
   readConfig,
   durationConfigValue,
   redactionModeConfigValue,
   resolveModeConfigValue,
+  selectedPeer,
   validateBranch,
   validateInboxTemplate,
+  validatePeerName,
   validateRemote,
   writeConfig,
 } from "./config.js";
 import { readSettings, registerCurrentInstance, unregisterInstance, withSyncLock, writeSettings } from "./state.js";
 import { SKIP_SERVICE_ENV, daemonServiceStatus } from "./service.js";
 import { cloneIfMissing, cloneOrUpdate, removeRedactionFilter, syncProject } from "./sync.js";
-import { promptLine, promptYesNo, promptYesNoDefaultNo } from "./ui.js";
+import { announcePeer, promptLine, promptYesNo, promptYesNoDefaultNo } from "./ui.js";
 import { DEFAULT_REDACTION_MODE, REDACTION_MODES, type RedactionMode } from "./redaction.js";
 
 export function cmdDeinit(args: string[]): number {
-  if (args.length) throw new SidecarError("usage: sidecar deinit");
+  const parsed = parseOptions(args, { boolean: new Set(), value: new Set(["--peer"]) });
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar deinit [--peer name]");
 
   // The config is what deinit removes, so it locates the repo the way every
   // other command does — by walking up for .sidecar. Falling back to git covers
@@ -65,7 +76,17 @@ export function cmdDeinit(args: string[]): number {
     return 0;
   }
 
-  const configPath = path.join(root, ".sidecar");
+  // Removal is one peer at a time. With several declared and none named,
+  // guessing would delete a checkout the user may not have meant.
+  const names = listPeerNames(root);
+  const requested = parsed.values.get("--peer");
+  if (requested !== undefined) validatePeerName(requested);
+  if (requested === undefined && names.length > 1) {
+    throw new SidecarError(`this repo has several sidecar peers (${names.join(", ")}); name the one to remove with --peer`);
+  }
+  const name = requested ?? names[0] ?? DEFAULT_PEER;
+  const configFile = peerFileName(name);
+  const configPath = peerConfigPath(root, name);
   // Steps deinit knows it skipped. Anything here means the repo still carries
   // sidecar traces, and the user should hear that once, plainly, at the end —
   // not have to piece it together from scattered warnings.
@@ -78,7 +99,7 @@ export function cmdDeinit(args: string[]): number {
       leftovers.push(`could not read ${configPath}, so its checkout and ignore entries were left in place`);
     }
   } else {
-    leftovers.push("no .sidecar config found; a leftover checkout or ignore entries may remain");
+    leftovers.push(`no ${configFile} config found; a leftover checkout or ignore entries may remain`);
   }
 
   // Standalone has no checkout to delete, so the git-level wiring that a
@@ -86,11 +107,12 @@ export function cmdDeinit(args: string[]): number {
   if (config && isStandalone(config)) {
     const leftover = releaseStandaloneCheckout(root, config);
     if (leftover) leftovers.push(leftover);
-  } else if (!config) {
+  } else if (!config && name === DEFAULT_PEER) {
     // Without a config, nested and standalone are indistinguishable — and in
     // standalone the redaction filter is wired into this repo with
     // required=true, where leaving it to go stale fails every future
-    // `git add`. Removing it is a no-op in a repo that never had it.
+    // `git add`. Removing it is a no-op in a repo that never had it. Only
+    // `.sidecar` can be standalone, so only its removal has to ask.
     removeRedactionFilter(root);
   }
 
@@ -102,13 +124,17 @@ export function cmdDeinit(args: string[]): number {
     }
     const ignoreEntry = ignoreEntryForSidecarPath(root, config.path);
     if (ignoreEntry) {
-      removeIgnoreEntry(path.join(root, ".gitignore"), ignoreEntry);
+      // Wherever init put it: the committed .gitignore, or the repo's private
+      // exclude file for a peer that was itself ignored.
+      for (const ignoreFile of ignoreFiles(root)) removeIgnoreEntry(ignoreFile, ignoreEntry);
       removeZedInclusion(root, ignoreEntry);
     }
   }
-  unregisterInstance(root);
+  const exclude = gitExcludePath(root);
+  if (exclude) removeIgnoreLine(exclude, `/${configFile}`);
+  unregisterInstance(configPath);
 
-  console.log(`removed sidecar from ${paint("repo", root)}`);
+  console.log(`removed sidecar from ${paint("repo", root)}${name === DEFAULT_PEER ? "" : ` (peer ${paint("brand", name)})`}`);
   if (leftovers.length) {
     for (const leftover of leftovers) {
       console.error(`sidecar: warning: ${leftover}`);
@@ -164,19 +190,70 @@ function removeCheckout(checkoutPath: string): void {
 
 export function cmdInit(args: string[]): number {
   const parsed = parseOptions(args, {
-    boolean: new Set(["--no-clone", "--no-bootstrap-main", "--local-install"]),
-    value: new Set(["--path", "--branch", "--inbox", "--redaction", "--resolve", "--debounce", "--interval"]),
+    boolean: new Set(["--no-clone", "--no-bootstrap-main", "--local-install", "--ignored"]),
+    value: new Set(["--path", "--branch", "--inbox", "--redaction", "--resolve", "--debounce", "--interval", "--peer"]),
   });
   if (parsed.positional.length > 1) {
     throw new SidecarError(
-      "usage: sidecar init [remote] [--path sidecar] [--branch main] [--inbox template] [--redaction mode] [--resolve fork|lww] [--debounce 10m] [--interval 1h]",
+      "usage: sidecar init [remote] [--peer name] [--path sidecar] [--branch main] [--inbox template] [--redaction mode] [--resolve fork|lww] [--debounce 10m] [--interval 1h] [--ignored]",
     );
   }
 
   const remote = parsed.positional[0];
-  let existingRoot = remote ? undefined : findConfigRootOptional(process.cwd());
-  const root = existingRoot ?? initRoot(remote, parsed);
-  const configPath = path.join(root, ".sidecar");
+  const requestedPeer = parsed.values.get("--peer");
+  if (requestedPeer !== undefined) validatePeerName(requestedPeer);
+  const root = (remote ? undefined : findConfigRootOptional(process.cwd())) ?? initRoot(remote, parsed);
+
+  // Which peers this init is about. A remote or a name means exactly one. A
+  // bare `sidecar init` means every peer the repo already declares — a fresh
+  // clone wants all of them — or, when it declares none, the default peer,
+  // created through the prompts.
+  const declared = listPeerNames(root);
+  const names = remote || requestedPeer !== undefined ? [requestedPeer ?? DEFAULT_PEER] : declared.length ? declared : [DEFAULT_PEER];
+  const peers = names.map((name) => configurePeer(root, name, remote, parsed));
+
+  offerLocalInstall(root, peers.some((peer) => isStandalone(peer.config)), parsed.flags.has("--local-install"));
+  for (const peer of peers) {
+    if (peers.length > 1) announcePeer(peer, peers);
+    if (!parsed.flags.has("--no-clone")) {
+      cloneOrUpdate(root, peer.config, !parsed.flags.has("--no-bootstrap-main"));
+    }
+    registerCurrentInstance(root, peer.config, { event: "init" });
+  }
+  const globalSidecar = ensureGlobalSidecar();
+  if (globalSidecar) {
+    // Only a project-local run needs the global to register for it: a run
+    // that owns the registry already wrote every peer above, and a global
+    // from before peers would rewrite that to `.sidecar` alone.
+    if (!shouldUseGlobalRegistry()) {
+      registerInstallWithGlobalSidecar(globalSidecar, root);
+      warnIfGlobalPredatesPeers(globalSidecar, peers);
+    }
+    ensureDaemonSetup(globalSidecar);
+  }
+  // Standalone init just changed the tree it syncs — .sidecar at minimum —
+  // and the daemon's watcher only sees changes made after it attaches, so
+  // nothing would push this until the interval tick minutes from now. Sync
+  // before returning; "skip" because a daemon that beat us to the lock is
+  // already doing this exact work.
+  for (const { config } of peers) {
+    if (isStandalone(config) && !parsed.flags.has("--no-clone")) {
+      const synced = withSyncLock(root, config.peer, "skip", () => {
+        syncProject(root, config, { snapshot: true, remote: true });
+      });
+      if (synced) registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
+    }
+  }
+  return 0;
+}
+
+/**
+ * One peer's config, written or reused, with the host repo wired to ignore its
+ * checkout. Everything up to the clone: the decisions, none of the network.
+ */
+function configurePeer(root: string, name: string, remote: string | undefined, parsed: ParsedOptions): Peer {
+  const configPath = peerConfigPath(root, name);
+  let reuse = !remote && fs.existsSync(configPath);
   if (remote && fs.existsSync(configPath)) {
     const existing = readConfig(configPath);
     // Omitted flags fall back to the EXISTING values, not the defaults — a
@@ -191,48 +268,58 @@ export function cmdInit(args: string[]): number {
       existing.resolve === getValue(parsed, "--resolve", existing.resolve) &&
       existing.debounce === durationConfigValue(parsed.values.get("--debounce") ?? existing.debounce, "--debounce") &&
       existing.interval === durationConfigValue(parsed.values.get("--interval") ?? existing.interval, "--interval");
-    if (unchanged || !promptOverwriteConfig(configPath, existing.remote, remote)) {
-      existingRoot = root;
+    reuse = unchanged || !promptOverwriteConfig(configPath, existing.remote, remote);
+  }
+  const config = reuse ? readConfig(configPath) : buildInitConfig(root, name, remote, parsed);
+  // Both refusals come before the file is written: a standalone .sidecar is
+  // part of the tree it syncs, and a tracked one overwritten and then left
+  // tracked would be worse than untouched.
+  if (parsed.flags.has("--ignored")) {
+    if (isStandalone(config)) {
+      throw new SidecarError("--ignored cannot apply to a standalone sidecar: its .sidecar is part of the tree it syncs");
+    }
+    if (isGitTracked(root, peerFileName(name))) {
+      throw new SidecarError(`${peerFileName(name)} is tracked by git; \`git rm --cached ${peerFileName(name)}\` before ignoring it`);
     }
   }
-  const config = existingRoot ? readConfig(configPath) : buildInitConfig(root, remote, parsed);
-  if (!existingRoot) {
+  if (!reuse) {
     validateRemote(config.remote);
     validateBranch(config.branch);
     validateInboxTemplate(config.inbox);
+    // Against the peers already declared here: a second peer on the same
+    // checkout is refused before its file exists, not found by the next sync.
+    ensureDistinctCheckouts([
+      ...listPeerNames(root).filter((other) => other !== name).map((other) => loadPeer(root, other)),
+      { root, name, configPath, config },
+    ]);
     writeConfig(configPath, config);
   }
-  console.log(`${existingRoot ? "using" : "wrote"} ${paint("brand", configPath)}`);
+  console.log(`${reuse ? "using" : "wrote"} ${paint("brand", configPath)}`);
   if (isStandalone(config)) {
     // Nothing to ignore or make searchable: the repo is the sidecar, so its
     // files are already tracked and already visible to every tool.
     console.log(`standalone: ${paint("repo", root)} is the sidecar`);
   } else {
+    if (parsed.flags.has("--ignored")) excludePeerFile(root, name);
     printCheckoutVisibility(root, config);
   }
-  offerLocalInstall(root, config, parsed.flags.has("--local-install"));
+  return { root, name, configPath, config };
+}
 
-  if (!parsed.flags.has("--no-clone")) {
-    cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
+/**
+ * Keeps a peer's config out of the committed tree: `.git/info/exclude` is
+ * git's ignore file that never leaves the machine. A peer that is private to
+ * this clone is declared this way — `sidecar init <remote> --peer notes
+ * --ignored` — and every machine that wants it runs the same init.
+ */
+function excludePeerFile(root: string, name: string): void {
+  const configFile = peerFileName(name);
+  const exclude = gitExcludePath(root);
+  if (!exclude) {
+    throw new SidecarError(`--ignored needs a git exclude file, and ${root} has none; ignore ${configFile} in your own VCS config`);
   }
-  registerCurrentInstance(root, config, { event: "init" });
-  const globalSidecar = ensureGlobalSidecar();
-  if (globalSidecar) {
-    registerInstallWithGlobalSidecar(globalSidecar, root);
-    ensureDaemonSetup(globalSidecar);
-  }
-  // Standalone init just changed the tree it syncs — .sidecar at minimum —
-  // and the daemon's watcher only sees changes made after it attaches, so
-  // nothing would push this until the interval tick minutes from now. Sync
-  // before returning; "skip" because a daemon that beat us to the lock is
-  // already doing this exact work.
-  if (isStandalone(config) && !parsed.flags.has("--no-clone")) {
-    const synced = withSyncLock(root, "skip", () => {
-      syncProject(root, config, { snapshot: true, remote: true });
-    });
-    if (synced) registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
-  }
-  return 0;
+  ensureIgnoreLine(exclude, `/${configFile}`);
+  console.log(`ignored ${configFile} via .git/info/exclude`);
 }
 
 /**
@@ -261,17 +348,24 @@ function initRoot(remote: string | undefined, parsed: ParsedOptions): string {
 // Question order matters: the checkout path decides whether this is a
 // standalone sidecar, and that in turn changes the default answer to both of
 // the questions after it.
-function buildInitConfig(root: string, remote: string | undefined, parsed: ParsedOptions): SidecarConfig {
+function buildInitConfig(root: string, name: string, remote: string | undefined, parsed: ParsedOptions): SidecarConfig {
+  // A named peer's checkout is named after it by default: `--peer research`
+  // lives in `research/`, beside the default peer's `sidecar/`.
+  const defaultPath = name === DEFAULT_PEER ? DEFAULT_PATH : name;
   const rawPath = parsed.values.has("--path")
-    ? getValue(parsed, "--path", DEFAULT_PATH)
-    : promptSidecarPath(root);
+    ? getValue(parsed, "--path", defaultPath)
+    : promptSidecarPath(root, name, defaultPath);
   // `--path $PWD` and `--path foo/..` mean the same thing as `--path .`;
   // store them as "." so standalone detection — a string check on the config
   // — can't be dodged by spelling the root differently and land the repo in
   // the nested code path, pointed at itself with a second remote.
   const sidecarPath = pathIsRepoRoot(root, rawPath) ? "." : rawPath;
   const standalone = isStandalonePath(sidecarPath);
+  if (standalone && name !== DEFAULT_PEER) {
+    throw new SidecarError(`a peer cannot be standalone: only .sidecar can point at the repo itself, not ${peerFileName(name)}`);
+  }
   return {
+    peer: name,
     // A standalone sidecar syncs a repo to its own remote, so origin is the
     // answer — prompting for a URL (or offering to create a second repo with
     // gh) would only invite a wrong one.
@@ -291,14 +385,22 @@ function buildInitConfig(root: string, remote: string | undefined, parsed: Parse
   };
 }
 
+/**
+ * Ignores the checkout where the peer's own config is ignored. A committed
+ * peer's checkout goes in the committed .gitignore, so every clone has it. A
+ * peer this clone keeps to itself — its config untracked and ignored — must
+ * leave no trace in the tree, so its checkout goes in the private exclude file.
+ */
 function printCheckoutVisibility(root: string, config: SidecarConfig): void {
-  const ignoreEntry = ensureSidecarIgnored(root, config.path);
+  const ignoreEntry = ignoreEntryForSidecarPath(root, config.path);
   if (!ignoreEntry) {
     console.log(`sidecar path outside repo; not updating .gitignore`);
     return;
   }
+  const exclude = isGitIgnored(root, peerFileName(config.peer)) ? gitExcludePath(root) : undefined;
+  ensureIgnoreEntry(exclude ?? path.join(root, ".gitignore"), ignoreEntry);
   const name = ignoreEntry.replace(/\/+$/, "");
-  console.log(`ignored ${name}/ via .gitignore`);
+  console.log(`ignored ${name}/ via ${exclude ? ".git/info/exclude" : ".gitignore"}`);
   if (hasZedInclusion(root, ignoreEntry)) {
     console.log(`included ${name}/ in Zed file search via .zed/settings.json`);
   } else if (promptYesNo(`include ${name}/ in Zed file search via .zed/settings.json?`)) {
@@ -317,7 +419,7 @@ function printCheckoutVisibility(root: string, config: SidecarConfig): void {
  * creates one, because a repo without an install step shouldn't gain one for
  * our sake. `--local-install` says yes non-interactively.
  */
-function offerLocalInstall(root: string, config: SidecarConfig, forced: boolean): void {
+function offerLocalInstall(root: string, standalone: boolean, forced: boolean): void {
   const manifestPath = path.join(root, "package.json");
   if (!fs.existsSync(manifestPath)) {
     if (forced) throw new SidecarError("--local-install requires a package.json");
@@ -379,7 +481,7 @@ function offerLocalInstall(root: string, config: SidecarConfig, forced: boolean)
   // In a standalone repo everything untracked gets snapshotted and pushed,
   // so an install that materializes node_modules without an ignore entry
   // would sync the whole dependency tree.
-  if (isStandalone(config) && git(root, ["check-ignore", "-q", "node_modules"], { check: false }).status !== 0) {
+  if (standalone && git(root, ["check-ignore", "-q", "node_modules"], { check: false }).status !== 0) {
     console.error(
       "sidecar: warning: node_modules is not gitignored; add it before installing or the next sync will snapshot the whole dependency tree",
     );
@@ -459,6 +561,18 @@ function ensureGlobalSidecar(): string | undefined {
   return globalSidecar;
 }
 
+// A global older than this CLI registers only `.sidecar`, so its daemon
+// syncs only that peer until it is updated. Say so rather than let the other
+// peers sit silently unsynced.
+function warnIfGlobalPredatesPeers(executable: string, peers: Peer[]): void {
+  if (!peers.some((peer) => peer.name !== DEFAULT_PEER)) return;
+  const version = globalSidecarVersion(executable);
+  if (version && compareVersions(version, packageVersion()) >= 0) return;
+  console.error(
+    `sidecar: warning: the global sidecar (${version ? `v${version}` : "unknown version"}) predates peers; its daemon syncs only .sidecar until it is updated`,
+  );
+}
+
 function registerInstallWithGlobalSidecar(executable: string, root: string): void {
   const result = spawnSync(executable, ["register-install"], {
     cwd: root,
@@ -490,36 +604,49 @@ function installGlobalSidecar(): void {
 export function cmdClone(args: string[]): number {
   const parsed = parseOptions(args, {
     boolean: new Set(["--no-bootstrap-main", "--if-missing"]),
-    value: new Set(),
+    value: new Set(["--peer"]),
   });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar clone [--if-missing] [--no-bootstrap-main]");
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar clone [--if-missing] [--no-bootstrap-main] [--peer name]");
 
-  const [root, config] = loadProject();
-  if (parsed.flags.has("--if-missing")) {
-    if (!cloneIfMissing(root, config, !parsed.flags.has("--no-bootstrap-main"))) return 0;
-  } else {
-    cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
+  const peers = loadPeers(selectedPeer(parsed));
+  for (const peer of peers) {
+    announcePeer(peer, peers);
+    const { root, config } = peer;
+    if (parsed.flags.has("--if-missing")) {
+      if (!cloneIfMissing(root, config, !parsed.flags.has("--no-bootstrap-main"))) continue;
+    } else {
+      cloneOrUpdate(root, config, !parsed.flags.has("--no-bootstrap-main"));
+    }
+    registerCurrentInstance(root, config, { event: "clone" });
   }
-  registerCurrentInstance(root, config, { event: "clone" });
   return 0;
 }
 
 // Standalone is reachable but never accidental: you have to type "." and then
 // confirm it. Scripts say the same thing with `--path .`, which skips both.
-function promptSidecarPath(root: string): string {
-  if (!process.stdin.isTTY) return DEFAULT_PATH;
+// A named peer is never offered it: only `.sidecar` can be the repo itself.
+function promptSidecarPath(root: string, name: string, defaultPath: string): string {
+  if (!process.stdin.isTTY) return defaultPath;
 
-  console.log(`sidecar keeps its files in a directory inside this repo — "." makes this repo itself the sidecar.`);
+  if (name === DEFAULT_PEER) {
+    console.log(`sidecar keeps its files in a directory inside this repo — "." makes this repo itself the sidecar.`);
+  } else {
+    console.log(`peer ${paint("brand", name)} keeps its files in a directory inside this repo.`);
+  }
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const answer = promptLine(`sidecar path ${paint("quiet", `[${DEFAULT_PATH}]`)}: `) || DEFAULT_PATH;
+    const answer = promptLine(`sidecar path ${paint("quiet", `[${defaultPath}]`)}: `) || defaultPath;
     if (!isStandalonePath(answer)) return answer;
+    if (name !== DEFAULT_PEER) {
+      console.log(`a peer cannot be the repo itself; only .sidecar can`);
+      continue;
+    }
     console.log(`standalone mode makes ${paint("repo", root)} itself the sidecar:`);
     console.log("  sidecar owns this repo's branches, commits every change, and syncs it to its own remote.");
     console.log("  your own commits still work; leave branch management to sidecar.");
     if (promptYesNoDefaultNo("use standalone mode?")) return ".";
   }
-  console.log(`keeping the default (${DEFAULT_PATH})`);
-  return DEFAULT_PATH;
+  console.log(`keeping the default (${defaultPath})`);
+  return defaultPath;
 }
 
 function standaloneRemote(root: string): string {
@@ -641,27 +768,35 @@ function promptOverwriteConfig(configPath: string, existingRemote: string, newRe
   return answer === "y" || answer === "yes";
 }
 
-export function ensureSidecarIgnored(root: string, sidecarPath: string): string | undefined {
-  const entry = ignoreEntryForSidecarPath(root, sidecarPath);
-  if (!entry) return undefined;
-  ensureIgnoreEntry(path.join(root, ".gitignore"), entry);
-  return entry;
+/** The ignore files init may have written a checkout into: .gitignore, and the private exclude where there is one. */
+function ignoreFiles(root: string): string[] {
+  const exclude = gitExcludePath(root);
+  return exclude ? [path.join(root, ".gitignore"), exclude] : [path.join(root, ".gitignore")];
 }
 
+/** A checkout's ignore entry: root-anchored, directory-only. */
 export function ensureIgnoreEntry(ignorePath: string, sidecarPath: string): void {
-  const stripped = sidecarPath.replace(/^\/+|\/+$/g, "");
-  const entry = `/${stripped}/`;
-  const lines = fs.existsSync(ignorePath) ? fs.readFileSync(ignorePath, "utf8").split(/\r?\n/) : [];
-  if (!lines.includes(entry)) {
-    lines.push(entry);
-    fs.writeFileSync(ignorePath, `${lines.join("\n").replace(/\s+$/g, "")}\n`, "utf8");
-  }
+  ensureIgnoreLine(ignorePath, `/${sidecarPath.replace(/^\/+|\/+$/g, "")}/`);
 }
 
 export function removeIgnoreEntry(ignorePath: string, sidecarPath: string): void {
+  removeIgnoreLine(ignorePath, `/${sidecarPath.replace(/^\/+|\/+$/g, "")}/`);
+}
+
+export function ensureIgnoreLine(ignorePath: string, entry: string): void {
+  const lines = fs.existsSync(ignorePath) ? fs.readFileSync(ignorePath, "utf8").split(/\r?\n/) : [];
+  if (lines.includes(entry)) return;
+  // The final newline splits into an empty last element; appending after it
+  // would leave a blank line between entries.
+  while (lines.length && lines[lines.length - 1] === "") lines.pop();
+  lines.push(entry);
+  fs.mkdirSync(path.dirname(ignorePath), { recursive: true });
+  fs.writeFileSync(ignorePath, `${lines.join("\n").replace(/\s+$/g, "")}\n`, "utf8");
+}
+
+/** Drops one exact line, and the file with it when nothing else is left. */
+export function removeIgnoreLine(ignorePath: string, entry: string): void {
   if (!fs.existsSync(ignorePath)) return;
-  const stripped = sidecarPath.replace(/^\/+|\/+$/g, "");
-  const entry = `/${stripped}/`;
   const lines = fs.readFileSync(ignorePath, "utf8").split(/\r?\n/);
   const kept = lines.filter((line) => line !== entry);
   if (kept.length === lines.length) return;

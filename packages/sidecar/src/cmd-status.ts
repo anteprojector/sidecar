@@ -6,11 +6,21 @@ import { type Role, paint } from "./color.js";
 import { SidecarError, getValue, parseOptions } from "./util.js";
 import { branchExists, fetch, git, hasGitMetadata, isAncestor, remoteRefExists } from "./git.js";
 import { PACKAGE_SPEC, findGlobalSidecarExecutable, shouldUseGlobalRegistry } from "./install.js";
-import { type SidecarConfig, expandInbox, isStandalone, loadProject, requireSidecarCheckout, resolveSidecarPath } from "./config.js";
-import { instancesPath, listInstanceStatuses, readInstances, readSettings, sidecarLogPath } from "./state.js";
+import {
+  DEFAULT_PEER,
+  type Peer,
+  type SidecarConfig,
+  expandInbox,
+  isStandalone,
+  loadPeers,
+  requireSidecarCheckout,
+  resolveSidecarPath,
+  selectedPeer,
+} from "./config.js";
+import { instancePeer, instancesPath, listInstanceStatuses, readInstances, readSettings, sidecarLogPath } from "./state.js";
 import { daemonServiceStatus } from "./service.js";
 import { pendingInboxBranches, readFleetHealth } from "./sync.js";
-import { formatRelativeTime, formatTimestampPair, labelLine } from "./ui.js";
+import { announcePeer, formatRelativeTime, formatTimestampPair, labelLine } from "./ui.js";
 import { type HealthRecord, type HealthState, summarizeHealthStates } from "./health.js";
 
 // "pending inbox:" is the longest label; every value starts one space past it.
@@ -21,11 +31,23 @@ function statusLine(label: string, value: string, role?: Role): void {
 }
 
 export function cmdStatus(args: string[]): number {
-  const parsed = parseOptions(args, { boolean: new Set(["--json"]), value: new Set() });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar status [--json]");
-  if (parsed.flags.has("--json")) return cmdStatusJson();
+  const parsed = parseOptions(args, { boolean: new Set(["--json"]), value: new Set(["--peer"]) });
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar status [--json] [--peer name]");
+  const peers = loadPeers(selectedPeer(parsed));
+  if (parsed.flags.has("--json")) {
+    // Always an array, one object per peer: a reader written against a
+    // single-sidecar repo keeps working the day a second peer is added.
+    console.log(JSON.stringify(peers.map(statusPayload), null, 2));
+    return 0;
+  }
+  for (const peer of peers) {
+    announcePeer(peer, peers);
+    printPeerStatus(peer);
+  }
+  return 0;
+}
 
-  const [root, config] = loadProject();
+function printPeerStatus({ root, config, configPath }: Peer): void {
   const sidecarPath = resolveSidecarPath(root, config);
   const checkoutPresent = hasGitMetadata(sidecarPath);
   const inbox = expandInbox(config, checkoutPresent ? sidecarPath : undefined);
@@ -48,8 +70,8 @@ export function cmdStatus(args: string[]): number {
     // missing, where `clone` would fix only the one line it sits under.
     statusLine("checkout", "missing — run `sidecar init`", "bad");
     printDaemonLine();
-    printLastSyncLine(root);
-    return 0;
+    printLastSyncLine(configPath);
+    return;
   }
 
   const branch = git(sidecarPath, ["branch", "--show-current"]).stdout.trim();
@@ -62,7 +84,7 @@ export function cmdStatus(args: string[]): number {
   else statusLine("branch", `${branch} — not the inbox branch; sync will switch back`, "attn");
   statusLine("dirty", dirty ? "yes" : "no", dirty ? "attn" : "quiet");
   printDaemonLine();
-  printLastSyncLine(root);
+  printLastSyncLine(configPath);
 
   const pending = pendingStatusInboxBranches(sidecarPath, config);
   if (pending.length) {
@@ -71,17 +93,16 @@ export function cmdStatus(args: string[]): number {
   } else {
     statusLine("pending inbox", "none", "quiet");
   }
-  return 0;
 }
 
-function cmdStatusJson(): number {
-  const [root, config] = loadProject();
+function statusPayload({ root, name, config, configPath }: Peer): Record<string, unknown> {
   const sidecarPath = resolveSidecarPath(root, config);
   const checkoutPresent = hasGitMetadata(sidecarPath);
   const inbox = expandInbox(config, checkoutPresent ? sidecarPath : undefined);
   const branch = checkoutPresent ? git(sidecarPath, ["branch", "--show-current"]).stdout.trim() : undefined;
-  const payload = {
+  return {
     root,
+    peer: name,
     sidecarPath,
     standalone: isStandalone(config),
     remote: config.remote,
@@ -92,11 +113,9 @@ function cmdStatusJson(): number {
     currentBranch: branch || undefined,
     dirty: checkoutPresent ? Boolean(git(sidecarPath, ["status", "--porcelain"]).stdout.trim()) : undefined,
     daemon: daemonHealth().text,
-    lastSyncAt: readInstances().find((instance) => instance.root === root)?.lastSyncAt,
+    lastSyncAt: readInstances().find((instance) => instance.configPath === configPath)?.lastSyncAt,
     pendingInbox: checkoutPresent ? pendingStatusInboxBranches(sidecarPath, config) : undefined,
   };
-  console.log(JSON.stringify(payload, null, 2));
-  return 0;
 }
 
 function pendingStatusInboxBranches(sidecarPath: string, config: SidecarConfig): string[] {
@@ -141,8 +160,8 @@ function printDaemonLine(): void {
   statusLine("daemon", health.text, health.role);
 }
 
-function printLastSyncLine(root: string): void {
-  const lastSyncAt = readInstances().find((instance) => instance.root === root)?.lastSyncAt;
+function printLastSyncLine(configPath: string): void {
+  const lastSyncAt = readInstances().find((instance) => instance.configPath === configPath)?.lastSyncAt;
   if (!lastSyncAt) {
     statusLine("last sync", "never", "quiet");
     return;
@@ -161,28 +180,41 @@ function printLastSyncLine(root: string): void {
 export function cmdHealth(args: string[]): number {
   const parsed = parseOptions(args, {
     boolean: new Set(["--json", "--no-fetch"]),
-    value: new Set(),
+    value: new Set(["--peer"]),
   });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar health [--json] [--no-fetch]");
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar health [--json] [--no-fetch] [--peer name]");
 
-  const [root, config] = loadProject();
+  const peers = loadPeers(selectedPeer(parsed));
+  if (parsed.flags.has("--json")) {
+    const entries = peers.map((peer) => fleetHealthEntries(peer, !parsed.flags.has("--no-fetch")));
+    console.log(JSON.stringify(entries.length === 1 ? entries[0] : entries, null, 2));
+    return 0;
+  }
+  for (const peer of peers) {
+    announcePeer(peer, peers);
+    printPeerHealth(peer, !parsed.flags.has("--no-fetch"));
+  }
+  return 0;
+}
+
+function fleetHealthEntries({ root, config }: Peer, refresh: boolean): ReturnType<typeof readFleetHealth> {
   const sidecarPath = requireSidecarCheckout(root, config);
   // A stale view is worse than a slow one — it would report a machine as fine
   // hours after it started failing. `--no-fetch` is for reading offline.
-  if (!parsed.flags.has("--no-fetch")) fetch(sidecarPath, true, false);
-  const entries = readFleetHealth(sidecarPath);
+  if (refresh) fetch(sidecarPath, true, false);
+  return readFleetHealth(sidecarPath);
+}
 
-  if (parsed.flags.has("--json")) {
-    console.log(JSON.stringify(entries, null, 2));
-    return 0;
-  }
+function printPeerHealth(peer: Peer, refresh: boolean): void {
+  const { config } = peer;
+  const entries = fleetHealthEntries(peer, refresh);
 
   console.log(`${paint("label", "remote:")} ${paint("brand", config.remote)}`);
   console.log(`${paint("label", "fleet: ")} ${summarizeHealthStates(entries.map((entry) => entry.state))}`);
   if (!entries.length) {
     console.log("");
     console.log(paint("quiet", "no checkout has reported yet; each one publishes on its next sync"));
-    return 0;
+    return;
   }
 
   const width = "checkout:".length;
@@ -195,6 +227,7 @@ export function cmdHealth(args: string[]): number {
     if (record.message) line("detail", record.message);
     if (record.consecutiveFailures > 1) line("failures", `${record.consecutiveFailures} in a row`, "attn");
     if (record.root) line("checkout", record.root);
+    if (record.peer) line("peer", record.peer);
     if (record.inbox) line("inbox", record.inbox);
     line("reported", formatTimestampPair(record.updatedAt));
     // Only worth a line when it isn't the reported time already — on a healthy
@@ -206,7 +239,6 @@ export function cmdHealth(args: string[]): number {
     }
     if (record.version) line("version", record.version, "quiet");
   }
-  return 0;
 }
 
 /** Red for a machine reporting its own failure, bold yellow for one gone quiet. */
@@ -247,6 +279,8 @@ export function cmdInstances(args: string[]): number {
   for (const status of statuses) {
     console.log("");
     console.log(paint("repo", status.root));
+    const peer = instancePeer(status);
+    if (peer !== DEFAULT_PEER) line("peer", peer, "brand");
     line("sidecar", status.sidecarPath, "brand");
     line("remote", status.remote, "brand");
     line("branch", status.currentBranch || "(unknown)");

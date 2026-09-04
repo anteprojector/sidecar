@@ -1,6 +1,6 @@
 // The sync-facing commands: snapshot, sync, merge, and the redaction pair
 // (redactions preview, redact clean filter). Thin wrappers — the real work
-// lives in sync.ts.
+// lives in sync.ts. Each acts on every peer the command was pointed at.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +8,14 @@ import path from "node:path";
 import { colorLevel, stripColor } from "./color.js";
 import { SidecarError, getValue, nowIso, parseOptions } from "./util.js";
 import { ensureCommitIdentity, git, gitRaw } from "./git.js";
-import { expandInbox, loadProject, redactionModeConfigValue, requireSidecarCheckout } from "./config.js";
+import {
+  type Peer,
+  expandInbox,
+  loadPeers,
+  redactionModeConfigValue,
+  requireSidecarCheckout,
+  selectedPeer,
+} from "./config.js";
 import { registerCurrentInstance, withSyncLock } from "./state.js";
 import {
   LOCAL_SYNC_ENV,
@@ -25,47 +32,73 @@ import {
   syncProject,
 } from "./sync.js";
 import { DEFAULT_REDACTION_MODE, NO_REDACT_PRAGMA } from "./redaction.js";
+import { announcePeer } from "./ui.js";
 
 export function cmdSnapshot(args: string[]): number {
   const parsed = parseOptions(args, {
     boolean: new Set(["--push"]),
-    value: new Set(["-m", "--message"]),
+    value: new Set(["-m", "--message", "--peer"]),
   });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar snapshot [--push] [-m message]");
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar snapshot [--push] [-m message] [--peer name]");
 
-  const [root, config] = loadProject();
-  const sidecarPath = requireSidecarCheckout(root, config);
-  // Snapshotting while a daemon sync is mid-merge would commit on whatever
-  // branch the merge has checked out, so take the same lock syncs use.
-  withSyncLock(root, "throw", () => {
-    const inbox = expandInbox(config, sidecarPath);
-    ensureCommitIdentity(sidecarPath);
-    ensureInboxBranch(sidecarPath, config, inbox);
-    const committed = snapshot(
-      sidecarPath,
-      root,
-      inbox,
-      getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined,
-      config.redaction,
-    );
-    if (committed && parsed.flags.has("--push")) {
-      syncBranchBeforePush(sidecarPath, inbox);
-      pushBranch(sidecarPath, inbox);
-    }
-  });
+  const peers = loadPeers(selectedPeer(parsed));
+  for (const peer of peers) {
+    announcePeer(peer, peers);
+    const { root, config } = peer;
+    const sidecarPath = requireSidecarCheckout(root, config);
+    // Snapshotting while a daemon sync is mid-merge would commit on whatever
+    // branch the merge has checked out, so take the same lock syncs use.
+    withSyncLock(root, peer.name, "throw", () => {
+      const inbox = expandInbox(config, sidecarPath);
+      ensureCommitIdentity(sidecarPath);
+      ensureInboxBranch(sidecarPath, config, inbox);
+      const committed = snapshot(
+        sidecarPath,
+        root,
+        inbox,
+        getValue(parsed, "--message", getValue(parsed, "-m", "")) || undefined,
+        config.redaction,
+      );
+      if (committed && parsed.flags.has("--push")) {
+        syncBranchBeforePush(sidecarPath, inbox);
+        pushBranch(sidecarPath, inbox);
+      }
+    });
+  }
   return 0;
 }
 
 export function cmdSync(args: string[]): number {
   const parsed = parseOptions(args, {
     boolean: new Set(["--no-snapshot", "--soft", "--local"]),
-    value: new Set(["-m", "--message"]),
+    value: new Set(["-m", "--message", "--peer"]),
   });
   if (parsed.positional.length) {
-    throw new SidecarError("usage: sidecar sync [--local] [--no-snapshot] [--soft] [-m message]");
+    throw new SidecarError("usage: sidecar sync [--local] [--no-snapshot] [--soft] [-m message] [--peer name]");
   }
 
-  const [root, config] = loadProject();
+  // Peers never interact, so one failing must not stop the rest: every peer
+  // gets its turn, and the failures are reported together at the end.
+  const peers = loadPeers(selectedPeer(parsed));
+  const failed: string[] = [];
+  for (const peer of peers) {
+    announcePeer(peer, peers);
+    try {
+      syncPeer(peer, parsed);
+    } catch (error) {
+      if (peers.length === 1) throw error;
+      failed.push(peer.name);
+      console.error(`sidecar: ${peer.name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (failed.length) {
+    throw new SidecarError(`${failed.length} of ${peers.length} peers failed to sync: ${failed.join(", ")}`);
+  }
+  return 0;
+}
+
+function syncPeer(peer: Peer, parsed: ReturnType<typeof parseOptions>): void {
+  const { root, config } = peer;
   // A soft sync is a request, not a demand: the daemon issues them, and one
   // that loses the lock to a running sync can no-op because the interval or
   // watcher will simply request again. A manual sync must never pretend.
@@ -75,7 +108,7 @@ export function cmdSync(args: string[]): number {
   let stage = "start";
   let synced: boolean;
   try {
-    synced = withSyncLock(root, soft ? "skip" : "throw", () => {
+    synced = withSyncLock(root, peer.name, soft ? "skip" : "throw", () => {
       syncProject(root, config, {
         snapshot: !parsed.flags.has("--no-snapshot"),
         // --local settles this machine and stops there: no fetch, no push, and
@@ -101,32 +134,35 @@ export function cmdSync(args: string[]): number {
     registerCurrentInstance(root, config, { event: "sync", lastSyncAt: nowIso() });
     reportSyncHealth(root, config, { status: "ok" });
   }
-  return 0;
 }
 
 export function cmdMerge(args: string[]): number {
   const parsed = parseOptions(args, {
     boolean: new Set(["--fork-files", "--llm", "--no-push"]),
-    value: new Set(),
+    value: new Set(["--peer"]),
   });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar merge [--fork-files] [--no-push]");
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar merge [--fork-files] [--no-push] [--peer name]");
   if (parsed.flags.has("--llm")) {
     throw new SidecarError("--llm is reserved for a configured resolver; use --fork-files for now");
   }
-  const [root, config] = loadProject();
-  if (config.resolve === "fork" && !parsed.flags.has("--fork-files")) {
-    console.log("sidecar: conflicts will stop the merge; pass --fork-files to preserve all versions");
-  }
+  const peers = loadPeers(selectedPeer(parsed));
+  for (const peer of peers) {
+    announcePeer(peer, peers);
+    const { root, config } = peer;
+    if (config.resolve === "fork" && !parsed.flags.has("--fork-files")) {
+      console.log("sidecar: conflicts will stop the merge; pass --fork-files to preserve all versions");
+    }
 
-  const sidecarPath = requireSidecarCheckout(root, config);
-  // Merging runs git status against the checkout; repair a stale filter
-  // command first so required=true doesn't wedge it.
-  ensureRedactionFilter(sidecarPath, config.redaction);
-  mergeInboxBranches(sidecarPath, config, {
-    forkFiles: parsed.flags.has("--fork-files"),
-    push: !parsed.flags.has("--no-push"),
-    remote: true,
-  });
+    const sidecarPath = requireSidecarCheckout(root, config);
+    // Merging runs git status against the checkout; repair a stale filter
+    // command first so required=true doesn't wedge it.
+    ensureRedactionFilter(sidecarPath, config.redaction);
+    mergeInboxBranches(sidecarPath, config, {
+      forkFiles: parsed.flags.has("--fork-files"),
+      push: !parsed.flags.has("--no-push"),
+      remote: true,
+    });
+  }
   return 0;
 }
 
@@ -134,13 +170,21 @@ export function cmdMerge(args: string[]): number {
 // worktree keeps originals and redaction is deterministic, so this is always
 // recomputable — no redaction log to store or dedupe.
 export function cmdRedactions(args: string[]): number {
-  const parsed = parseOptions(args, { boolean: new Set(), value: new Set() });
-  if (parsed.positional.length) throw new SidecarError("usage: sidecar redactions");
-  const [root, config] = loadProject();
+  const parsed = parseOptions(args, { boolean: new Set(), value: new Set(["--peer"]) });
+  if (parsed.positional.length) throw new SidecarError("usage: sidecar redactions [--peer name]");
+  const peers = loadPeers(selectedPeer(parsed));
+  for (const peer of peers) {
+    announcePeer(peer, peers);
+    printPeerRedactions(peer);
+  }
+  return 0;
+}
+
+function printPeerRedactions({ root, config }: Peer): void {
   const sidecarPath = requireSidecarCheckout(root, config);
   if (config.redaction === "none") {
     console.log('redaction is disabled (redaction = "none" in .sidecar)');
-    return 0;
+    return;
   }
 
   // quotePath off so non-ASCII names come back verbatim; unmerged entries
@@ -166,7 +210,7 @@ export function cmdRedactions(args: string[]): number {
 
   if (!shown) {
     console.log(`no redactions pending (mode: ${config.redaction})`);
-    return 0;
+    return;
   }
   console.log(
     `\n${items} redaction(s) in ${shown} file(s) will be pushed this way (mode: ${config.redaction}).`,
@@ -174,9 +218,7 @@ export function cmdRedactions(args: string[]): number {
   console.log(
     `local files are untouched; add "${NO_REDACT_PRAGMA}" to a file's first lines to push it verbatim`,
   );
-  return 0;
 }
-
 function printRedactionDiff(original: string, redacted: string): void {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-redactions-"));
   try {

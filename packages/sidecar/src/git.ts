@@ -104,6 +104,25 @@ export function gitCommonDir(root: string): string {
   return commonDir;
 }
 
+/**
+ * The repo's private ignore file, `.git/info/exclude`: entries there never
+ * reach the committed tree. Undefined where there is no git dir to hold one.
+ */
+export function gitExcludePath(root: string): string | undefined {
+  const commonDir = gitCommonDirOptional(root);
+  return commonDir ? path.join(commonDir, "info", "exclude") : undefined;
+}
+
+/** Whether git ignores `relativePath` under `root`, by any rule anywhere. */
+export function isGitIgnored(root: string, relativePath: string): boolean {
+  return git(root, ["check-ignore", "-q", "--", relativePath], { check: false }).status === 0;
+}
+
+/** Whether `relativePath` is in the index — committed or staged — under `root`. */
+export function isGitTracked(root: string, relativePath: string): boolean {
+  return git(root, ["ls-files", "--error-unmatch", "--", relativePath], { check: false }).status === 0;
+}
+
 /** The shared git dir, or undefined where there is no git — a jj workspace. */
 function gitCommonDirOptional(root: string): string | undefined {
   const result = gitRaw(["-C", root, "rev-parse", "--git-common-dir"], { check: false });

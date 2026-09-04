@@ -3,6 +3,20 @@
 import fs from "node:fs";
 
 import { type Role, paint } from "./color.js";
+import { DEFAULT_PEER, type Peer } from "./config.js";
+
+/**
+ * Names the peer a fan-out command is about to act on. Silent for the one
+ * case that needs no name — a repo whose only peer is `.sidecar` — so a
+ * single-sidecar repo reads exactly as it did before peers existed.
+ */
+export function announcePeer(peer: Peer, peers: Peer[]): void {
+  const index = peers.indexOf(peer);
+  if (index > 0) console.log("");
+  if (peers.length > 1 || peer.name !== DEFAULT_PEER) {
+    console.log(`${paint("label", "peer:")} ${paint("brand", peer.name)}`);
+  }
+}
 
 /** One `label: value` row. The label is dim so the eye lands on the values. */
 export function labelLine(width: number, label: string, value: string, role?: Role, indent = ""): void {

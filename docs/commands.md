@@ -6,6 +6,7 @@ Every command and flag the CLI accepts. The most common ones first:
 sidecar init               # set up or join sidecar in a repo; prompts for a
                            # remote, or creates one with gh, when .sidecar is absent
 sidecar init <remote>      # set up sidecar non-interactively with a known remote
+sidecar init <remote> --peer notes   # add a second sidecar, .sidecar.notes, beside .sidecar
 sidecar deinit             # remove files and configuration created by sidecar init
 sidecar status             # show checkout, daemon health, last sync, pending work
 sidecar health             # show how every machine sharing this sidecar is syncing
@@ -21,6 +22,10 @@ sidecar update             # update the global install from npm now
 sidecar tail -f            # follow the machine-level sidecar log
 sidecar version            # print the installed version
 ```
+
+Every command acts on all of a repo's peers — `.sidecar` and any
+`.sidecar.<name>` beside it — unless `--peer <name>` picks one; `--peer
+default` is `.sidecar` itself. See [Peers](sync.md#peers-several-sidecars-in-one-repo).
 
 ## Full reference
 
@@ -39,16 +44,21 @@ repository yet becomes one when a remote is named: `sidecar init <remote>
 
 | flag | effect |
 |---|---|
-| `--path <dir>` | where the sidecar checkout lives (default `sidecar`); `.` means standalone |
+| `--peer <name>` | which sidecar this is: `default` for `.sidecar`, any other name for `.sidecar.<name>` beside it, with its own remote and checkout — see [Peers](sync.md#peers-several-sidecars-in-one-repo) |
+| `--path <dir>` | where the sidecar checkout lives (default `sidecar`, or the peer's name); `.` means standalone, and only `.sidecar` can be |
 | `--branch <name>` | canonical branch in the sidecar repo (default `main`) |
 | `--inbox <template>` | inbox branch template (default `sidecar-inbox/{user}/{random}`) |
 | `--redaction <mode>` | what gets redacted on push: `secrets+pii`, `secrets`, or `none` — defaults to `secrets`; see [redaction.md](redaction.md) |
 | `--resolve <mode>` | what a merge does when two machines edited one file: `fork` (default) keeps every version as separate files; `lww` keeps the newer write per path and names the dropped one in the manifest — see [Conflicts](sync.md#conflicts) |
 | `--debounce <duration>` | this repo's least time between remote round trips once edits land (`90s`, `10m`, `1h`, or seconds); the daemon's `--debounce` otherwise — see [Cadence](sync.md#cadence) |
-| `--interval <duration>` | this repo's most time between round trips while it is quiet; the daemon's `--interval` otherwise, which is also the floor |
+| `--interval <duration>` | this repo's most time between round trips while it is quiet, to within one daemon cycle; the daemon's `--interval` otherwise, which is also the floor |
+| `--ignored` | keep this peer out of the tree: its config file and checkout go in `.git/info/exclude` instead of the committed `.gitignore` |
 | `--no-clone` | write config and registration only; skip cloning |
 | `--no-bootstrap-main` | don't create the canonical branch on an empty remote |
 | `--local-install` | add `sidecarsync` to `devDependencies` (plus the bun/pnpm trust entry) so fresh clones self-register on install |
+
+A bare `sidecar init` with no remote and no `--peer` joins every peer the
+repo declares, which is what a fresh clone needs.
 
 `init` also adds the checkout to `.gitignore`, registers the repo with the
 global daemon, and (interactively) offers to install a missing global sidecar
@@ -60,13 +70,14 @@ machine's daemon on plain install, provided that machine has a global sidecar
 edits `package.json` without asking. When not attached to a terminal, every
 optional prompt defaults to no.
 
-### `sidecar deinit`
+### `sidecar deinit [--peer <name>]`
 
 Removes Sidecar from the current Git repository: the `.sidecar` config, the
 configured checkout, Sidecar-owned `.gitignore`, Git exclude, Zed search, and
 daemon registry entries. It preserves unrelated settings and does not touch
 `package.json` or installed dependencies. Outside a Git repository it warns,
-does nothing, and exits successfully.
+does nothing, and exits successfully. One peer at a time: a repo with several
+removes nothing until `--peer` names one.
 
 In a [standalone](standalone.md) repo there is no checkout to delete, so
 `deinit` instead unwires the redaction git filter and switches back to the
@@ -76,12 +87,14 @@ Any step `deinit` cannot complete — an unreadable config, a standalone repo
 it won't switch off its inbox branch — is listed in a closing warning so
 nothing is left behind silently.
 
-### `sidecar status`
+### `sidecar status [--json] [--peer <name>]`
 
-Shows checkout, daemon health, last sync time, and pending inbox branches.
-See [Reading `sidecar status`](#reading-sidecar-status) below.
+Shows checkout, daemon health, last sync time, and pending inbox branches,
+one section per peer. See [Reading `sidecar status`](#reading-sidecar-status)
+below. `--json` prints an array with one object per peer — a single entry
+when the repo has one peer or `--peer` names one.
 
-### `sidecar health [--json] [--no-fetch]`
+### `sidecar health [--json] [--no-fetch] [--peer <name>]`
 
 Shows how every machine sharing this sidecar is syncing — not just this one.
 Each checkout publishes a heartbeat on every sync, so a laptop that quietly
@@ -89,7 +102,7 @@ stopped contributing is visible from any other machine. `--json` prints the
 raw records; `--no-fetch` reads the refs already on disk instead of fetching
 first. See [Fleet health](#fleet-health) below.
 
-### `sidecar sync [--local] [--no-snapshot] [--soft] [-m|--message <text>]`
+### `sidecar sync [--local] [--no-snapshot] [--soft] [-m|--message <text>] [--peer <name>]`
 
 Snapshot local changes, settle this machine's other working copies of the
 same sidecar, push the inbox branch, merge all inbox branches into the
@@ -104,12 +117,12 @@ the daemon's) holds the repo's sync lock, `sync` fails immediately with
 no-ops and exits 0. That's what the daemon uses, since its next trigger
 retries anyway.
 
-### `sidecar snapshot [--push] [-m|--message <text>]`
+### `sidecar snapshot [--push] [-m|--message <text>] [--peer <name>]`
 
 Commit local sidecar changes to the inbox branch without merging anything.
 `--push` also pushes the inbox branch. Takes the same sync lock as `sync`.
 
-### `sidecar merge [--fork-files] [--no-push]`
+### `sidecar merge [--fork-files] [--no-push] [--peer <name>]`
 
 Merge remote inbox branches into the canonical branch. With the default
 `resolve = "fork"`, a conflict stops the merge unless `--fork-files` is
@@ -117,13 +130,13 @@ passed, which keeps every side as separate forked files. With
 `resolve = "lww"` the newer write per path wins and nothing stops. `--no-push`
 merges locally without pushing.
 
-### `sidecar redactions`
+### `sidecar redactions [--peer <name>]`
 
 Preview exactly what redaction changes: a per-file diff of local content
 against what is pushed, recomputed on demand from the working tree. See
 [redaction.md](redaction.md) for modes and the per-file opt-out pragma.
 
-### `sidecar clone [--if-missing]`
+### `sidecar clone [--if-missing] [--peer <name>]`
 
 Clone the configured sidecar repo (or update an existing checkout). In a repo
 with several working copies — git worktrees, jj workspaces — the checkout is

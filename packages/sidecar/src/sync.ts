@@ -29,12 +29,14 @@ import {
 } from "./git.js";
 import { packageVersion } from "./install.js";
 import {
+  DEFAULT_PEER,
   type SidecarConfig,
   checkoutRandom,
   expandInbox,
   inboxPrefix,
   isStandalone,
   matchesInboxPrefix,
+  peerConfigPath,
   readConfig,
   remoteBranchName,
   requireSidecarCheckout,
@@ -239,6 +241,7 @@ export function reportSyncHealth(root: string, config: SidecarConfig, outcome: H
     const identity: HealthIdentity = {
       machine: `${currentUser()}@${currentHost()}`,
       root,
+      peer: config.peer === DEFAULT_PEER ? undefined : config.peer,
       inbox: expandInbox(config, sidecarPath),
       version: packageVersion(),
     };
@@ -407,10 +410,17 @@ export function mergeInboxBranches(
 }
 
 function mainMatchesRemote(repo: string, config: SidecarConfig): boolean {
-  if (!branchExists(repo, config.branch) || !remoteRefExists(repo, config.branch)) return false;
-  const local = git(repo, ["rev-parse", `refs/heads/${config.branch}`]).stdout.trim();
-  const remote = git(repo, ["rev-parse", `refs/remotes/origin/${config.branch}`]).stdout.trim();
-  return local === remote;
+  const localRef = `refs/heads/${config.branch}`;
+  const remoteRef = `refs/remotes/origin/${config.branch}`;
+  const refs = new Map(
+    git(repo, ["for-each-ref", "--format=%(refname) %(objectname)", localRef, remoteRef])
+      .stdout.split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => line.split(" ", 2) as [string, string]),
+  );
+  const local = refs.get(localRef);
+  const remote = refs.get(remoteRef);
+  return local !== undefined && local === remote;
 }
 
 /** Whether any inbox branch still sits outside the local main branch. */
@@ -514,9 +524,11 @@ function familySidecarCheckout(root: string, config: SidecarConfig): string | un
   const primary = familyPrimaryRoot(root);
   if (!primary) return undefined;
 
+  // The same peer at the primary: a family shares one clone per peer, and a
+  // primary that declares this peer with another remote is not ours to populate.
   let primaryConfig: SidecarConfig;
   try {
-    primaryConfig = readConfig(path.join(primary, ".sidecar"));
+    primaryConfig = readConfig(peerConfigPath(primary, config.peer));
   } catch {
     return undefined;
   }
@@ -566,7 +578,7 @@ function checkoutNeedsFamilyRelink(root: string, config: SidecarConfig, sidecarP
   const primary = familyPrimaryRoot(root);
   if (!primary) return false;
   try {
-    const primaryConfig = readConfig(path.join(primary, ".sidecar"));
+    const primaryConfig = readConfig(peerConfigPath(primary, config.peer));
     return primaryConfig.remote === config.remote;
   } catch {
     return false;
@@ -810,8 +822,15 @@ export function ensureMainBranch(repo: string, config: SidecarConfig): void {
 
   if (!remoteRefExists(repo, config.branch)) return;
   const remoteBranch = `origin/${config.branch}`;
-  if (isAncestor(repo, remoteBranch, "HEAD")) return;
-  if (isAncestor(repo, "HEAD", remoteBranch)) {
+  // One symmetric-difference walk tells us both ancestry directions. The
+  // left count is commits unique to HEAD; the right count is commits unique
+  // to the remote branch.
+  const [localOnly, remoteOnly] = git(repo, ["rev-list", "--left-right", "--count", `HEAD...${remoteBranch}`])
+    .stdout.trim()
+    .split(/\s+/)
+    .map(Number);
+  if (remoteOnly === 0) return;
+  if (localOnly === 0) {
     git(repo, ["merge", "--ff-only", remoteBranch]);
     return;
   }
@@ -899,10 +918,13 @@ export function snapshot(
   // A filter change (new mode, moved node/CLI) doesn't invalidate git's stat
   // cache, so already-committed files would keep their old redaction state
   // forever; renormalize forces every tracked file back through the filter.
-  if (ensureRedactionFilter(repo, redactionMode) && hasAnyCommit(repo)) {
+  // Deletions are staged first: renormalize stats every path still in the
+  // index, and a tracked file gone from the working tree would fail it.
+  const rewired = ensureRedactionFilter(repo, redactionMode);
+  git(repo, ["add", "-A"]);
+  if (rewired && hasAnyCommit(repo)) {
     git(repo, ["add", "--renormalize", "."]);
   }
-  git(repo, ["add", "-A"]);
   if (git(repo, ["diff", "--cached", "--quiet"], { check: false }).status === 0) {
     console.log("no sidecar changes to snapshot");
     return false;
@@ -921,10 +943,41 @@ export function snapshot(
     body.push(`main-head: ${mainHead.status === 0 ? mainHead.stdout.trim() : "unborn"}`);
   }
   body.push(`inbox: ${inbox}`);
+  // When each file last changed, for last-writer-wins: a snapshot commits a
+  // whole debounce window of edits at once, so its own time can run minutes
+  // late for any one of them, and the merge needs the write, not the commit.
+  body.push(...writtenTrailers(repo, staged));
   git(repo, ["commit", "-m", body.join("\n")]);
   console.log(`committed sidecar snapshot to ${paint("brand", inbox)}`);
   reportRedactions(repo, staged, redactionMode);
   return true;
+}
+
+const WRITTEN_TRAILER = "written:";
+// Past this many paths the trailers stop and the commit time stands in: a
+// build cache's snapshot can touch thousands, and a message that long serves
+// nobody.
+const WRITTEN_TRAILER_LIMIT = 500;
+
+/**
+ * One `written: <unix seconds> <path>` line per staged file, from its mtime.
+ * Deleted paths are not in `staged` — there is no file left to ask — and a
+ * path with a newline could not be read back, so both fall back to the
+ * commit time at the merge.
+ */
+function writtenTrailers(repo: string, staged: string[]): string[] {
+  if (staged.length > WRITTEN_TRAILER_LIMIT) return [];
+  const trailers: string[] = [];
+  for (const relPath of staged) {
+    if (relPath.includes("\n")) continue;
+    try {
+      const seconds = Math.floor(fs.lstatSync(path.join(repo, relPath)).mtimeMs / 1000);
+      if (seconds > 0) trailers.push(`${WRITTEN_TRAILER} ${seconds} ${relPath}`);
+    } catch {
+      // Gone between staging and now; the commit time stands in.
+    }
+  }
+  return trailers;
 }
 
 // Surfaces what the clean filter changed in this snapshot, so redaction is
@@ -1195,11 +1248,12 @@ type ConflictManifest = {
 };
 
 /**
- * Last writer wins, per path: the side whose most recent commit touching the
- * path is newer keeps the file, the other side's blob is dropped from the tree
- * and named in the manifest (it stays reachable in the inbox branch that
- * carried it). A tie goes to the incoming branch — the merge was asked to
- * bring it in. A side that deleted the path wins by deleting it.
+ * Last writer wins, per path: the side that wrote the file more recently — by
+ * the change time its snapshot recorded, see `lastWriteAt` — keeps it, the
+ * other side's blob is dropped from the tree and named in the manifest (it
+ * stays reachable through the merge's second parent). A tie goes to the
+ * incoming branch — the merge was asked to bring it in. A side that deleted
+ * the path wins by deleting it.
  */
 export function resolveLastWriterWins(repo: string, canonicalBranch: string, remoteBranch: string): void {
   const conflicts = unmergedPaths(repo);
@@ -1252,10 +1306,23 @@ type LastWriterManifest = {
   paths: Array<{ path: string; kept: string; kept_at: number; dropped: string; dropped_oid: string | null }>;
 };
 
-/** Unix time of the last commit on `ref` that touched the path; 0 when none did (the path was never committed there). */
-function lastWriteAt(repo: string, ref: string, filePath: string): number {
-  const result = git(repo, ["log", "-1", "--format=%ct", ref, "--", filePath], { check: false });
-  return Number(result.stdout.trim()) || 0;
+/**
+ * When the path was last written on `ref`: the change time its snapshot
+ * recorded, or the time of the last commit touching it when that commit
+ * recorded none — a deletion, a snapshot too large for trailers, a commit
+ * made by hand. 0 when no commit on the ref touched the path.
+ */
+export function lastWriteAt(repo: string, ref: string, filePath: string): number {
+  const result = git(repo, ["log", "-1", "--format=%ct%n%B", ref, "--", filePath], { check: false });
+  const [committed = "", ...body] = result.stdout.split("\n");
+  const suffix = ` ${filePath}`;
+  for (const line of body) {
+    if (!line.startsWith(WRITTEN_TRAILER) || !line.endsWith(suffix)) continue;
+    // A longer path ending in this one leaves non-digits here and is skipped.
+    const seconds = Number(line.slice(WRITTEN_TRAILER.length, -suffix.length).trim());
+    if (Number.isInteger(seconds) && seconds > 0) return seconds;
+  }
+  return Number(committed.trim()) || 0;
 }
 
 type ConflictVersion = {
@@ -1318,18 +1385,26 @@ export function showStage(repo: string, stage: number, conflictPath: string): Bu
  */
 export function pendingInboxBranches(repo: string, config: SidecarConfig): string[] {
   const prefix = inboxPrefix(config);
-  const local = refNames(repo, "refs/heads/").filter((branch) => matchesInboxPrefix(prefix, branch));
-  const claimed = new Set(local);
-  const remote = refNames(repo, "refs/remotes/origin/").filter((ref) => {
-    const branch = remoteBranchName(ref);
-    return ref !== "origin/HEAD" && matchesInboxPrefix(prefix, branch) && !claimed.has(branch);
-  });
-  return [...local, ...remote].sort();
-}
-
-function refNames(repo: string, namespace: string): string[] {
-  return git(repo, ["for-each-ref", "--format=%(refname:short)", namespace])
+  const refs = git(repo, [
+    "for-each-ref",
+    "--format=%(refname)",
+    "refs/heads/",
+    "refs/remotes/origin/",
+  ])
     .stdout.split(/\r?\n/)
     .map((ref) => ref.trim())
     .filter(Boolean);
+  const local = refs
+    .filter((ref) => ref.startsWith("refs/heads/"))
+    .map((ref) => ref.slice("refs/heads/".length))
+    .filter((branch) => matchesInboxPrefix(prefix, branch));
+  const claimed = new Set(local);
+  const remote = refs
+    .filter((ref) => ref.startsWith("refs/remotes/origin/"))
+    .map((ref) => ref.slice("refs/remotes/".length))
+    .filter((ref) => {
+      const branch = remoteBranchName(ref);
+      return ref !== "origin/HEAD" && matchesInboxPrefix(prefix, branch) && !claimed.has(branch);
+    });
+  return [...local, ...remote].sort();
 }
